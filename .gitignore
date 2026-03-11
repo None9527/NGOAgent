@@ -1,0 +1,27 @@
+# Build output
+ngoagent
+*.exe
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Test/forge scripts
+forge_*.py
+heartbeat.py
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug artifacts
+debug_*
