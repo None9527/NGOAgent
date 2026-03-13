@@ -8,9 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 )
 
 // TaskPlanTool manages structured task plans, checklists, and walkthroughs.
@@ -195,11 +196,11 @@ func (t *UpdateProjectContextTool) Execute(ctx context.Context, args map[string]
 
 // SaveMemoryTool saves knowledge to the cross-session persistent store.
 type SaveMemoryTool struct {
-	homeDir string
+	store *knowledge.Store
 }
 
-func NewSaveMemoryTool(homeDir string) *SaveMemoryTool {
-	return &SaveMemoryTool{homeDir: homeDir}
+func NewSaveMemoryTool(store *knowledge.Store) *SaveMemoryTool {
+	return &SaveMemoryTool{store: store}
 }
 
 func (t *SaveMemoryTool) Name() string        { return "save_memory" }
@@ -225,21 +226,29 @@ func (t *SaveMemoryTool) Execute(ctx context.Context, args map[string]any) (dtoo
 		return dtool.ToolResult{Output: "Error: 'key' and 'content' are required"}, nil
 	}
 
-	// Write to ~/.ngoagent/knowledge/<key>.md
-	dir := filepath.Join(t.homeDir, "knowledge")
-	os.MkdirAll(dir, 0755)
+	// Parse optional tags
+	var tags []string
+	if rawTags, ok := args["tags"].([]any); ok {
+		for _, rt := range rawTags {
+			tags = append(tags, fmt.Sprint(rt))
+		}
+	}
 
-	// Sanitize key for filename
-	safeKey := strings.ReplaceAll(key, " ", "_")
-	safeKey = strings.ReplaceAll(safeKey, "/", "_")
+	// Build summary: first 200 chars of content
+	summary := content
+	if len(summary) > 200 {
+		summary = summary[:200] + "..."
+	}
 
-	path := filepath.Join(dir, safeKey+".md")
-
-	entry := fmt.Sprintf("# %s\n\n%s\n\n---\nSaved: %s\n", key, content, time.Now().Format(time.RFC3339))
-
-	if err := os.WriteFile(path, []byte(entry), 0644); err != nil {
+	item := &knowledge.Item{
+		Title:   key,
+		Summary: summary,
+		Content: content,
+		Tags:    tags,
+	}
+	if err := t.store.Save(item); err != nil {
 		return dtool.ToolResult{Output: fmt.Sprintf("Error saving memory: %v", err)}, nil
 	}
 
-	return dtool.ToolResult{Output: fmt.Sprintf("Memory saved: %s → %s", key, path)}, nil
+	return dtool.ToolResult{Output: fmt.Sprintf("Memory saved: %s → %s/%s/", key, t.store.BaseDir(), item.ID)}, nil
 }

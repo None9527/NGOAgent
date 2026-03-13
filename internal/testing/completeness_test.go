@@ -156,7 +156,7 @@ func TestWorkspaceStoreMethods(t *testing.T) {
 }
 
 func TestSandboxManagerMethods(t *testing.T) {
-	mgr := sandbox.NewManager()
+	mgr := sandbox.NewManager("")
 
 	// ListActive (should be empty)
 	active := mgr.ListActive()
@@ -277,9 +277,7 @@ func TestPersistenceHistoryStore(t *testing.T) {
 // ═══════════════════════════════════════════
 
 func TestFacadeSessionManager(t *testing.T) {
-	db, _ := persistence.Open(":memory:")
-	repo := persistence.NewRepository(db)
-	mgr := service.NewSessionManager(repo)
+	mgr := service.NewSessionManager(&mockSessionRepo{})
 
 	// New
 	sess := mgr.New("test session")
@@ -324,9 +322,9 @@ func TestFacadeModelManager(t *testing.T) {
 }
 
 func TestFacadeToolAdmin(t *testing.T) {
-	reg := tool.NewRegistry()
-	reg.Register(&tool.GlobTool{})
-	admin := service.NewToolAdmin(reg)
+	admin := service.NewToolAdmin(&mockToolRegistry{tools: []service.ToolInfo{
+		{Name: "glob", Enabled: true},
+	}})
 
 	tools := admin.List()
 	if len(tools) == 0 {

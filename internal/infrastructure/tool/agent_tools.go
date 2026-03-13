@@ -169,7 +169,7 @@ func (t *ForgeTool) doSetup(ctx context.Context, args map[string]any) (dtool.Too
 			if cmdStr == "" {
 				continue
 			}
-			execCmd := exec.CommandContext(ctx, "bash", "-c", cmdStr)
+			execCmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
 			execCmd.Dir = sandboxPath
 			if output, err := execCmd.CombinedOutput(); err != nil {
 				return dtool.ToolResult{Output: fmt.Sprintf("Setup command failed: %s\nOutput: %s\nError: %v", cmdStr, string(output), err)}, nil
@@ -229,7 +229,7 @@ func (t *ForgeTool) doAssert(ctx context.Context, args map[string]any) (dtool.To
 			cmdStr, _ := cmd.(string)
 			total++
 			execCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			execCmd := exec.CommandContext(execCtx, "bash", "-c", cmdStr)
+			execCmd := exec.CommandContext(execCtx, "bash", "-lc", cmdStr)
 			execCmd.Dir = sandboxPath
 			if err := execCmd.Run(); err == nil {
 				passed++

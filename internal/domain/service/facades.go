@@ -2,12 +2,13 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/tool"
 )
 
 // ═══════════════════════════════════════════
@@ -18,20 +19,50 @@ import (
 type ChatEngine struct {
 	loop    *AgentLoop
 	sessMgr *SessionManager
+	history HistoryPersister
 }
 
 // NewChatEngine creates a ChatEngine.
-func NewChatEngine(loop *AgentLoop, sessMgr *SessionManager) *ChatEngine {
-	return &ChatEngine{loop: loop, sessMgr: sessMgr}
+func NewChatEngine(loop *AgentLoop, sessMgr *SessionManager, history HistoryPersister) *ChatEngine {
+	return &ChatEngine{loop: loop, sessMgr: sessMgr, history: history}
 }
 
 // Chat sends a user message and runs the agent loop.
+// If sessionID is provided and the loop has no history, load from DB (session resume).
 func (ce *ChatEngine) Chat(ctx context.Context, sessionID, message string) error {
-	// Restore session if needed
 	if sessionID != "" {
 		ce.sessMgr.Activate(sessionID)
+		// Session resume: load history from DB if loop is empty
+		if ce.history != nil && len(ce.loop.GetHistory()) == 0 {
+			exports, err := ce.history.LoadAll(sessionID)
+			if err == nil && len(exports) > 0 {
+				msgs := make([]llm.Message, len(exports))
+				for i, e := range exports {
+					msgs[i] = llm.Message{
+						Role:       e.Role,
+						Content:    e.Content,
+						ToolCallID: e.ToolCallID,
+					}
+					if e.ToolCalls != "" {
+						json.Unmarshal([]byte(e.ToolCalls), &msgs[i].ToolCalls)
+					}
+				}
+				ce.loop.SetHistory(msgs)
+				log.Printf("[session] Resumed %d messages for session %s", len(msgs), sessionID)
+			}
+		}
 	}
-	return ce.loop.Run(ctx, message)
+	err := ce.loop.Run(ctx, message)
+	// Bump updated_at so sidebar re-sorts by most recent activity
+	ce.TouchSession(sessionID)
+	return err
+}
+
+// TouchSession updates the session's updated_at so it sorts correctly in the sidebar.
+func (ce *ChatEngine) TouchSession(id string) {
+	if ce.sessMgr.repo != nil {
+		_ = ce.sessMgr.repo.Touch(id)
+	}
 }
 
 // RetryLastRun re-runs the last assistant turn by removing it and re-generating.
@@ -64,16 +95,45 @@ func (ce *ChatEngine) StopChat() {
 	ce.loop.Stop()
 }
 
+// DeleteSession removes a session's history and metadata.
+// This is the kernel-owned operation for full session teardown.
+func (ce *ChatEngine) DeleteSession(id string) error {
+	if ce.history != nil {
+		if err := ce.history.DeleteSession(id); err != nil {
+			log.Printf("[session] delete history error: %v", err)
+		}
+	}
+	return ce.sessMgr.Delete(id)
+}
+
 // ═══════════════════════════════════════════
 // SessionManager — session CRUD
 // ═══════════════════════════════════════════
+
+// SessionRepo is the domain interface for session persistence.
+type SessionRepo interface {
+	CreateConversation(channel, title string) (id string, err error)
+	ListConversations(limit, offset int) ([]ConversationInfo, error)
+	UpdateTitle(id, title string) error
+	Touch(id string) error
+	DeleteConversation(id string) error
+}
+
+// ConversationInfo holds minimal conversation metadata.
+type ConversationInfo struct {
+	ID        string
+	Title     string
+	Channel   string
+	CreatedAt string // RFC3339, session creation time
+	UpdatedAt string // RFC3339, last activity time (used for sidebar grouping)
+}
 
 // SessionManager manages conversation sessions.
 type SessionManager struct {
 	mu       sync.RWMutex
 	sessions map[string]*SessionState
 	active   string
-	repo     *persistence.Repository
+	repo     SessionRepo
 }
 
 // SessionState holds an in-memory session.
@@ -84,22 +144,39 @@ type SessionState struct {
 }
 
 // NewSessionManager creates a session manager.
-func NewSessionManager(repo *persistence.Repository) *SessionManager {
+func NewSessionManager(repo SessionRepo) *SessionManager {
 	return &SessionManager{
 		sessions: make(map[string]*SessionState),
 		repo:     repo,
 	}
 }
 
-// New creates a new session.
+// New creates a new in-memory session (no DB write).
 func (sm *SessionManager) New(title string) *SessionState {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	id := fmt.Sprintf("s_%d", len(sm.sessions)+1)
+	id := uuid.New().String()
 	s := &SessionState{ID: id, Title: title}
 	sm.sessions[id] = s
 	sm.active = id
 	return s
+}
+
+// CreatePersisted creates a session in DB and memory, then activates it.
+// Returns the DB-generated ID.
+func (sm *SessionManager) CreatePersisted(channel, title string) (string, error) {
+	if sm.repo == nil {
+		return "", fmt.Errorf("no session repo")
+	}
+	id, err := sm.repo.CreateConversation(channel, title)
+	if err != nil {
+		return "", err
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.sessions[id] = &SessionState{ID: id, Title: title}
+	sm.active = id
+	return id, nil
 }
 
 // Get retrieves a session by ID.
@@ -121,17 +198,30 @@ func (sm *SessionManager) List() []*SessionState {
 	return result
 }
 
+// ListFromRepo queries the persistent store for all sessions with their titles.
+// Returns an empty slice if repo is unavailable.
+func (sm *SessionManager) ListFromRepo(limit, offset int) ([]ConversationInfo, error) {
+	if sm.repo == nil {
+		return nil, nil
+	}
+	return sm.repo.ListConversations(limit, offset)
+}
+
 // Delete removes a session.
 func (sm *SessionManager) Delete(id string) error {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if _, ok := sm.sessions[id]; !ok {
-		return fmt.Errorf("session not found: %s", id)
+	// Remove from persistent store first (works even if not in memory)
+	if sm.repo != nil {
+		if err := sm.repo.DeleteConversation(id); err != nil {
+			return err
+		}
 	}
+	// Remove from in-memory map if present
+	sm.mu.Lock()
 	delete(sm.sessions, id)
 	if sm.active == id {
 		sm.active = ""
 	}
+	sm.mu.Unlock()
 	return nil
 }
 
@@ -140,6 +230,18 @@ func (sm *SessionManager) Activate(id string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.active = id
+}
+
+// SetTitle updates the title of an in-memory session and persists it.
+func (sm *SessionManager) SetTitle(id, title string) {
+	sm.mu.Lock()
+	if s, ok := sm.sessions[id]; ok {
+		s.Title = title
+	}
+	sm.mu.Unlock()
+	if sm.repo != nil {
+		_ = sm.repo.UpdateTitle(id, title)
+	}
 }
 
 // Active returns the current active session ID.
@@ -182,18 +284,31 @@ func (mm *ModelManager) GetCurrent() string {
 // ToolAdmin — tool administration
 // ═══════════════════════════════════════════
 
+// ToolInfo mirrors tool.ToolInfo for the domain boundary.
+type ToolInfo struct {
+	Name    string
+	Enabled bool
+}
+
+// ToolRegistry is the domain interface for tool administration.
+type ToolRegistry interface {
+	List() []ToolInfo
+	Enable(name string) error
+	Disable(name string) error
+}
+
 // ToolAdmin provides tool listing and enable/disable through the registry.
 type ToolAdmin struct {
-	registry *tool.Registry
+	registry ToolRegistry
 }
 
 // NewToolAdmin creates a tool admin.
-func NewToolAdmin(registry *tool.Registry) *ToolAdmin {
+func NewToolAdmin(registry ToolRegistry) *ToolAdmin {
 	return &ToolAdmin{registry: registry}
 }
 
 // List returns all tools with their status.
-func (ta *ToolAdmin) List() []tool.ToolInfo {
+func (ta *ToolAdmin) List() []ToolInfo {
 	return ta.registry.List()
 }
 

@@ -94,7 +94,7 @@ func (e *Engine) buildSections(deps Deps) []Section {
 		{Order: 9, Name: "ProjectContext", Content: e.buildProjectContext(deps.ProjectContext), Priority: 2},
 		{Order: 10, Name: "Memory", Content: e.buildMemory(deps.MemoryContent), Priority: 3},
 		{Order: 11, Name: "Knowledge", Content: e.buildKnowledge(deps.ConvSummary), Priority: 2},
-		{Order: 12, Name: "ConversationSummary", Content: deps.ConvSummary, Priority: 3},
+		// Section 12 removed: ConvSummary is already injected in Section 11 (Knowledge)
 		// ═══ Bottom: Required (U-shape) ═══
 		{Order: 13, Name: "Variants", Content: "", Priority: 3}, // Prompt variants (loaded from file)
 		{Order: 14, Name: "Focus", Content: e.buildFocus(deps.FocusFile), Priority: 2},

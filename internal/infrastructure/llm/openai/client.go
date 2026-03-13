@@ -4,7 +4,6 @@
 package openai
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -39,7 +38,7 @@ func NewClient(name, baseURL, apiKey string, models []string) *Client {
 	}
 }
 
-func (c *Client) Name() string     { return c.name }
+func (c *Client) Name() string    { return c.name }
 func (c *Client) Models() []string { return c.models }
 
 // GenerateStream sends a chat completion request and streams the response.
@@ -91,123 +90,25 @@ func (c *Client) GenerateStream(ctx context.Context, req *llm.Request, ch chan<-
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		level := llm.ClassifyHTTPError(resp.StatusCode)
+		// 429 with insufficient_quota = fatal (don't retry — need to recharge)
+		// 429 with rate_limit = transient (retry with backoff)
+		if resp.StatusCode == 429 && strings.Contains(string(bodyBytes), "insufficient_quota") {
+			level = llm.ErrorFatal
+		}
 		return nil, &llm.LLMError{
-			Level:   llm.ClassifyHTTPError(resp.StatusCode),
+			Level:   level,
 			Code:    fmt.Sprintf("http_%d", resp.StatusCode),
 			Message: string(bodyBytes),
 		}
 	}
 
 	if req.Stream {
-		return c.handleStream(resp.Body, ch)
+		// Use the shared StreamAdapter with OpenAI field mapping
+		adapter := llm.NewStreamAdapter(&openAIMapper{})
+		return adapter.Process(resp.Body, ch)
 	}
 	return c.handleSync(resp.Body, ch)
-}
-
-// handleStream processes SSE (Server-Sent Events) response.
-func (c *Client) handleStream(body io.Reader, ch chan<- llm.StreamChunk) (*llm.Response, error) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	result := &llm.Response{}
-	var contentBuf strings.Builder
-	var reasoningBuf strings.Builder
-	var currentToolCalls []llm.ToolCall
-	toolCallArgs := make(map[int]*strings.Builder) // index → accumulated args
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-
-		if data == "[DONE]" {
-			ch <- llm.StreamChunk{Type: llm.ChunkDone}
-			break
-		}
-
-		var chunk sseChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue // Skip malformed chunks
-		}
-
-		if len(chunk.Choices) == 0 {
-			// Usage-only chunk (some providers send this at the end)
-			if chunk.Usage.TotalTokens > 0 {
-				result.Usage = llm.Usage{
-					PromptTokens:     chunk.Usage.PromptTokens,
-					CompletionTokens: chunk.Usage.CompletionTokens,
-					TotalTokens:      chunk.Usage.TotalTokens,
-				}
-			}
-			continue
-		}
-
-		delta := chunk.Choices[0].Delta
-
-		// Content
-		if delta.Content != "" {
-			contentBuf.WriteString(delta.Content)
-			ch <- llm.StreamChunk{Type: llm.ChunkText, Text: delta.Content}
-		}
-
-		// Reasoning (thinking)
-		if delta.Reasoning != "" {
-			reasoningBuf.WriteString(delta.Reasoning)
-			ch <- llm.StreamChunk{Type: llm.ChunkReasoning, Text: delta.Reasoning}
-		}
-
-		// Tool calls (streamed incrementally)
-		for _, tc := range delta.ToolCalls {
-			idx := tc.Index
-			if idx >= len(currentToolCalls) {
-				// New tool call
-				currentToolCalls = append(currentToolCalls, llm.ToolCall{
-					ID:   tc.ID,
-					Type: "function",
-					Function: llm.ToolCallFunc{
-						Name: tc.Function.Name,
-					},
-				})
-				toolCallArgs[idx] = &strings.Builder{}
-			}
-			if tc.Function.Arguments != "" {
-				toolCallArgs[idx].WriteString(tc.Function.Arguments)
-			}
-		}
-
-		// Model info
-		if chunk.Model != "" {
-			result.Model = chunk.Model
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("stream read: %w", err)
-	}
-
-	// Finalize tool calls (send after scanner loop completes)
-	for i := range currentToolCalls {
-		if buf, ok := toolCallArgs[i]; ok {
-			currentToolCalls[i].Function.Arguments = buf.String()
-		}
-		// Safe send: consumer may have exited if context was cancelled
-		select {
-		case ch <- llm.StreamChunk{
-			Type:     llm.ChunkToolCall,
-			ToolCall: &currentToolCalls[i],
-		}:
-		default:
-			// Channel full or consumer gone — skip
-		}
-	}
-
-	result.Content = contentBuf.String()
-	result.Reasoning = reasoningBuf.String()
-	result.ToolCalls = currentToolCalls
-	return result, nil
 }
 
 // handleSync processes a non-streaming JSON response.
@@ -218,6 +119,7 @@ func (c *Client) handleSync(body io.Reader, ch chan<- llm.StreamChunk) (*llm.Res
 				Content   string         `json:"content"`
 				ToolCalls []llm.ToolCall `json:"tool_calls"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Model string `json:"model"`
 		Usage struct {
@@ -244,6 +146,7 @@ func (c *Client) handleSync(body io.Reader, ch chan<- llm.StreamChunk) (*llm.Res
 		msg := apiResp.Choices[0].Message
 		result.Content = msg.Content
 		result.ToolCalls = msg.ToolCalls
+		result.StopReason = apiResp.Choices[0].FinishReason
 
 		if msg.Content != "" {
 			ch <- llm.StreamChunk{Type: llm.ChunkText, Text: msg.Content}
@@ -257,28 +160,79 @@ func (c *Client) handleSync(body io.Reader, ch chan<- llm.StreamChunk) (*llm.Res
 	return result, nil
 }
 
-// --- SSE chunk structures ---
+// ═══════════════════════════════════════════════════════
+// OpenAI ChunkMapper — the ONLY provider-specific code
+// ═══════════════════════════════════════════════════════
 
-type sseChunk struct {
-	Choices []sseChoice `json:"choices"`
-	Model   string      `json:"model"`
-	Usage   struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
+// openAIMapper implements llm.ChunkMapper for OpenAI-compatible APIs.
+// This is the field mapping layer — add a new provider by writing a new mapper.
+type openAIMapper struct{}
+
+func (m *openAIMapper) DoneSignal() string { return "[DONE]" }
+
+func (m *openAIMapper) MapChunk(data []byte) llm.NormalizedChunk {
+	var raw struct {
+		Choices []struct {
+			Delta struct {
+				Content   string        `json:"content"`
+				Reasoning string        `json:"reasoning_content"` // Qwen/DeepSeek thinking
+				ToolCalls []sseToolCall `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+		Model string `json:"model"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return llm.NormalizedChunk{Error: err}
+	}
+
+	// No choices — usage-only chunk
+	if len(raw.Choices) == 0 {
+		if raw.Usage.TotalTokens > 0 {
+			usage := llm.Usage{
+				PromptTokens:     raw.Usage.PromptTokens,
+				CompletionTokens: raw.Usage.CompletionTokens,
+				TotalTokens:      raw.Usage.TotalTokens,
+			}
+			return llm.NormalizedChunk{Skip: true, Usage: &usage}
+		}
+		return llm.NormalizedChunk{Skip: true}
+	}
+
+	choice := raw.Choices[0]
+	delta := choice.Delta
+
+	result := llm.NormalizedChunk{
+		Content:   delta.Content,
+		Reasoning: delta.Reasoning,
+		Model:     raw.Model,
+	}
+
+	// finish_reason
+	if choice.FinishReason != nil {
+		result.FinishReason = *choice.FinishReason
+	}
+
+	// Tool calls
+	for _, tc := range delta.ToolCalls {
+		result.ToolCalls = append(result.ToolCalls, llm.RawToolCallDelta{
+			Index:     tc.Index,
+			ID:        tc.ID,
+			Name:      tc.Function.Name,
+			Arguments: tc.Function.Arguments,
+		})
+	}
+
+	return result
 }
 
-type sseChoice struct {
-	Delta sseDelta `json:"delta"`
-}
-
-type sseDelta struct {
-	Content   string        `json:"content"`
-	Reasoning string        `json:"reasoning_content"` // Qwen/DeepSeek thinking
-	ToolCalls []sseToolCall `json:"tool_calls"`
-}
-
+// sseToolCall is the OpenAI-specific tool call delta format.
 type sseToolCall struct {
 	Index    int    `json:"index"`
 	ID       string `json:"id"`

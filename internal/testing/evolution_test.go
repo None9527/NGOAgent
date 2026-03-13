@@ -241,7 +241,7 @@ func TestEvolution_PromptPlanningNoPlanReminder(t *testing.T) {
 
 func TestEvolution_KIDistillHookFiltering(t *testing.T) {
 	saved := false
-	mockStore := &mockKIStore{saveFn: func(item interface{}) error {
+	mockStore := &mockKIStore{saveFn: func(summary, content string, tags, sources []string) error {
 		saved = true
 		return nil
 	}}
@@ -402,12 +402,12 @@ func (s *testSink) OnProgress(taskName, status, summary, mode string) {}
 func (s *testSink) OnText(text string)                                {}
 
 type mockKIStore struct {
-	saveFn func(item interface{}) error
+	saveFn func(summary, content string, tags, sources []string) error
 }
 
-func (m *mockKIStore) Save(item interface{}) error {
+func (m *mockKIStore) SaveDistilled(summary, content string, tags, sources []string) error {
 	if m.saveFn != nil {
-		return m.saveFn(item)
+		return m.saveFn(summary, content, tags, sources)
 	}
 	return nil
 }
@@ -415,3 +415,25 @@ func (m *mockKIStore) Save(item interface{}) error {
 func waitBrief() {
 	time.Sleep(50 * time.Millisecond)
 }
+
+// mockSessionRepo implements service.SessionRepo for tests.
+type mockSessionRepo struct{}
+
+func (m *mockSessionRepo) CreateConversation(channel, title string) (string, error) {
+	return "conv-1", nil
+}
+func (m *mockSessionRepo) ListConversations(limit, offset int) ([]service.ConversationInfo, error) {
+	return nil, nil
+}
+func (m *mockSessionRepo) DeleteConversation(id string) error { return nil }
+func (m *mockSessionRepo) UpdateTitle(id, title string) error  { return nil }
+func (m *mockSessionRepo) Touch(id string) error               { return nil }
+
+// mockToolRegistry implements service.ToolRegistry for tests.
+type mockToolRegistry struct {
+	tools []service.ToolInfo
+}
+
+func (m *mockToolRegistry) List() []service.ToolInfo { return m.tools }
+func (m *mockToolRegistry) Enable(name string) error { return nil }
+func (m *mockToolRegistry) Disable(name string) error { return nil }

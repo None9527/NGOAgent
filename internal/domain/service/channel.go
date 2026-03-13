@@ -3,6 +3,8 @@
 // controlling how an AgentLoop receives input, produces output, and handles completion.
 package service
 
+import "log"
+
 // AgentChannel defines the protocol for a specific agent execution context.
 // Different channels have different output sinks, tool policies, and completion behaviors.
 type AgentChannel interface {
@@ -121,11 +123,19 @@ type LogSink struct {
 	prefix string
 }
 
-func (s *LogSink) OnText(text string)                        {}
+func (s *LogSink) OnText(text string) {
+	if text != "" {
+		log.Printf("%s text: %s", s.prefix, text)
+	}
+}
 func (s *LogSink) OnReasoning(string)                        {}
 func (s *LogSink) OnToolStart(string, map[string]any)        {}
 func (s *LogSink) OnToolResult(string, string, error)        {}
 func (s *LogSink) OnProgress(string, string, string, string) {}
 func (s *LogSink) OnApprovalRequest(string, string, map[string]any, string) {}
-func (s *LogSink) OnComplete()                               {}
-func (s *LogSink) OnError(error)                             {}
+func (s *LogSink) OnComplete() {}
+func (s *LogSink) OnError(err error) {
+	if err != nil {
+		log.Printf("%s error: %v", s.prefix, err)
+	}
+}

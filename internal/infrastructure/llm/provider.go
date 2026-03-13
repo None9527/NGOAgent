@@ -61,11 +61,12 @@ type ToolCallFunc struct {
 
 // Response is the aggregated LLM response after streaming completes.
 type Response struct {
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	Reasoning string     `json:"reasoning,omitempty"`
-	Model     string     `json:"model"`
-	Usage     Usage      `json:"usage"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	Reasoning  string     `json:"reasoning,omitempty"`
+	Model      string     `json:"model"`
+	Usage      Usage      `json:"usage"`
+	StopReason string     `json:"stop_reason"` // "stop", "tool_calls", "length"
 }
 
 // Usage tracks token consumption.

@@ -138,6 +138,20 @@ func (s *Store) GenerateSummaries() string {
 	return b.String()
 }
 
+// BaseDir returns the knowledge store root path.
+func (s *Store) BaseDir() string { return s.baseDir }
+
+// SaveDistilled implements the domain KIStore interface for auto-distillation hooks.
+func (s *Store) SaveDistilled(summary, content string, tags, sources []string) error {
+	return s.Save(&Item{
+		Title:   summary,
+		Summary: summary,
+		Content: content,
+		Tags:    tags,
+		Sources: sources,
+	})
+}
+
 func sanitizeID(title string) string {
 	id := strings.ToLower(title)
 	id = strings.ReplaceAll(id, " ", "_")

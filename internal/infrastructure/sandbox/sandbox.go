@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"sync"
@@ -22,14 +23,16 @@ type Result struct {
 
 // Process tracks a running background command.
 type Process struct {
-	ID        string
-	Cmd       *exec.Cmd
-	Stdout    *bytes.Buffer
-	Stderr    *bytes.Buffer
-	Done      chan struct{}
-	ExitCode  int
-	StartedAt time.Time
-	cancel    context.CancelFunc
+	ID             string
+	Cmd            *exec.Cmd
+	Stdout         *bytes.Buffer
+	Stderr         *bytes.Buffer
+	StdinPipe      io.WriteCloser
+	Done           chan struct{}
+	ExitCode       int
+	StartedAt      time.Time
+	cancel         context.CancelFunc
+	lastReadOffset int // For incremental output
 }
 
 // Manager manages sandboxed process execution.
@@ -37,17 +40,22 @@ type Manager struct {
 	mu        sync.RWMutex
 	processes map[string]*Process
 	maxOutput int // Max bytes per output buffer
+	State     *ShellState
 }
 
-// NewManager creates a sandbox process manager.
-func NewManager() *Manager {
+// NewManager creates a sandbox process manager with persistent shell state.
+// initialCwd sets the starting working directory; if empty, os.Getwd() is used.
+func NewManager(initialCwd string) *Manager {
 	return &Manager{
 		processes: make(map[string]*Process),
 		maxOutput: 50 * 1024, // 50KB default
+		State:     NewShellState(initialCwd),
 	}
 }
 
 // Run executes a command synchronously within a timeout.
+// If cwd is empty, the persistent shell state cwd is used.
+// The command output is automatically parsed to track cwd changes.
 func (m *Manager) Run(ctx context.Context, command, cwd string, timeout time.Duration) (*Result, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -56,10 +64,12 @@ func (m *Manager) Run(ctx context.Context, command, cwd string, timeout time.Dur
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(execCtx, "bash", "-c", command)
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
+	// Wrap command to capture post-execution cwd
+	wrapped := m.State.WrapCommand(command)
+	cmd := exec.CommandContext(execCtx, "bash", "-c", wrapped)
+
+	// Inject persistent env and cwd
+	m.State.InjectEnv(cmd, cwd)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -69,8 +79,13 @@ func (m *Manager) Run(ctx context.Context, command, cwd string, timeout time.Dur
 	err := cmd.Run()
 	dur := time.Since(start)
 
+	rawStdout := stdout.String()
+
+	// Extract and update cwd from the marker in output
+	cleanStdout, _ := m.State.ExtractCwdFromOutput(rawStdout)
+
 	result := &Result{
-		Stdout:   truncateOutput(stdout.String(), m.maxOutput),
+		Stdout:   truncateOutput(cleanStdout, m.maxOutput),
 		Stderr:   truncateOutput(stderr.String(), m.maxOutput),
 		Duration: dur,
 		TimedOut: execCtx.Err() == context.DeadlineExceeded,
@@ -86,24 +101,33 @@ func (m *Manager) Run(ctx context.Context, command, cwd string, timeout time.Dur
 }
 
 // RunBackground starts a command in the background and returns its process ID.
+// Uses persistent shell state for cwd and env.
 func (m *Manager) RunBackground(ctx context.Context, id, command, cwd string) error {
 	bgCtx, cancel := context.WithCancel(ctx)
 
 	cmd := exec.CommandContext(bgCtx, "bash", "-c", command)
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
+
+	// Inject persistent env and cwd
+	m.State.InjectEnv(cmd, cwd)
 
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
+	// Create stdin pipe for interactive input
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return fmt.Errorf("create stdin pipe: %w", err)
+	}
+
 	proc := &Process{
 		ID:        id,
 		Cmd:       cmd,
 		Stdout:    stdout,
 		Stderr:    stderr,
+		StdinPipe: stdinPipe,
 		Done:      make(chan struct{}),
 		StartedAt: time.Now(),
 		cancel:    cancel,
@@ -135,7 +159,14 @@ func (m *Manager) RunBackground(ctx context.Context, id, command, cwd string) er
 }
 
 // GetStatus returns the status and output of a background process.
+// If maxChars > 0, returns only up to that many characters of output (incremental from last read).
 func (m *Manager) GetStatus(id string, waitSeconds int) (*Result, error) {
+	return m.GetStatusWithLimit(id, waitSeconds, 0)
+}
+
+// GetStatusWithLimit is like GetStatus but supports limiting output size
+// and incremental reads (returns only new output since last call).
+func (m *Manager) GetStatusWithLimit(id string, waitSeconds int, maxChars int) (*Result, error) {
 	m.mu.RLock()
 	proc, ok := m.processes[id]
 	m.mu.RUnlock()
@@ -152,19 +183,40 @@ func (m *Manager) GetStatus(id string, waitSeconds int) (*Result, error) {
 		}
 	}
 
+	// Extract output — incremental if maxChars > 0
+	fullStdout := proc.Stdout.String()
+	fullStderr := proc.Stderr.String()
+
+	var outStdout, outStderr string
+	if maxChars > 0 {
+		// Incremental: only return content since last read offset
+		if proc.lastReadOffset < len(fullStdout) {
+			incremental := fullStdout[proc.lastReadOffset:]
+			if len(incremental) > maxChars {
+				incremental = incremental[len(incremental)-maxChars:]
+			}
+			outStdout = incremental
+		}
+		proc.lastReadOffset = len(fullStdout)
+		outStderr = fullStderr // stderr always full (usually small)
+	} else {
+		outStdout = truncateOutput(fullStdout, m.maxOutput)
+		outStderr = truncateOutput(fullStderr, m.maxOutput)
+	}
+
 	// Check if done
 	select {
 	case <-proc.Done:
 		return &Result{
-			Stdout:   truncateOutput(proc.Stdout.String(), m.maxOutput),
-			Stderr:   truncateOutput(proc.Stderr.String(), m.maxOutput),
+			Stdout:   outStdout,
+			Stderr:   outStderr,
 			ExitCode: proc.ExitCode,
 			Duration: time.Since(proc.StartedAt),
 		}, nil
 	default:
 		return &Result{
-			Stdout:   truncateOutput(proc.Stdout.String(), m.maxOutput),
-			Stderr:   truncateOutput(proc.Stderr.String(), m.maxOutput),
+			Stdout:   outStdout,
+			Stderr:   outStderr,
 			ExitCode: -1, // Still running
 			Duration: time.Since(proc.StartedAt),
 		}, nil
@@ -213,12 +265,12 @@ func (m *Manager) SendInput(id, input string) error {
 	default:
 	}
 
-	if proc.Cmd.Process == nil {
-		return fmt.Errorf("process %s has no running process", id)
+	if proc.StdinPipe == nil {
+		return fmt.Errorf("process %s has no stdin pipe", id)
 	}
 
-	// Write to stdin via pipe (requires stdin pipe setup in RunBackground)
-	return nil // Stdin pipe not wired in basic RunBackground — future enhancement
+	_, err := io.WriteString(proc.StdinPipe, input)
+	return err
 }
 
 // ListActive returns all active (not done) process IDs.

@@ -61,23 +61,21 @@ type PendingApproval struct {
 
 // Hook implements the full AgentHook security interface (6 methods).
 type Hook struct {
-	cfg          *config.SecurityConfig
-	heartbeatCfg *config.HeartbeatSecCfg
-	audit        []AuditEntry
-	overrides    map[string]bool            // Session-scoped user overrides
-	approvalFns  map[string]ApprovalFunc    // channel → approval func (legacy)
-	pending      map[string]*PendingApproval // approval_id → pending
-	mu           sync.RWMutex
+	cfg         *config.SecurityConfig
+	audit       []AuditEntry
+	overrides   map[string]bool            // Session-scoped user overrides
+	approvalFns map[string]ApprovalFunc    // channel → approval func (legacy)
+	pending     map[string]*PendingApproval // approval_id → pending
+	mu          sync.RWMutex
 }
 
 // NewHook creates a security hook.
-func NewHook(cfg *config.SecurityConfig, heartbeatCfg *config.HeartbeatSecCfg) *Hook {
+func NewHook(cfg *config.SecurityConfig) *Hook {
 	return &Hook{
-		cfg:          cfg,
-		heartbeatCfg: heartbeatCfg,
-		overrides:    make(map[string]bool),
-		approvalFns:  make(map[string]ApprovalFunc),
-		pending:      make(map[string]*PendingApproval),
+		cfg:         cfg,
+		overrides:   make(map[string]bool),
+		approvalFns: make(map[string]ApprovalFunc),
+		pending:     make(map[string]*PendingApproval),
 	}
 }
 
@@ -274,23 +272,11 @@ func (h *Hook) ReloadChain(cfg *config.SecurityConfig) {
 var shellInjectionRe = regexp.MustCompile(`[;&|` + "`" + `$()]`)
 
 // normalDecide handles chat mode security.
+// Two modes only:
+//   - allow: auto-approve everything; blocklist commands get Ask (user decides)
+//   - ask:   everything gets Ask (full manual approval)
 func (h *Hook) normalDecide(_ context.Context, toolName string, args map[string]any) (Decision, string, DecisionLevel) {
-	// Step 0: Blocklist hard deny
-	if toolName == "run_command" {
-		cmd, _ := args["command"].(string)
-		// Blocklist check
-		for _, blocked := range h.cfg.BlockList {
-			if strings.Contains(cmd, blocked) {
-				return Deny, fmt.Sprintf("command contains blocked word: %s", blocked), LevelBlock
-			}
-		}
-		// Shell injection detection
-		if hasShellInjection(cmd) {
-			return Ask, "command contains shell metacharacters", LevelSystem
-		}
-	}
-
-	// Step 1: User overrides
+	// User session overrides always win
 	h.mu.RLock()
 	override := h.overrides[toolName]
 	h.mu.RUnlock()
@@ -298,63 +284,36 @@ func (h *Hook) normalDecide(_ context.Context, toolName string, args map[string]
 		return Allow, "user override", LevelUser
 	}
 
-	// Step 2: Mode-based
 	switch h.cfg.Mode {
 	case "allow":
-		return Allow, "mode=allow", LevelPolicy
-	case "ask":
-		return Ask, "mode=ask", LevelPolicy
-	}
-
-	// Step 3: Auto mode — check if safe
-	if toolName == "run_command" {
-		cmd, _ := args["command"].(string)
-		for _, safe := range h.cfg.SafeCommands {
-			if strings.HasPrefix(strings.TrimSpace(cmd), safe) {
-				return Allow, fmt.Sprintf("safe command: %s", safe), LevelSystem
+		// In allow mode, only blocklist commands need user confirmation
+		if toolName == "run_command" {
+			cmd, _ := args["command"].(string)
+			cmdParts := strings.Fields(cmd)
+			for _, blocked := range h.cfg.BlockList {
+				if len(cmdParts) > 0 && cmdParts[0] == blocked {
+					return Ask, fmt.Sprintf("高危命令: %s (需要确认)", blocked), LevelBlock
+				}
 			}
 		}
-		return Ask, "unrecognized command in auto mode", LevelPolicy
-	}
+		return Allow, "mode=allow", LevelPolicy
 
-	// Safe tools: always allowed (no destructive side-effects or pure state-tracking)
-	safeTool := map[string]bool{
-		// Read-only
-		"read_file": true, "glob": true, "grep_search": true,
-		"web_search": true, "web_fetch": true, "command_status": true,
-		// State-tracking (no side effects outside agent)
-		"task_boundary": true, "task_plan": true, "notify_user": true,
-		"save_memory": true, "update_project_context": true,
-		// Code generation (core agent capability)
-		"write_file": true, "edit_file": true,
+	default: // "ask" or any other value
+		return Ask, "mode=ask", LevelPolicy
 	}
-	if safeTool[toolName] {
-		return Allow, "safe tool", LevelSystem
-	}
-
-	// Step 4: Default
-	return Ask, "requires user approval", LevelPolicy
 }
 
-// heartbeatDecide restricts tools to the heartbeat allowlist.
+// heartbeatDecide restricts cron/heartbeat tools to read-only operations.
 func (h *Hook) heartbeatDecide(toolName string, _ map[string]any) (Decision, string) {
-	if h.heartbeatCfg == nil {
-		return Deny, "heartbeat security not configured"
+	// Hardcoded blocklist: destructive tools not allowed in cron mode
+	blocked := map[string]bool{
+		"run_command": true, "edit_file": true, "write_file": true, "forge": true,
 	}
-
-	for _, blocked := range h.heartbeatCfg.BlockedTools {
-		if toolName == blocked {
-			return Deny, fmt.Sprintf("tool %s blocked in heartbeat mode", toolName)
-		}
+	if blocked[toolName] {
+		return Deny, fmt.Sprintf("tool %s blocked in heartbeat mode", toolName)
 	}
-
-	for _, allowed := range h.heartbeatCfg.AllowedTools {
-		if toolName == allowed {
-			return Allow, "heartbeat allowed"
-		}
-	}
-
-	return Deny, fmt.Sprintf("tool %s not in heartbeat allowlist", toolName)
+	// All other tools allowed (read_file, glob, grep_search, web_search, etc.)
+	return Allow, "heartbeat allowed"
 }
 
 // forgeDecide allows operations within the forge sandbox.

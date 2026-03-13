@@ -1,13 +1,12 @@
 package config
 
-import "time"
-
 // DefaultConfig returns the default configuration.
 func DefaultConfig() *Config {
 	return &Config{
 		Agent: AgentConfig{
 			PlanningMode: false,
 			MaxSteps:     200,
+			Workspace:    "~/.ngoagent/workspace",
 		},
 		LLM: LLMConfig{},
 		Security: SecurityConfig{
@@ -21,26 +20,22 @@ func DefaultConfig() *Config {
 			KnowledgeDir: "~/.ngoagent/knowledge",
 			SkillsDir:    "~/.ngoagent/skills",
 		},
-		Heartbeat: HeartbeatConfig{
-			Enabled:  false,
-			Interval: 30 * time.Minute,
-			MaxSteps: 5,
-			Security: HeartbeatSecCfg{
-				AllowedTools: []string{
-					"read_file", "glob", "grep_search",
-					"web_search", "web_fetch",
-					"update_project_context", "save_memory",
-				},
-				BlockedTools: []string{
-					"run_command", "edit_file", "write_file", "forge",
-				},
-			},
+		Cron: CronConfig{
+			Enabled: true,
 		},
 		Forge: ForgeConfig{
 			SandboxDir:         "/tmp/ngoagent-forge",
 			MaxRetries:         5,
 			AutoForgeOnInstall: true,
 			HistoryLimit:       20,
+		},
+		Embedding: EmbeddingConfig{
+			Provider:            "", // disabled by default
+			Model:               "text-embedding-v3",
+			Dimensions:          1024,
+			SimilarityThreshold: 0.85,
+			MinKIForEmbedding:   30,
+			TopK:                5,
 		},
 	}
 }
@@ -50,13 +45,15 @@ const DefaultConfigYAML = `# NGOAgent Configuration
 
 agent:
   planning_mode: false
+  workspace: "~/.ngoagent/workspace"  # default cwd for shell commands
 
-providers:
-  - name: "default"
-    type: "openai"
-    base_url: "https://api.openai.com/v1"
-    api_key: "${OPENAI_API_KEY}"
-    models: ["gpt-4"]
+llm:
+  providers:
+    - name: "default"
+      type: "openai"
+      base_url: "https://api.openai.com/v1"
+      api_key: "${OPENAI_API_KEY}"
+      models: ["gpt-4"]
 
 security:
   mode: "auto"
@@ -69,12 +66,21 @@ storage:
   knowledge_dir: "~/.ngoagent/knowledge"
   skills_dir: "~/.ngoagent/skills"
 
-heartbeat:
-  enabled: false
-  interval: 30m
+cron:
+  enabled: true
 
 server:
   http_port: 8080
+
+embedding:
+  provider: ""           # "dashscope" | "openai" | "" (disabled)
+  # base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  # api_key: "${DASHSCOPE_API_KEY}"
+  # model: "text-embedding-v3"
+  # dimensions: 1024
+  # similarity_threshold: 0.85
+  # min_ki_for_embedding: 30   # KI < 30: full injection; >= 30: embedding retrieval
+  # top_k: 5                   # retrieve top-K relevant KIs
 `
 
 // DefaultUserRules is the initial user_rules.md content.
@@ -85,12 +91,4 @@ const DefaultUserRules = `你是 NGOAgent，一个运行在用户本地的自主
 - 先查资料再问问题，带着答案来而不是带着疑问来
 - 不确定就说不确定，绝不编造 API、库或数据
 - 简洁直接——跳过客套，直接干活
-`
-
-// DefaultHeartbeat is the initial heartbeat.md content.
-const DefaultHeartbeat = `# Heartbeat Tasks
-
-<!-- Add tasks below. The heartbeat engine will process them periodically. -->
-<!-- Format: Markdown checklist items. Example: -->
-<!-- - [ ] Check if tests pass -->
 `

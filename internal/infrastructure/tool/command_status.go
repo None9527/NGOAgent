@@ -27,6 +27,7 @@ func (t *CommandStatusTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"command_id":   map[string]any{"type": "string", "description": "Background command ID"},
 			"wait_seconds": map[string]any{"type": "integer", "description": "Wait for completion (default: 0)"},
+			"output_chars": map[string]any{"type": "integer", "description": "Max output characters to return. When set, returns only new output since last check (incremental). Keep small to save tokens."},
 		},
 		"required": []string{"command_id"},
 	}
@@ -35,15 +36,19 @@ func (t *CommandStatusTool) Schema() map[string]any {
 func (t *CommandStatusTool) Execute(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
 	id, _ := args["command_id"].(string)
 	waitSec := 0
+	maxChars := 0
 	if v, ok := args["wait_seconds"].(float64); ok {
 		waitSec = int(v)
+	}
+	if v, ok := args["output_chars"].(float64); ok && v > 0 {
+		maxChars = int(v)
 	}
 
 	if id == "" {
 		return dtool.ToolResult{Output: "Error: 'command_id' is required"}, nil
 	}
 
-	result, err := t.sandbox.GetStatus(id, waitSec)
+	result, err := t.sandbox.GetStatusWithLimit(id, waitSec, maxChars)
 	if err != nil {
 		return dtool.ToolResult{Output: fmt.Sprintf("Error: %v", err)}, nil
 	}

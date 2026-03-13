@@ -1,0 +1,33 @@
+{
+    "name": "ngoclaw-cli",
+    "version": "0.4.0",
+    "description": "NGOClaw CLI — Ink-based TUI for AI agent interaction",
+    "type": "module",
+    "main": "dist/index.js",
+    "bin": {
+        "ngoa": "dist/index.js"
+    },
+    "scripts": {
+        "dev": "tsx src/index.tsx",
+        "build": "tsup src/index.tsx --format esm --target node22 --dts --clean",
+        "start": "node dist/index.js"
+    },
+    "dependencies": {
+        "chalk": "^5.6.2",
+        "cli-highlight": "^2.1.11",
+        "ink": "^5.0.1",
+        "ink-spinner": "^5.0.0",
+        "ink-text-input": "^6.0.0",
+        "marked": "^17.0.4",
+        "marked-terminal": "^7.3.0",
+        "react": "^18.3.1",
+        "yaml": "^2.3.0"
+    },
+    "devDependencies": {
+        "@types/marked": "^5.0.2",
+        "@types/react": "^18.3.0",
+        "tsup": "^8.0.0",
+        "tsx": "^4.7.0",
+        "typescript": "^5.4.0"
+    }
+}

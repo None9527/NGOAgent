@@ -95,7 +95,7 @@ func (a *Asserter) Check(sandboxPath string, checks AssertionSet) AssertResult {
 	// shell_check
 	for _, cmd := range checks.ShellCheck {
 		result.Total++
-		c := exec.Command("bash", "-c", cmd)
+		c := exec.Command("bash", "-lc", cmd)
 		c.Dir = sandboxPath
 		output, err := c.CombinedOutput()
 		if err != nil {

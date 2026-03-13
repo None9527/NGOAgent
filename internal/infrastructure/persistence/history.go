@@ -28,6 +28,24 @@ func NewHistoryStore(db *gorm.DB) *HistoryStore {
 	return &HistoryStore{db: db}
 }
 
+// SaveAll replaces the entire session history in a transaction.
+// Handles compact/truncation by deleting old rows first.
+func (hs *HistoryStore) SaveAll(sessionID string, msgs []HistoryMessage) error {
+	return hs.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("session_id = ?", sessionID).Delete(&HistoryMessage{}).Error; err != nil {
+			return err
+		}
+		for _, m := range msgs {
+			m.ID = 0 // Reset for insert
+			m.SessionID = sessionID
+			if err := tx.Create(&m).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // Save persists a message.
 func (hs *HistoryStore) Save(sessionID string, msg *HistoryMessage) error {
 	msg.SessionID = sessionID
@@ -44,6 +62,21 @@ func (hs *HistoryStore) LoadSession(sessionID string) ([]HistoryMessage, error) 
 // DeleteSession removes all messages for a session.
 func (hs *HistoryStore) DeleteSession(sessionID string) error {
 	return hs.db.Where("session_id = ?", sessionID).Delete(&HistoryMessage{}).Error
+}
+
+// AppendBatch inserts new messages without touching existing rows.
+// Used for incremental persistence (normal turn endings).
+func (hs *HistoryStore) AppendBatch(sessionID string, msgs []HistoryMessage) error {
+	return hs.db.Transaction(func(tx *gorm.DB) error {
+		for _, m := range msgs {
+			m.ID = 0
+			m.SessionID = sessionID
+			if err := tx.Create(&m).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // TruncateSession keeps only the last N messages.

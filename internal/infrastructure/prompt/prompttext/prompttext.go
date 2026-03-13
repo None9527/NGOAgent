@@ -90,10 +90,13 @@ const ToolGrepSearch = `Search file contents using ripgrep.
 
 const ToolRunCommand = `Execute a shell command with optional timeout.
 - command: the full command string to execute
-- cwd: working directory (default: current workspace)
+- cwd: working directory (optional — defaults to the persisted cwd from previous commands)
 - timeout_ms: max execution time in milliseconds
 - background: if true, returns command_id for async monitoring. IMPORTANT: You MUST set this to true for long-running processes like web servers.
-- Output >50KB is truncated (head + tail)`
+- wait_ms_before_async: wait this many ms for sync completion; if not done, auto-background and return command_id. Use 500 for potentially slow commands (npm install, go build, etc.).
+- Output >50KB is truncated (head + tail)
+
+IMPORTANT: Working directory PERSISTS between commands. If you run "cd /some/dir" in one command, subsequent commands will execute in that directory automatically. You do NOT need to repeat the cwd parameter.`
 
 const ToolCommandStatus = `Get the status and output of a background command.
 - command_id: the ID returned from a background run_command

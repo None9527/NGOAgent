@@ -47,7 +47,6 @@ func Bootstrap() error {
 	defaults := map[string]string{
 		filepath.Join(home, "config.yaml"):   DefaultConfigYAML,
 		filepath.Join(home, "user_rules.md"): DefaultUserRules,
-		filepath.Join(home, "heartbeat.md"):  DefaultHeartbeat,
 	}
 
 	for path, content := range defaults {

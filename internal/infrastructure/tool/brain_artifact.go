@@ -67,17 +67,28 @@ func (t *BrainArtifactTool) Schema() map[string]any {
 func (t *BrainArtifactTool) Execute(ctx context.Context, params map[string]any) (dtool.ToolResult, error) {
 	action, _ := params["action"].(string)
 
+	// BUG-20 fix: fall back to context-based brain store if t.brain is nil
+	store := t.brain
+	if store == nil {
+		store = brain.BrainStoreFromContext(ctx)
+	}
+	if store == nil {
+		return dtool.ToolResult{}, fmt.Errorf("brain not available")
+	}
+	// Use the resolved store for all sub-operations
+	resolved := &BrainArtifactTool{brain: store}
+
 	switch action {
 	case "write":
-		return t.doWrite(params)
+		return resolved.doWrite(params)
 	case "read":
-		return t.doRead(params)
+		return resolved.doRead(params)
 	case "list":
-		return t.doList()
+		return resolved.doList()
 	case "versions":
-		return t.doVersions(params)
+		return resolved.doVersions(params)
 	case "read_version":
-		return t.doReadVersion(params)
+		return resolved.doReadVersion(params)
 	default:
 		return dtool.ToolResult{}, fmt.Errorf("brain_artifact: unknown action %q (use write/read/list/versions/read_version)", action)
 	}

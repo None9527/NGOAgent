@@ -3,8 +3,100 @@
 package config
 
 import (
+	"strings"
 	"time"
 )
+
+// Sanitized returns the full config as a map with sensitive fields masked.
+func (c *Config) Sanitized() map[string]any {
+	providers := make([]map[string]any, len(c.LLM.Providers))
+	for i, p := range c.LLM.Providers {
+		providers[i] = map[string]any{
+			"name":     p.Name,
+			"type":     p.Type,
+			"base_url": p.BaseURL,
+			"api_key":  maskKey(p.APIKey),
+			"models":   p.Models,
+		}
+	}
+
+	mcpServers := make([]map[string]any, len(c.MCP.Servers))
+	for i, s := range c.MCP.Servers {
+		mcpServers[i] = map[string]any{
+			"name":    s.Name,
+			"command": s.Command,
+			"args":    s.Args,
+		}
+	}
+
+	return map[string]any{
+		"server": map[string]any{
+			"http_port": c.Server.HTTPPort,
+			"grpc_port": c.Server.GRPCPort,
+			"mode":      c.Server.Mode,
+			"timezone":  c.Server.Timezone,
+		},
+		"agent": map[string]any{
+			"default_model": c.Agent.DefaultModel,
+			"planning_mode": c.Agent.PlanningMode,
+			"max_steps":     c.Agent.MaxSteps,
+			"workspace":     c.Agent.Workspace,
+		},
+		"llm": map[string]any{
+			"providers": providers,
+		},
+		"security": map[string]any{
+			"mode":          c.Security.Mode,
+			"block_list":    c.Security.BlockList,
+			"safe_commands": c.Security.SafeCommands,
+		},
+		"storage": map[string]any{
+			"db_path":       c.Storage.DBPath,
+			"brain_dir":     c.Storage.BrainDir,
+			"knowledge_dir": c.Storage.KnowledgeDir,
+			"skills_dir":    c.Storage.SkillsDir,
+		},
+		"cron": map[string]any{
+			"enabled": c.Cron.Enabled,
+		},
+		"forge": map[string]any{
+			"sandbox_dir":          c.Forge.SandboxDir,
+			"max_retries":          c.Forge.MaxRetries,
+			"auto_forge_on_install": c.Forge.AutoForgeOnInstall,
+			"history_limit":        c.Forge.HistoryLimit,
+		},
+		"mcp": map[string]any{
+			"servers": mcpServers,
+		},
+		"search": map[string]any{
+			"endpoint": c.Search.Endpoint,
+		},
+		"embedding": map[string]any{
+			"provider":             c.Embedding.Provider,
+			"base_url":             c.Embedding.BaseURL,
+			"api_key":              maskKey(c.Embedding.APIKey),
+			"model":                c.Embedding.Model,
+			"dimensions":           c.Embedding.Dimensions,
+			"similarity_threshold": c.Embedding.SimilarityThreshold,
+			"min_ki_for_embedding": c.Embedding.MinKIForEmbedding,
+			"top_k":                c.Embedding.TopK,
+		},
+	}
+}
+
+// maskKey returns a masked version of an API key for safe display.
+func maskKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	if strings.HasPrefix(key, "${") {
+		return key // Environment variable reference, show as-is
+	}
+	if len(key) <= 8 {
+		return "***"
+	}
+	return key[:4] + "..." + key[len(key)-4:]
+}
 
 // Config is the root configuration structure, mapped from config.yaml.
 type Config struct {
@@ -13,10 +105,11 @@ type Config struct {
 	LLM       LLMConfig       `yaml:"llm"`
 	Security  SecurityConfig  `yaml:"security"`
 	Storage   StorageConfig   `yaml:"storage"`
-	Heartbeat HeartbeatConfig `yaml:"heartbeat"`
+	Cron      CronConfig      `yaml:"cron"`
 	Forge     ForgeConfig     `yaml:"forge"`
 	MCP       MCPConfig       `yaml:"mcp"`
 	Search    SearchConfig    `yaml:"search"`
+	Embedding EmbeddingConfig `yaml:"embedding"`
 }
 
 // SearchConfig defines web search provider settings.
@@ -24,18 +117,47 @@ type SearchConfig struct {
 	Endpoint string `yaml:"endpoint"` // SearXNG endpoint URL, e.g. http://localhost:8888
 }
 
+// EmbeddingConfig defines the embedding model configuration for KI vector search.
+type EmbeddingConfig struct {
+	Provider            string  `yaml:"provider"`             // "dashscope" | "openai" | "" (disabled)
+	BaseURL             string  `yaml:"base_url"`             // API base URL
+	APIKey              string  `yaml:"api_key"`              // API key (supports ${ENV_VAR})
+	Model               string  `yaml:"model"`                // Model name, e.g. "text-embedding-v3"
+	Dimensions          int     `yaml:"dimensions"`           // Vector dimensions, e.g. 1024
+	SimilarityThreshold float64 `yaml:"similarity_threshold"` // Dedup threshold, default 0.85
+	MinKIForEmbedding   int     `yaml:"min_ki_for_embedding"` // KI count threshold to activate embedding retrieval; below this, full injection is used
+	TopK                int     `yaml:"top_k"`                // Number of KIs to retrieve via embedding search
+}
+
 // ServerConfig defines HTTP/gRPC server settings.
 type ServerConfig struct {
 	HTTPPort int    `yaml:"http_port"`
 	GRPCPort int    `yaml:"grpc_port"`
-	Mode     string `yaml:"mode"` // debug / release
+	Mode     string `yaml:"mode"`     // debug / release
+	Timezone string `yaml:"timezone"` // "system" or IANA name like "Asia/Shanghai"
+}
+
+// LoadLocation returns the *time.Location for the configured timezone.
+// - empty or "system": uses time.Local (OS timezone)
+// - IANA name (e.g. "Asia/Shanghai"): loads that timezone
+func (c *Config) LoadLocation() *time.Location {
+	tz := strings.TrimSpace(c.Server.Timezone)
+	if tz == "" || strings.EqualFold(tz, "system") {
+		return time.Local
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.Local
+	}
+	return loc
 }
 
 // AgentConfig controls user-facing agent behavior.
 type AgentConfig struct {
 	DefaultModel string `yaml:"default_model"`
 	PlanningMode bool   `yaml:"planning_mode"` // true=force plan, false=auto-detect
-	MaxSteps     int    `yaml:"max_steps"`     // Max agent loop steps (default: 200, Anti's MAX_INVOCATIONS)
+	MaxSteps     int    `yaml:"max_steps"`     // Max agent loop steps (default: 200)
+	Workspace    string `yaml:"workspace"`     // Default working directory for shell commands
 }
 
 // LLMConfig defines LLM provider connections.
@@ -67,19 +189,10 @@ type StorageConfig struct {
 	SkillsDir    string `yaml:"skills_dir"`
 }
 
-// HeartbeatConfig defines the background heartbeat engine settings.
-type HeartbeatConfig struct {
-	Enabled       bool            `yaml:"enabled"`
-	Interval      time.Duration   `yaml:"interval"`
-	MaxSteps      int             `yaml:"max_steps"`
-	NotifyChannel string          `yaml:"notify_channel"`
-	Security      HeartbeatSecCfg `yaml:"security"`
-}
-
-// HeartbeatSecCfg defines the security policy for heartbeat mode.
-type HeartbeatSecCfg struct {
-	AllowedTools []string `yaml:"allowed_tools"`
-	BlockedTools []string `yaml:"blocked_tools"`
+// CronConfig controls the global cron scheduler on/off switch.
+// Individual job schedules are managed by the agent via the manage_cron tool.
+type CronConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // ForgeConfig defines settings for the capability forging engine.

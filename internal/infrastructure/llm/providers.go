@@ -25,6 +25,7 @@ func NewAnthropicProvider(name, apiKey string, models []string) *AnthropicProvid
 func (p *AnthropicProvider) Name() string     { return p.name }
 func (p *AnthropicProvider) Models() []string { return p.models }
 func (p *AnthropicProvider) GenerateStream(_ context.Context, _ *Request, ch chan<- StreamChunk) (*Response, error) {
+	defer close(ch)
 	ch <- StreamChunk{Type: ChunkError, Error: &ProviderNotImplementedError{Provider: "anthropic"}}
 	return nil, &ProviderNotImplementedError{Provider: "anthropic"}
 }
@@ -43,6 +44,7 @@ func NewGoogleProvider(name, apiKey string, models []string) *GoogleProvider {
 func (p *GoogleProvider) Name() string     { return p.name }
 func (p *GoogleProvider) Models() []string { return p.models }
 func (p *GoogleProvider) GenerateStream(_ context.Context, _ *Request, ch chan<- StreamChunk) (*Response, error) {
+	defer close(ch)
 	ch <- StreamChunk{Type: ChunkError, Error: &ProviderNotImplementedError{Provider: "google"}}
 	return nil, &ProviderNotImplementedError{Provider: "google"}
 }
@@ -61,6 +63,7 @@ func NewCodexProvider(name, apiKey string, models []string) *CodexProvider {
 func (p *CodexProvider) Name() string     { return p.name }
 func (p *CodexProvider) Models() []string { return p.models }
 func (p *CodexProvider) GenerateStream(_ context.Context, _ *Request, ch chan<- StreamChunk) (*Response, error) {
+	defer close(ch)
 	ch <- StreamChunk{Type: ChunkError, Error: &ProviderNotImplementedError{Provider: "codex"}}
 	return nil, &ProviderNotImplementedError{Provider: "codex"}
 }
@@ -79,6 +82,7 @@ func NewOllamaProvider(name, baseURL string, models []string) *OllamaProvider {
 func (p *OllamaProvider) Name() string     { return p.name }
 func (p *OllamaProvider) Models() []string { return p.models }
 func (p *OllamaProvider) GenerateStream(_ context.Context, _ *Request, ch chan<- StreamChunk) (*Response, error) {
+	defer close(ch)
 	ch <- StreamChunk{Type: ChunkError, Error: &ProviderNotImplementedError{Provider: "ollama"}}
 	return nil, &ProviderNotImplementedError{Provider: "ollama"}
 }

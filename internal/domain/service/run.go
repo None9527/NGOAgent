@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"strings"
@@ -31,6 +32,26 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string) error {
 		return fmt.Errorf("agent is busy: another run is in progress")
 	}
 	defer a.runMu.Unlock()
+	return a.runInner(ctx, userMessage)
+}
+
+// TryAcquire attempts to acquire the run lock without blocking.
+// Returns true if acquired (caller MUST call ReleaseAcquire when done).
+func (a *AgentLoop) TryAcquire() bool {
+	return a.runMu.TryLock()
+}
+
+// ReleaseAcquire releases the run lock acquired by TryAcquire.
+func (a *AgentLoop) ReleaseAcquire() {
+	a.runMu.Unlock()
+}
+
+// RunWithoutAcquire runs the loop assuming the caller already holds the run lock.
+func (a *AgentLoop) RunWithoutAcquire(ctx context.Context, userMessage string) error {
+	return a.runInner(ctx, userMessage)
+}
+
+func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 
 	a.mu.Lock()
 	a.history = append(a.history, llm.Message{Role: "user", Content: userMessage})
@@ -64,7 +85,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string) error {
 				if llmErr, ok := err.(*llm.LLMError); ok {
 					if llmErr.Level == llm.ErrorTransient && retries < maxRetries {
 						retries++
-						time.Sleep(time.Duration(retries) * time.Second)
+						backoff := time.Duration(1<<retries) * time.Second // 2s, 4s
+						log.Printf("[retry] attempt %d/%d, backoff %v: %s", retries, maxRetries, backoff, llmErr.Code)
+						time.Sleep(backoff)
 						a.transition(StateGenerate)
 						continue
 					}
@@ -197,10 +220,13 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string) error {
 		case StateCompact:
 			a.doCompact()
 			a.InjectEphemeral(prompttext.EphCompactionNotice)
+			a.persistFullHistory() // full replace after restructuring
 			a.transition(StateGenerate)
 
 		case StateDone:
 			a.state = StateIdle
+			a.persistHistory()
+			a.fireHooks(ctx, steps)
 			return nil
 
 		default:
@@ -208,6 +234,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string) error {
 		}
 	}
 loopEnd:
+	a.persistHistory()
+	a.fireHooks(ctx, steps)
 	return nil
 }
 
@@ -441,23 +469,35 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 		resp, genErr = provider.GenerateStream(genCtx, req, ch)
 	}()
 
+	// Buffer text chunks: only flush to client based on StopReason.
+	// DashScope/OpenAI API: content is null when tool_calls are present,
+	// but we buffer defensively for any provider that mixes them.
+	var textBuf strings.Builder
+
 	for chunk := range ch {
 		switch chunk.Type {
 		case llm.ChunkText:
-			a.deps.Delta.OnText(chunk.Text)
+			textBuf.WriteString(chunk.Text)
 		case llm.ChunkReasoning:
 			a.deps.Delta.OnReasoning(chunk.Text)
 		case llm.ChunkToolCall:
-			if chunk.ToolCall != nil {
-				var args map[string]any
-				json.Unmarshal([]byte(chunk.ToolCall.Function.Arguments), &args)
-				a.deps.Delta.OnToolStart(chunk.ToolCall.Function.Name, args)
-			}
+			// Tool call chunks are consumed by StreamAdapter to build resp.ToolCalls.
+			// UI notification (OnToolStart) is deferred to doToolExec to avoid duplicates.
 		case llm.ChunkError:
 			if chunk.Error != nil {
 				return nil, chunk.Error
 			}
 		}
+	}
+
+	// Flush buffered text only when StopReason indicates final answer.
+	// "stop" / "" = pure text response → flush
+	// "tool_calls"  = tool invocation  → suppress (intermediate reasoning)
+	if resp != nil {
+		log.Printf("[doGenerate] StopReason=%q textLen=%d toolCalls=%d", resp.StopReason, textBuf.Len(), len(resp.ToolCalls))
+	}
+	if textBuf.Len() > 0 && resp != nil && resp.StopReason != "tool_calls" {
+		a.deps.Delta.OnText(textBuf.String())
 	}
 
 	if genErr != nil {
@@ -775,10 +815,18 @@ func (a *AgentLoop) doCompact() {
 
 	compacted := []llm.Message{firstMsg}
 	if summary != "" {
-		compacted = append(compacted, llm.Message{
-			Role:    "assistant",
-			Content: "[对话摘要] " + summary,
-		})
+		// BUG-19: if firstMsg is already a summary, replace it instead of nesting
+		if strings.HasPrefix(firstMsg.Content, "[对话摘要]") {
+			compacted = []llm.Message{{
+				Role:    "assistant",
+				Content: "[对话摘要] " + summary,
+			}}
+		} else {
+			compacted = append(compacted, llm.Message{
+				Role:    "assistant",
+				Content: "[对话摘要] " + summary,
+			})
+		}
 	}
 	compacted = append(compacted, tail...)
 	a.history = compacted
@@ -793,18 +841,107 @@ func (a *AgentLoop) forceTruncate(keep int) {
 		return
 	}
 	
-	// Preserve systemic identity at index 0, append the last `keep` items
+	// Preserve first user message at index 0, append the last `keep` items
 	truncated := []llm.Message{a.history[0]}
 	truncated = append(truncated, a.history[len(a.history)-keep:]...)
 	a.history = truncated
+	a.persistedCount = 0 // history restructured, next persist must be full replace
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// persistHistory saves NEW messages incrementally (append-only).
+// Only messages added since the last persist (or session load) are written.
+// This prevents destructive overwrites of existing DB history.
+func (a *AgentLoop) persistHistory() {
+	if a.deps.HistoryStore == nil {
+		return
 	}
-	return b
+	sid := a.SessionID()
+	if sid == "" {
+		return
+	}
+	a.mu.Lock()
+	baseline := a.persistedCount
+	if baseline >= len(a.history) {
+		a.mu.Unlock()
+		return // nothing new
+	}
+	newMsgs := a.history[baseline:]
+	exports := make([]HistoryExport, len(newMsgs))
+	for i, m := range newMsgs {
+		tc, _ := json.Marshal(m.ToolCalls)
+		exports[i] = HistoryExport{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  string(tc),
+			ToolCallID: m.ToolCallID,
+		}
+	}
+	a.persistedCount = len(a.history)
+	a.mu.Unlock()
+	if err := a.deps.HistoryStore.AppendAll(sid, exports); err != nil {
+		log.Printf("[history] incremental persist failed: %v", err)
+	}
+}
+
+// persistFullHistory does a destructive full replace of the DB history.
+// Called ONLY after doCompact/forceTruncate which intentionally restructure the history.
+func (a *AgentLoop) persistFullHistory() {
+	if a.deps.HistoryStore == nil {
+		return
+	}
+	sid := a.SessionID()
+	if sid == "" {
+		return
+	}
+	a.mu.Lock()
+	exports := make([]HistoryExport, len(a.history))
+	for i, m := range a.history {
+		tc, _ := json.Marshal(m.ToolCalls)
+		exports[i] = HistoryExport{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  string(tc),
+			ToolCallID: m.ToolCallID,
+		}
+	}
+	a.persistedCount = len(a.history)
+	a.mu.Unlock()
+	if err := a.deps.HistoryStore.SaveAll(sid, exports); err != nil {
+		log.Printf("[history] full persist failed: %v", err)
+	}
+}
+
+// fireHooks invokes all PostRunHooks asynchronously.
+func (a *AgentLoop) fireHooks(ctx context.Context, steps int) {
+	if a.deps.Hooks == nil {
+		return
+	}
+	a.mu.Lock()
+	finalContent := ""
+	userMsg := ""
+	for _, m := range a.history {
+		if m.Role == "user" && m.Content != "" {
+			userMsg = m.Content
+			break
+		}
+	}
+	if len(a.history) > 0 {
+		finalContent = a.history[len(a.history)-1].Content
+	}
+	// Snapshot history for async hooks (KI distillation)
+	historySnapshot := make([]llm.Message, len(a.history))
+	copy(historySnapshot, a.history)
+	a.mu.Unlock()
+	a.deps.Hooks.OnRunComplete(ctx, RunInfo{
+		SessionID:    a.SessionID(),
+		UserMessage:  userMsg,
+		Steps:        steps,
+		Mode:         a.options.Mode,
+		FinalContent: finalContent,
+		History:      historySnapshot,
+	})
 }
 
 // Ensure ctxutil is used
 var _ = ctxutil.SessionIDFromContext
+

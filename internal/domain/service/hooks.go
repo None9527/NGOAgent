@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log"
-	"time"
+
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
 
 // PostRunHook is called after each agent run completes.
@@ -14,10 +16,12 @@ type PostRunHook interface {
 // RunInfo contains metadata about a completed run for hooks.
 type RunInfo struct {
 	SessionID    string
+	UserMessage  string // first user message in this run
 	Steps        int
 	ToolCalls    int
 	FinalContent string
 	Mode         string
+	History      []llm.Message // conversation history for distillation
 }
 
 // PostRunHookChain executes multiple hooks in order.
@@ -73,58 +77,120 @@ func (h *BrainSnapshotHook) OnRunComplete(ctx context.Context, info RunInfo) {
 	log.Printf("[hook] Brain snapshot: session=%s steps=%d", info.SessionID, info.Steps)
 }
 
-// KIDistillHook asynchronously distills knowledge after a run.
+// KIDistillHook uses LLM to distill knowledge after a run.
 type KIDistillHook struct {
-	getKI func() KIStore
+	getKI  func() KIStore
+	llm    KILLMDistiller
 }
 
 // KIStore is the interface needed by the distillation hook.
 type KIStore interface {
-	Save(item interface{}) error
+	SaveDistilled(summary, content string, tags, sources []string) error
+}
+
+// KILLMDistiller abstracts the LLM call for knowledge distillation.
+type KILLMDistiller interface {
+	DistillKnowledge(messages []llm.Message) (*llm.KIResult, error)
 }
 
 // NewKIDistillHook creates the KI distillation hook.
-func NewKIDistillHook(getKI func() KIStore) *KIDistillHook {
-	return &KIDistillHook{getKI: getKI}
+func NewKIDistillHook(getKI func() KIStore, distiller KILLMDistiller) *KIDistillHook {
+	return &KIDistillHook{getKI: getKI, llm: distiller}
 }
 
 func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 	store := h.getKI()
-	if store == nil {
+	if store == nil || h.llm == nil {
 		return
 	}
-	// Async distillation — runs in background goroutine
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[hook] panic in KI distill: %v", r)
 			}
 		}()
-		// Only distill for meaningful sessions (>5 steps, not heartbeat)
-		if info.Steps < 5 || info.Mode == "heartbeat" {
+		// Gate: only distill meaningful conversations
+		if info.Steps < 5 || info.Mode == "heartbeat" || len(info.History) < 3 {
 			return
 		}
-		log.Printf("[hook] KI distill: session=%s steps=%d mode=%s", info.SessionID, info.Steps, info.Mode)
+		log.Printf("[hook] KI distill: calling LLM for session=%s steps=%d", info.SessionID, info.Steps)
 
-		// Extract key facts and persist via KIStore
-		kiEntry := map[string]any{
-			"session_id": info.SessionID,
-			"steps":      info.Steps,
-			"mode":       info.Mode,
-			"timestamp":  time.Now().Format(time.RFC3339),
+		result, err := h.llm.DistillKnowledge(info.History)
+		if err != nil {
+			log.Printf("[hook] KI distill LLM failed: %v", err)
+			return
 		}
-		if info.FinalContent != "" {
-			// Trim to last 500 chars of final content as distillation seed
-			content := info.FinalContent
-			if len(content) > 500 {
-				content = content[len(content)-500:]
-			}
-			kiEntry["final_summary"] = content
+
+		if !result.ShouldSave {
+			log.Printf("[hook] KI distill: LLM decided not worth saving for session=%s", info.SessionID)
+			return
 		}
-		if err := store.Save(kiEntry); err != nil {
+
+		if result.Title == "" {
+			log.Printf("[hook] KI distill: empty title, skipping")
+			return
+		}
+
+		// Build full content with summary header
+		content := fmt.Sprintf("# %s\n\n%s\n\n---\n\n%s",
+			result.Title, result.Summary, result.Content)
+
+		if err := store.SaveDistilled(
+			result.Title, content,
+			result.Tags,
+			[]string{info.SessionID},
+		); err != nil {
 			log.Printf("[hook] KI distill save failed: %v", err)
 		} else {
-			log.Printf("[hook] KI distilled: session=%s", info.SessionID)
+			log.Printf("[hook] KI distilled: session=%s title=%q tags=%v", info.SessionID, result.Title, result.Tags)
 		}
+	}()
+}
+
+// ═══════════════════════════════════════════
+// TitleDistillHook — LLM-generated session title
+// ═══════════════════════════════════════════
+
+// SessionTitler is the interface needed to persist a distilled title.
+type SessionTitler interface {
+	SetTitle(sessionID, title string)
+}
+
+// TitleLLMCaller abstracts the LLM call for title distillation.
+type TitleLLMCaller interface {
+	DistillTitle(userMessage string) (string, error)
+}
+
+// TitleDistillHook distills a short, descriptive session title via LLM
+// after the first user message, and persists it to the session manager.
+type TitleDistillHook struct {
+	llm    TitleLLMCaller
+	titler SessionTitler
+}
+
+// NewTitleDistillHook creates the title distillation hook.
+func NewTitleDistillHook(llm TitleLLMCaller, titler SessionTitler) *TitleDistillHook {
+	return &TitleDistillHook{llm: llm, titler: titler}
+}
+
+func (h *TitleDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
+	// Only distill if session has a user message and we haven't titled it yet
+	// (The caller checks sess.Title == "" before triggering; here we just guard)
+	if info.UserMessage == "" || info.SessionID == "" || info.Mode == "heartbeat" {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[hook] panic in TitleDistillHook: %v", r)
+			}
+		}()
+		title, err := h.llm.DistillTitle(info.UserMessage)
+		if err != nil {
+			log.Printf("[hook] title distill failed: %v", err)
+			return
+		}
+		h.titler.SetTitle(info.SessionID, title)
+		log.Printf("[hook] title distilled: session=%s title=%q", info.SessionID, title)
 	}()
 }

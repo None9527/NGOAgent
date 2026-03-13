@@ -36,6 +36,22 @@ type DeltaSink interface {
 	OnError(err error)
 }
 
+// HistoryPersister saves and loads conversation history to/from durable storage.
+type HistoryPersister interface {
+	SaveAll(sessionID string, msgs []HistoryExport) error
+	AppendAll(sessionID string, msgs []HistoryExport) error
+	LoadAll(sessionID string) ([]HistoryExport, error)
+	DeleteSession(sessionID string) error
+}
+
+// HistoryExport is a serializable snapshot of a single message for persistence.
+type HistoryExport struct {
+	Role       string
+	Content    string
+	ToolCalls  string // JSON-encoded
+	ToolCallID string
+}
+
 // Deps groups all dependencies injected into the AgentLoop.
 type Deps struct {
 	// Core
@@ -52,19 +68,24 @@ type Deps struct {
 	KIStore   *knowledge.Store
 	Workspace *workspace.Store
 	SkillMgr  *skill.Manager
+
+	// Persistence + Hooks
+	HistoryStore HistoryPersister
+	Hooks        *PostRunHookChain
 }
 
 // AgentLoop manages a single agent conversation loop.
 type AgentLoop struct {
-	deps       Deps
-	history    []llm.Message
-	state      State
-	mu         sync.Mutex
-	runMu      sync.Mutex // Backpressure: prevents concurrent Run() (Anti's BUSY state)
-	stopCh     chan struct{}
-	options    RunOptions
-	guard      *BehaviorGuard
-	ephemerals []string // Pending ephemeral messages for next LLM call
+	deps           Deps
+	history        []llm.Message
+	persistedCount int // number of messages already persisted to DB (incremental write baseline)
+	state          State
+	mu             sync.Mutex
+	runMu          sync.Mutex // Backpressure: prevents concurrent Run() (Anti's BUSY state)
+	stopCh         chan struct{}
+	options        RunOptions
+	guard          *BehaviorGuard
+	ephemerals     []string // Pending ephemeral messages for next LLM call
 
 	// Task boundary state (written by task_boundary tool intercept in doToolExec).
 	// Mirrors Anti's latest_task_boundary_step tracking.
@@ -114,10 +135,12 @@ func (a *AgentLoop) SessionID() string {
 }
 
 // SetHistory replaces the conversation history (for session restore).
+// Sets persistedCount to len(msgs) since these are all from DB.
 func (a *AgentLoop) SetHistory(msgs []llm.Message) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.history = msgs
+	a.persistedCount = len(msgs)
 }
 
 // AppendMessage adds a message to the history.
@@ -162,6 +185,7 @@ func (a *AgentLoop) ClearHistory() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.history = nil
+	a.persistedCount = 0
 }
 
 // Compact triggers context compaction on the current history.

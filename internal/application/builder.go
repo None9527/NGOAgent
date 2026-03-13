@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/heartbeat"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/cron"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm/openai"
@@ -23,6 +25,7 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
+	grpcserver "github.com/ngoclaw/ngoagent/internal/interfaces/grpc"
 	"github.com/ngoclaw/ngoagent/internal/interfaces/server"
 	"gorm.io/gorm"
 )
@@ -36,11 +39,12 @@ type App struct {
 	Loop         *service.AgentLoop
 	Factory      *service.LoopFactory
 	Server       *server.Server
+	GRPCServer   *grpcserver.Server
 	ChatEngine   *service.ChatEngine
 	SessionMgr   *service.SessionManager
 	ModelMgr     *service.ModelManager
 	ToolAdmin    *service.ToolAdmin
-	HeartbeatEng *heartbeat.Engine
+	CronMgr      *cron.Manager
 	MCPMgr       *mcp.Manager
 	SkillMgr     *skill.Manager
 	SecurityHook *security.Hook
@@ -65,21 +69,37 @@ func Build() (*App, error) {
 	}
 	repo := persistence.NewRepository(db)
 	historyStore := persistence.NewHistoryStore(db)
-	_ = historyStore // Future: wire into session state
 
 	// ═══════════════════════════════════════════
 	// Phase 2: Core Infrastructure
 	// ═══════════════════════════════════════════
 	var providers []llm.Provider
 	for _, pd := range cfg.LLM.Providers {
-		providers = append(providers, openai.NewClient(pd.Name, pd.BaseURL, pd.APIKey, pd.Models))
+		if pd.Type == "" || pd.Type == "openai" {
+			providers = append(providers, openai.NewClient(pd.Name, pd.BaseURL, pd.APIKey, pd.Models))
+		} else {
+			p := llm.BuildProviderFromConfig(pd.Type, pd.Name, pd.BaseURL, pd.APIKey, pd.Models)
+			if p != nil {
+				providers = append(providers, p)
+			}
+		}
 	}
 	router := llm.NewRouter(providers)
 
 	homeDir := config.HomeDir()
 	promptEngine := prompt.NewEngineWithHome(homeDir)
-	sbMgr := sandbox.NewManager()
-	secHook := security.NewHook(&cfg.Security, &cfg.Heartbeat.Security)
+	// Resolve workspace path (~ → home dir) and ensure it exists
+	workspaceDir := cfg.Agent.Workspace
+	if strings.HasPrefix(workspaceDir, "~") {
+		if h, err := os.UserHomeDir(); err == nil {
+			workspaceDir = h + workspaceDir[1:]
+		}
+	}
+	if workspaceDir != "" {
+		os.MkdirAll(workspaceDir, 0755)
+	}
+	sbMgr := sandbox.NewManager(workspaceDir)
+	secHook := security.NewHook(&cfg.Security)
 
 	// ═══════════════════════════════════════════
 	// Phase 3: Storage Layer
@@ -116,7 +136,7 @@ func Build() (*App, error) {
 	registry.Register(tool.NewTaskBoundaryTool())
 	registry.Register(tool.NewNotifyUserTool())
 	registry.Register(&tool.UpdateProjectContextTool{})
-	registry.Register(tool.NewSaveMemoryTool(homeDir))
+	registry.Register(tool.NewSaveMemoryTool(kiStore))
 	registry.Register(tool.NewSendMessageTool(brainDir))
 	registry.Register(tool.NewTaskListTool(brainDir))
 	spawnTool := tool.NewSpawnAgentTool(nil) // Lazy: SpawnFunc set after loop creation
@@ -124,10 +144,17 @@ func Build() (*App, error) {
 	registry.Register(tool.NewForgeTool(cfg.Forge.SandboxDir))
 	brainArtifactTool := tool.NewBrainArtifactTool(nil) // Lazy: Brain set per-session
 	registry.Register(brainArtifactTool)
+	// manage_cron tool is registered after CronManager creation (Phase 7)
 
 	// ═══════════════════════════════════════════
 	// Phase 5: Engine + Facades (unified via LoopFactory)
 	// ═══════════════════════════════════════════
+	// PostRun hooks: KI distillation after meaningful sessions
+	kiDistiller := llm.NewKnowledgeDistiller(router)
+	hookChain := service.NewPostRunHookChain(
+		service.NewKIDistillHook(func() service.KIStore { return kiStore }, kiDistiller),
+	)
+
 	baseDeps := service.Deps{
 		Config:       cfg,
 		ConfigMgr:    cfgMgr,
@@ -140,6 +167,8 @@ func Build() (*App, error) {
 		KIStore:      kiStore,
 		Workspace:    wsStore,
 		SkillMgr:     skillMgr,
+		HistoryStore: &historyAdapter{store: historyStore},
+		Hooks:        hookChain,
 	}
 	factory := service.NewLoopFactory(baseDeps, 8) // max 8 concurrent runs
 
@@ -163,11 +192,17 @@ func Build() (*App, error) {
 		return service.NewAgentLoop(baseDeps)
 	}, brainDir)
 
-	sessMgr := service.NewSessionManager(repo)
-	chatEngine := service.NewChatEngine(loop, sessMgr)
+	sessMgr := service.NewSessionManager(&sessionRepoAdapter{repo: repo, loc: cfg.LoadLocation()})
+	chatEngine := service.NewChatEngine(loop, sessMgr, &historyAdapter{store: historyStore})
 	modelMgr := service.NewModelManager(router)
-	toolAdmin := service.NewToolAdmin(registry)
+	toolAdmin := service.NewToolAdmin(&toolRegistryAdapter{reg: registry})
 	_ = chatEngine // Used by server routes
+
+	// Register TitleDistillHook after sessMgr is available
+	hookChain.Add(service.NewTitleDistillHook(
+		llm.NewTitleDistiller(router),
+		sessMgr,
+	))
 
 	// ═══════════════════════════════════════════
 	// Phase 6: Hot-Reload Subscriptions
@@ -176,7 +211,14 @@ func Build() (*App, error) {
 		log.Println("[hot-reload] LLM config changed, rebuilding providers")
 		var newProviders []llm.Provider
 		for _, pd := range new.LLM.Providers {
-			newProviders = append(newProviders, openai.NewClient(pd.Name, pd.BaseURL, pd.APIKey, pd.Models))
+			if pd.Type == "" || pd.Type == "openai" {
+				newProviders = append(newProviders, openai.NewClient(pd.Name, pd.BaseURL, pd.APIKey, pd.Models))
+			} else {
+				p := llm.BuildProviderFromConfig(pd.Type, pd.Name, pd.BaseURL, pd.APIKey, pd.Models)
+				if p != nil {
+					newProviders = append(newProviders, p)
+				}
+			}
 		}
 		router.Reload(newProviders)
 	})
@@ -218,15 +260,28 @@ func Build() (*App, error) {
 	// ═══════════════════════════════════════════
 	stopCh := make(chan struct{})
 
-	// Start heartbeat engine (if configured)
-	// Heartbeat uses its own independent AgentLoop via LoopFactory.
-	hbRun := factory.Create(sessionID, service.NewHeartbeatChannel(nil))
-	hbEngine := heartbeat.NewEngine(&cfg.Heartbeat, hbRun.Loop, func() string {
-		return wsStore.ReadHeartbeat(config.ResolvePath("heartbeat.md"))
+	// Start cron manager — purely SQLite-driven, no default jobs.
+	// Jobs are created/managed by the agent via manage_cron tool.
+	cronMgr, err := cron.NewManager(db, func() cron.Runner {
+		// Create a new per-run session tagged as "cron" channel
+		conv, convErr := repo.CreateConversation("cron", "")
+		cronSID := sessionID // fallback to global session
+		if convErr == nil {
+			cronSID = conv.ID
+		}
+		run := factory.Create(cronSID, service.NewHeartbeatChannel(nil))
+		return run.Loop
 	})
-	if cfg.Heartbeat.Enabled {
-		go hbEngine.Start(context.Background())
-		log.Printf("[heartbeat] Started with interval %s (independent loop via factory)", cfg.Heartbeat.Interval)
+	if err != nil {
+		log.Printf("Warning: cron manager init: %v", err)
+	} else {
+		if cfg.Cron.Enabled {
+			if err := cronMgr.Start(); err != nil {
+				log.Printf("Warning: cron start: %v", err)
+			}
+		}
+		// Register manage_cron tool now that manager is ready
+		registry.Register(tool.NewManageCronTool(cronMgr))
 	}
 
 	// Start skill file watcher
@@ -253,16 +308,30 @@ func Build() (*App, error) {
 	}
 
 	// ═══════════════════════════════════════════
-	// Phase 8: Server
+	// Phase 8: Unified API + Server
 	// ═══════════════════════════════════════════
-	addr := ":8080"
+	addr := ":19996"
 	if cfg.Server.HTTPPort != 0 {
 		addr = fmt.Sprintf(":%d", cfg.Server.HTTPPort)
 	}
-	srv := server.NewServer(loop, router, cfgMgr, addr)
-	srv.SetManagers(sessMgr, toolAdmin, secHook)
-	srv.SetLoopPool(loopPool)
-	srv.SetSkillMgr(skillMgr)
+
+	agentAPI := NewAgentAPI(
+		loop, loopPool, chatEngine,
+		sessMgr, modelMgr, toolAdmin,
+		secHook, skillMgr, cronMgr,
+		cfgMgr, router,
+		&historyAdapter{store: historyStore},
+		brainDir,
+		kiStore,
+	)
+	srv := server.NewServer(agentAPI, addr)
+
+	// gRPC server — defaults to :19998
+	grpcAddr := ":19998"
+	if cfg.Server.GRPCPort != 0 {
+		grpcAddr = fmt.Sprintf(":%d", cfg.Server.GRPCPort)
+	}
+	grpcSrv := grpcserver.NewServer(agentAPI, grpcAddr)
 
 	return &App{
 		Config:       cfgMgr,
@@ -272,11 +341,12 @@ func Build() (*App, error) {
 		Loop:         loop,
 		Factory:      factory,
 		Server:       srv,
+		GRPCServer:   grpcSrv,
 		ChatEngine:   chatEngine,
 		SessionMgr:   sessMgr,
 		ModelMgr:     modelMgr,
 		ToolAdmin:    toolAdmin,
-		HeartbeatEng: hbEngine,
+		CronMgr:      cronMgr,
 		MCPMgr:       mcpMgr,
 		SkillMgr:     skillMgr,
 		SecurityHook: secHook,
@@ -291,8 +361,8 @@ func (app *App) Shutdown() {
 	if app.Factory != nil {
 		app.Factory.StopAll() // Cascade stop all active runs
 	}
-	if app.HeartbeatEng != nil {
-		app.HeartbeatEng.Stop()
+	if app.CronMgr != nil {
+		app.CronMgr.Stop()
 	}
 	log.Println("[app] Shutdown complete")
 }
@@ -300,3 +370,117 @@ func (app *App) Shutdown() {
 func generateSessionID() string {
 	return uuid.New().String()
 }
+
+// historyAdapter bridges domain.HistoryPersister → infrastructure.HistoryStore
+// to avoid import cycle (domain cannot import persistence).
+type historyAdapter struct {
+	store *persistence.HistoryStore
+}
+
+func (a *historyAdapter) SaveAll(sessionID string, msgs []service.HistoryExport) error {
+	rows := make([]persistence.HistoryMessage, len(msgs))
+	for i, m := range msgs {
+		rows[i] = persistence.HistoryMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
+		}
+	}
+	return a.store.SaveAll(sessionID, rows)
+}
+
+func (a *historyAdapter) LoadAll(sessionID string) ([]service.HistoryExport, error) {
+	rows, err := a.store.LoadSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	exports := make([]service.HistoryExport, len(rows))
+	for i, r := range rows {
+		exports[i] = service.HistoryExport{
+			Role:       r.Role,
+			Content:    r.Content,
+			ToolCalls:  r.ToolCalls,
+			ToolCallID: r.ToolCallID,
+		}
+	}
+	return exports, nil
+}
+
+func (a *historyAdapter) DeleteSession(sessionID string) error {
+	return a.store.DeleteSession(sessionID)
+}
+
+func (a *historyAdapter) AppendAll(sessionID string, msgs []service.HistoryExport) error {
+	rows := make([]persistence.HistoryMessage, len(msgs))
+	for i, m := range msgs {
+		rows[i] = persistence.HistoryMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
+		}
+	}
+	return a.store.AppendBatch(sessionID, rows)
+}
+
+// sessionRepoAdapter bridges domain.SessionRepo → *persistence.Repository.
+type sessionRepoAdapter struct {
+	repo *persistence.Repository
+	loc  *time.Location
+}
+
+func (a *sessionRepoAdapter) CreateConversation(channel, title string) (string, error) {
+	conv, err := a.repo.CreateConversation(channel, title)
+	if err != nil {
+		return "", err
+	}
+	return conv.ID, nil
+}
+
+func (a *sessionRepoAdapter) ListConversations(limit, offset int) ([]service.ConversationInfo, error) {
+	convs, err := a.repo.ListConversations(limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]service.ConversationInfo, len(convs))
+	for i, c := range convs {
+		result[i] = service.ConversationInfo{
+			ID:        c.ID,
+			Title:     c.Title,
+			Channel:   c.Channel,
+			CreatedAt: c.CreatedAt.In(a.loc).Format("2006-01-02T15:04:05Z07:00"),
+			UpdatedAt: c.UpdatedAt.In(a.loc).Format("2006-01-02T15:04:05Z07:00"),
+		}
+	}
+	return result, nil
+}
+
+func (a *sessionRepoAdapter) UpdateTitle(id, title string) error {
+	return a.repo.UpdateConversationTitle(id, title)
+}
+
+func (a *sessionRepoAdapter) Touch(id string) error {
+	return a.repo.TouchConversation(id)
+}
+
+func (a *sessionRepoAdapter) DeleteConversation(id string) error {
+	return a.repo.DeleteConversation(id)
+}
+
+// toolRegistryAdapter bridges domain.ToolRegistry → *tool.Registry.
+type toolRegistryAdapter struct {
+	reg *tool.Registry
+}
+
+func (a *toolRegistryAdapter) List() []service.ToolInfo {
+	infos := a.reg.List()
+	result := make([]service.ToolInfo, len(infos))
+	for i, ti := range infos {
+		result[i] = service.ToolInfo{Name: ti.Name, Enabled: ti.Enabled}
+	}
+	return result
+}
+
+func (a *toolRegistryAdapter) Enable(name string) error  { return a.reg.Enable(name) }
+func (a *toolRegistryAdapter) Disable(name string) error { return a.reg.Disable(name) }

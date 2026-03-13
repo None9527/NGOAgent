@@ -14,96 +14,125 @@ import (
 
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
+	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
 )
+
+// API is the interface that the server requires from the application layer.
+// application.AgentAPI satisfies this interface implicitly.
+type API interface {
+	// Chat — unified streaming entry point
+	ChatStream(ctx context.Context, sessionID, message string, delta *service.Delta) error
+	SessionID(sessionID string) string
+	StopRun()
+	Approve(approvalID string, approved bool) error
+
+	// Session
+	NewSession(title string) apitype.SessionResponse
+	ListSessions() apitype.SessionListResponse
+	SetSessionTitle(id, title string)
+	DeleteSession(id string) error
+
+	// History
+	GetHistory(sessionID string) ([]apitype.HistoryMessage, error)
+	ClearHistory()
+	CompactContext()
+
+	// Model
+	ListModels() apitype.ModelListResponse
+	SwitchModel(name string) error
+	CurrentModel() string
+
+	// Config
+	GetConfig() map[string]any
+	SetConfig(key string, value any) error
+	AddProvider(p config.ProviderDef) error
+	RemoveProvider(name string) error
+	AddMCPServer(s config.MCPServerDef) error
+	RemoveMCPServer(name string) error
+
+	// Tools & Skills
+	ListTools() []apitype.ToolInfoResponse
+	EnableTool(name string) error
+	DisableTool(name string) error
+	ListSkills() []apitype.SkillInfoResponse
+
+	// Status
+	Health() apitype.HealthResponse
+	GetSecurity() apitype.SecurityResponse
+	GetContextStats() apitype.ContextStats
+	GetSystemInfo() apitype.SystemInfoResponse
+	CronStatus() map[string]any
+
+	// Brain artifacts
+	ListBrainArtifacts(sessionID string) ([]apitype.BrainArtifactInfo, error)
+	ReadBrainArtifact(sessionID, name string) (string, error)
+
+	// KI management
+	ListKI() (any, error)
+	GetKI(id string) (interface{}, error)
+	DeleteKI(id string) error
+	ListKIArtifacts(id string) ([]apitype.BrainArtifactInfo, error)
+	ReadKIArtifact(id, name string) (string, error)
+}
 
 // Server is the HTTP/SSE server for NGOAgent.
 type Server struct {
-	loop      *service.AgentLoop
-	loopPool  *service.LoopPool
-	router    *llm.Router
-	cfg       *config.Manager
-	sessMgr   *service.SessionManager
-	toolAdmin *service.ToolAdmin
-	secHook   *security.Hook
-	skillMgr  *skill.Manager
-	addr      string
-	mu        sync.Mutex
+	api  API
+	addr string
+	mu   sync.Mutex
 }
 
-// NewServer creates an HTTP server.
-func NewServer(loop *service.AgentLoop, router *llm.Router, cfg *config.Manager, addr string) *Server {
+// NewServer creates an HTTP server with the unified API.
+func NewServer(api API, addr string) *Server {
 	return &Server{
-		loop:   loop,
-		router: router,
-		cfg:    cfg,
-		addr:   addr,
+		api:  api,
+		addr: addr,
 	}
-}
-
-// SetLoopPool sets the per-session loop pool.
-func (s *Server) SetLoopPool(pool *service.LoopPool) {
-	s.loopPool = pool
-}
-
-// SetSkillMgr sets the skill manager for /skill commands.
-func (s *Server) SetSkillMgr(mgr *skill.Manager) {
-	s.skillMgr = mgr
-}
-
-// SetManagers injects optional managers for REST API routes.
-func (s *Server) SetManagers(sessMgr *service.SessionManager, toolAdmin *service.ToolAdmin, secHook *security.Hook) {
-	s.sessMgr = sessMgr
-	s.toolAdmin = toolAdmin
-	s.secHook = secHook
 }
 
 // Start begins listening for HTTP requests.
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 
-	// Chat endpoint (SSE streaming)
+	// ─── Core SSE / Chat ───
 	mux.HandleFunc("/v1/chat", s.handleChat)
-
-	// Approval endpoint (responds to pending approvals)
 	mux.HandleFunc("/v1/approve", s.handleApprove)
+	mux.HandleFunc("/v1/stop", s.handleStop)
 
-	// Slash commands
+	// ─── Health / Models / Config (read) ───
+	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(s.api.Health())
+	})
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(s.api.ListModels())
+	})
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(s.api.GetConfig())
+	})
+
+	// ─── Slash commands (backward compat) ───
 	mux.HandleFunc("/v1/slash/", s.handleSlash)
 
-	// Health check
-	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{
-			"status": "ok",
-			"model":  s.router.CurrentModel(),
-		})
+	// ─── Model switch ───
+	mux.HandleFunc("/v1/model/switch", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct{ Model string `json:"model"` }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if err := s.api.SwitchModel(req.Model); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "model": req.Model})
 	})
 
-	// Models list
-	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"models":  s.router.ListModels(),
-			"current": s.router.CurrentModel(),
-		})
-	})
-
-	// Config endpoint (expose agent limits for verification)
-	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		c := s.cfg.Get()
-		json.NewEncoder(w).Encode(map[string]any{
-			"agent": map[string]any{
-				"max_steps":     c.Agent.MaxSteps,
-				"planning_mode": c.Agent.PlanningMode,
-			},
-		})
-	})
-
-	// REST API routes (session/tools/context/security)
-	if s.sessMgr != nil && s.toolAdmin != nil {
-		s.RegisterAPIRoutes(mux, s.sessMgr, s.toolAdmin, s.secHook)
-	}
+	// ─── REST API routes ───
+	s.registerAPIRoutes(mux)
 
 	srv := &http.Server{
 		Addr:              s.addr,
@@ -140,18 +169,25 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-
 	if req.Message == "" {
 		http.Error(w, "empty message", http.StatusBadRequest)
 		return
 	}
 
-	// Check for slash command
+	// Check for slash command — only intercept known commands, not file paths
 	if strings.HasPrefix(req.Message, "/") {
-		result := s.execSlash(req.Message)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"result": result})
-		return
+		firstWord := strings.Fields(req.Message)[0]
+		knownCmds := map[string]bool{
+			"/model": true, "/models": true, "/set": true, "/forge": true,
+			"/plan": true, "/status": true, "/help": true, "/skill": true,
+			"/clear": true, "/compact": true, "/cron": true,
+		}
+		if knownCmds[firstWord] {
+			result := s.execSlash(req.Message)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"result": result})
+			return
+		}
 	}
 
 	// SSE streaming
@@ -161,36 +197,39 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if sid := s.api.SessionID(req.SessionID); sid != "" {
+		w.Header().Set("X-Session-Id", sid)
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-
-	// Resolve loop: per-session if session_id provided, default otherwise
-	loop := s.loop
-	if req.SessionID != "" && s.loopPool != nil {
-		loop = s.loopPool.Get(req.SessionID)
-	}
-
-	// Expose session ID to client
-	if sid := loop.SessionID(); sid != "" {
-		w.Header().Set("X-Session-Id", sid)
-	}
 	flusher.Flush()
+
+	var sseMu sync.Mutex
+	var sseCount int
+	writeSSE := func(payload []byte) {
+		sseMu.Lock()
+		sseCount++
+		log.Printf("[SSE#%d] %s", sseCount, string(payload))
+		fmt.Fprintf(w, "data: %s\n\n", payload)
+		flusher.Flush()
+		sseMu.Unlock()
+	}
+
+	// Protocol-specific Delta sink — only SSE serialization, no kernel logic
 	delta := &service.Delta{
 		OnTextFunc: func(text string) {
 			data, _ := json.Marshal(map[string]string{"type": "text_delta", "content": text})
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			writeSSE(data)
 		},
 		OnReasoningFunc: func(text string) {
 			data, _ := json.Marshal(map[string]string{"type": "thinking", "content": text})
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			writeSSE(data)
 		},
 		OnToolStartFunc: func(name string, args map[string]any) {
 			data, _ := json.Marshal(map[string]any{"type": "tool_start", "name": name, "args": args})
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			writeSSE(data)
 		},
 		OnToolResultFunc: func(name, output string, err error) {
 			errStr := ""
@@ -198,68 +237,56 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				errStr = err.Error()
 			}
 			data, _ := json.Marshal(map[string]any{"type": "tool_result", "name": name, "output": output, "error": errStr})
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			writeSSE(data)
 		},
 		OnCompleteFunc: func() {
-			fmt.Fprintf(w, "data: [DONE]\n\n")
-			flusher.Flush()
+			data, _ := json.Marshal(map[string]string{"type": "step_done"})
+			writeSSE(data)
 		},
 		OnErrorFunc: func(err error) {
 			data, _ := json.Marshal(map[string]string{"type": "error", "message": err.Error()})
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			writeSSE(data)
 		},
 		OnProgressFunc: func(taskName, status, summary, mode string) {
 			data, _ := json.Marshal(map[string]any{
-				"type":      "progress",
-				"task_name": taskName,
-				"status":    status,
-				"summary":   summary,
-				"mode":      mode,
+				"type": "progress", "task_name": taskName,
+				"status": status, "summary": summary, "mode": mode,
 			})
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			writeSSE(data)
 		},
 		OnApprovalRequestFunc: func(approvalID, toolName string, args map[string]any, reason string) {
 			data, _ := json.Marshal(map[string]any{
-				"type":        "approval_request",
-				"approval_id": approvalID,
-				"tool_name":   toolName,
-				"args":        args,
-				"reason":      reason,
+				"type": "approval_request", "approval_id": approvalID,
+				"tool_name": toolName, "args": args, "reason": reason,
 			})
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			writeSSE(data)
 		},
 	}
 
-
-	loop.SetDelta(delta)
-	if err := loop.Run(r.Context(), req.Message); err != nil {
-		errMsg := err.Error()
-		// Backpressure: return 429 if agent is busy (concurrent run)
-		if strings.Contains(errMsg, "agent is busy") {
-			w.Header().Set("Retry-After", "5")
-			data, _ := json.Marshal(map[string]string{"type": "error", "message": errMsg})
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
-			return
+	// Unified API call — all kernel operations (LoopPool, acquire, run) handled by API layer
+	if err := s.api.ChatStream(r.Context(), req.SessionID, req.Message, delta); err != nil {
+		if err.Error() == "agent is busy" {
+			// Too late for HTTP status (headers already sent), send error as SSE event
+			data, _ := json.Marshal(map[string]string{"type": "error", "message": "agent is busy"})
+			writeSSE(data)
+		} else {
+			log.Printf("[handleChat] run error: %v", err)
 		}
-		data, _ := json.Marshal(map[string]string{"type": "error", "message": errMsg})
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
 	}
+
+	// Final [DONE] — only after entire run completes
+	sseMu.Lock()
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+	sseMu.Unlock()
 }
 
 // handleApprove processes approval/denial of pending tool calls.
-// POST /v1/approve {"approval_id": "xxx", "approved": true}
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-
 	var req struct {
 		ApprovalID string `json:"approval_id"`
 		Approved   bool   `json:"approved"`
@@ -268,28 +295,28 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-
 	if req.ApprovalID == "" {
 		http.Error(w, "approval_id required", http.StatusBadRequest)
 		return
 	}
-
-	if s.secHook == nil {
-		http.Error(w, "security hook not configured", http.StatusInternalServerError)
-		return
-	}
-
-	if err := s.secHook.Resolve(req.ApprovalID, req.Approved); err != nil {
+	if err := s.api.Approve(req.ApprovalID, req.Approved); err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-
 	json.NewEncoder(w).Encode(map[string]any{
-		"status":      "resolved",
-		"approval_id": req.ApprovalID,
-		"approved":    req.Approved,
+		"status": "resolved", "approval_id": req.ApprovalID, "approved": req.Approved,
 	})
+}
+
+// handleStop stops the current agent run.
+func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	s.api.StopRun()
+	json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
 }
 
 // handleSlash processes slash commands via HTTP.
@@ -312,21 +339,21 @@ func (s *Server) execSlash(input string) string {
 	switch cmd {
 	case "/model":
 		if len(args) == 0 {
-			return "Current model: " + s.router.CurrentModel()
+			return "Current model: " + s.api.CurrentModel()
 		}
-		if err := s.router.SwitchModel(args[0]); err != nil {
+		if err := s.api.SwitchModel(args[0]); err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return "Switched to: " + args[0]
 
 	case "/models":
-		return strings.Join(s.router.ListModels(), ", ")
+		return strings.Join(s.api.ListModels().Models, ", ")
 
 	case "/set":
 		if len(args) < 2 {
 			return "Usage: /set <key> <value>"
 		}
-		if err := s.cfg.Set(args[0], strings.Join(args[1:], " ")); err != nil {
+		if err := s.api.SetConfig(args[0], strings.Join(args[1:], " ")); err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return fmt.Sprintf("Set %s = %s", args[0], strings.Join(args[1:], " "))
@@ -335,9 +362,11 @@ func (s *Server) execSlash(input string) string {
 		return "Forge mode activated. Use the forge tool to begin."
 
 	case "/plan":
-		c := s.cfg.Get()
-		newMode := !c.Agent.PlanningMode
-		if err := s.cfg.Set("agent.planning_mode", newMode); err != nil {
+		c := s.api.GetConfig()
+		agent, _ := c["agent"].(map[string]any)
+		planMode, _ := agent["planning_mode"].(bool)
+		newMode := !planMode
+		if err := s.api.SetConfig("agent.planning_mode", newMode); err != nil {
 			return fmt.Sprintf("Failed to toggle planning mode: %v", err)
 		}
 		if newMode {
@@ -346,47 +375,31 @@ func (s *Server) execSlash(input string) string {
 		return "Planning mode: OFF — 自动判断是否需要计划"
 
 	case "/status":
-		c := s.cfg.Get()
-		planStr := "off"
-		if c.Agent.PlanningMode {
-			planStr = "forced"
-		}
-		return fmt.Sprintf("Model: %s | Security: %s | Planning: %s",
-			s.router.CurrentModel(), c.Security.Mode, planStr)
+		stats := s.api.GetContextStats()
+		sec := s.api.GetSecurity()
+		return fmt.Sprintf("Model: %s | Security: %s | History: %d msgs",
+			stats.Model, sec.Mode, stats.HistoryCount)
 
 	case "/help":
 		return "Commands: /model /models /set /forge /plan /skill /status /clear /compact /help"
 
 	case "/skill":
-		if s.skillMgr == nil {
-			return "Skill manager not available"
+		skills := s.api.ListSkills()
+		if len(skills) == 0 {
+			return "No skills discovered."
 		}
-		if len(args) == 0 || args[0] == "list" {
-			skills := s.skillMgr.List()
-			if len(skills) == 0 {
-				return "No skills discovered."
-			}
-			var lines []string
-			for _, sk := range skills {
-				lines = append(lines, fmt.Sprintf("  %s [%s] (%s) — %s", sk.Name, sk.ForgeStatus, sk.Type, sk.Description))
-			}
-			return "Skills:\n" + strings.Join(lines, "\n")
+		var lines []string
+		for _, sk := range skills {
+			lines = append(lines, fmt.Sprintf("  %s [%s] (%s) — %s", sk.Name, sk.Status, sk.Type, sk.Description))
 		}
-		if args[0] == "info" && len(args) > 1 {
-			sk, ok := s.skillMgr.Get(args[1])
-			if !ok {
-				return "Skill not found: " + args[1]
-			}
-			return fmt.Sprintf("Name: %s\nType: %s\nStatus: %s\nPath: %s\nDesc: %s", sk.Name, sk.Type, sk.ForgeStatus, sk.Path, sk.Description)
-		}
-		return "Usage: /skill [list|info <name>]"
+		return "Skills:\n" + strings.Join(lines, "\n")
 
 	case "/clear":
-		s.loop.ClearHistory()
+		s.api.ClearHistory()
 		return "History cleared."
 
 	case "/compact":
-		s.loop.Compact()
+		s.api.CompactContext()
 		return "Context compacted."
 
 	default:

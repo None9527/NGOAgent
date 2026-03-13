@@ -103,8 +103,13 @@ func (m *Manager) Set(key string, value any) error {
 	m.current = &cfg
 	m.lastHash = hashBytes(data)
 
-	// Notify section subscribers
-	m.notifySubscribers(&old, &cfg, key)
+	// Notify section subscribers — extract section name from dot-key
+	// e.g. "security.mode" → "security", "agent.planning_mode" → "agent"
+	section := key
+	if idx := strings.Index(key, "."); idx > 0 {
+		section = key[:idx]
+	}
+	m.notifySubscribers(&old, &cfg, section)
 	return nil
 }
 
@@ -202,11 +207,18 @@ func (m *Manager) reload() {
 	newCfg := *m.current
 	m.mu.RUnlock()
 
+	// Snapshot subscribers under lock to avoid concurrent map access with Subscribe()
+	m.mu.RLock()
+	subs := make(map[string][]ConfigChangeFunc, len(m.subscribers))
+	for k, v := range m.subscribers {
+		subs[k] = v
+	}
+	m.mu.RUnlock()
+
 	// Notify all sections
-	for section, fns := range m.subscribers {
+	for _, fns := range subs {
 		for _, fn := range fns {
 			fn(&old, &newCfg)
-			_ = section
 		}
 	}
 }
@@ -225,3 +237,95 @@ func hashBytes(data []byte) string {
 	h := md5.Sum(data)
 	return fmt.Sprintf("%x", h)
 }
+
+// saveAndNotify writes config to disk and notifies section subscribers.
+func (m *Manager) saveAndNotify(old *Config, section string) error {
+	data, err := yaml.Marshal(m.current)
+	if err != nil {
+		return fmt.Errorf("config marshal: %w", err)
+	}
+	if err := os.WriteFile(m.path, data, 0644); err != nil {
+		return fmt.Errorf("config write: %w", err)
+	}
+	m.lastHash = hashBytes(data)
+	m.notifySubscribers(old, m.current, section)
+	return nil
+}
+
+// AddProvider appends a new LLM provider to the config.
+func (m *Manager) AddProvider(p ProviderDef) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check for duplicate name
+	for _, existing := range m.current.LLM.Providers {
+		if existing.Name == p.Name {
+			return fmt.Errorf("provider %q already exists", p.Name)
+		}
+	}
+
+	old := *m.current
+	m.current.LLM.Providers = append(m.current.LLM.Providers, p)
+	return m.saveAndNotify(&old, "llm")
+}
+
+// RemoveProvider removes an LLM provider by name.
+func (m *Manager) RemoveProvider(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	old := *m.current
+	filtered := make([]ProviderDef, 0, len(m.current.LLM.Providers))
+	found := false
+	for _, p := range m.current.LLM.Providers {
+		if p.Name == name {
+			found = true
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	if !found {
+		return fmt.Errorf("provider %q not found", name)
+	}
+	m.current.LLM.Providers = filtered
+	return m.saveAndNotify(&old, "llm")
+}
+
+// AddMCPServer appends a new MCP server to the config.
+func (m *Manager) AddMCPServer(s MCPServerDef) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, existing := range m.current.MCP.Servers {
+		if existing.Name == s.Name {
+			return fmt.Errorf("mcp server %q already exists", s.Name)
+		}
+	}
+
+	old := *m.current
+	m.current.MCP.Servers = append(m.current.MCP.Servers, s)
+	return m.saveAndNotify(&old, "mcp")
+}
+
+// RemoveMCPServer removes an MCP server by name.
+func (m *Manager) RemoveMCPServer(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	old := *m.current
+	filtered := make([]MCPServerDef, 0, len(m.current.MCP.Servers))
+	found := false
+	for _, s := range m.current.MCP.Servers {
+		if s.Name == name {
+			found = true
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	if !found {
+		return fmt.Errorf("mcp server %q not found", name)
+	}
+	m.current.MCP.Servers = filtered
+	return m.saveAndNotify(&old, "mcp")
+}
+

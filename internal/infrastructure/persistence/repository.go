@@ -61,6 +61,11 @@ func (r *Repository) UpdateConversationTitle(id, title string) error {
 		Updates(map[string]any{"title": title, "updated_at": time.Now()}).Error
 }
 
+func (r *Repository) TouchConversation(id string) error {
+	return r.db.Model(&Conversation{}).Where("id = ?", id).
+		Update("updated_at", time.Now()).Error
+}
+
 func (r *Repository) DeleteConversation(id string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("conversation_id = ?", id).Delete(&Message{}).Error; err != nil {
