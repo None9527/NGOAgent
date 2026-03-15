@@ -1,0 +1,928 @@
+openapi: "3.0.3"
+info:
+  title: NGOAgent HTTP API
+  version: "1.0.0"
+  description: |
+    NGOAgent 的 HTTP API。支持 SSE 流式输出和 REST JSON 端点。
+    默认监听 :19997。
+
+servers:
+  - url: http://localhost:19997
+
+paths:
+  # ─── Core ───
+
+  /v1/chat:
+    post:
+      summary: 发送消息 (SSE 流式)
+      tags: [Chat]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string }
+                session_id: { type: string }
+                stream: { type: boolean, default: true }
+      responses:
+        "200":
+          description: SSE 事件流
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  事件类型: text_delta, thinking, tool_start, tool_result,
+                  progress, approval_request, plan_review, error, step_done
+
+  /v1/approve:
+    post:
+      summary: 审批工具调用
+      tags: [Chat]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approval_id, approved]
+              properties:
+                approval_id: { type: string }
+                approved: { type: boolean }
+      responses:
+        "200":
+          description: 审批结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /v1/stop:
+    post:
+      summary: 停止当前运行
+      tags: [Chat]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  # ─── Health / Models / Config ───
+
+  /v1/health:
+    get:
+      summary: 健康检查
+      tags: [System]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  version: { type: string }
+                  model: { type: string }
+                  tools: { type: integer }
+
+  /v1/models:
+    get:
+      summary: 可用模型列表
+      tags: [Model]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  models: { type: array, items: { type: string } }
+                  current: { type: string }
+
+  /v1/model/switch:
+    post:
+      summary: 切换模型
+      tags: [Model]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model]
+              properties:
+                model: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /v1/config:
+    get:
+      summary: 获取当前配置
+      tags: [Config]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                description: 完整配置 (JSON)
+
+  /v1/file:
+    get:
+      summary: 读取本地文件
+      tags: [File]
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+          description: 绝对路径
+      responses:
+        "200":
+          description: 文件二进制内容
+
+  /v1/upload:
+    post:
+      summary: 上传文件
+      tags: [File]
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path: { type: string }
+                  filename: { type: string }
+                  size: { type: string }
+
+  # ─── Session ───
+
+  /api/v1/session/new:
+    post:
+      summary: 创建新会话
+      tags: [Session]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id: { type: string }
+                  title: { type: string }
+
+  /api/v1/session/list:
+    get:
+      summary: 列出所有会话
+      tags: [Session]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SessionInfo"
+                  active: { type: string }
+
+  /api/v1/session/title:
+    post:
+      summary: 修改会话标题
+      tags: [Session]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, title]
+              properties:
+                id: { type: string }
+                title: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/session/delete:
+    post:
+      summary: 删除会话
+      tags: [Session]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  # ─── History ───
+
+  /api/v1/history:
+    get:
+      summary: 获取会话历史
+      tags: [History]
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/HistoryMessage"
+
+  /api/v1/history/clear:
+    post:
+      summary: 清空历史
+      tags: [History]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/history/compact:
+    post:
+      summary: 压缩上下文
+      tags: [History]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  # ─── Tools ───
+
+  /api/v1/tools:
+    get:
+      summary: 列出所有工具
+      tags: [Tools]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tools:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        enabled: { type: boolean }
+
+  /api/v1/tools/enable:
+    post:
+      summary: 启用工具
+      tags: [Tools]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/tools/disable:
+    post:
+      summary: 禁用工具
+      tags: [Tools]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  # ─── Skills ───
+
+  /api/v1/skills/list:
+    get:
+      summary: 列出技能
+      tags: [Skills]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skills: { type: array, items: { type: object } }
+
+  /api/v1/skills/read:
+    get:
+      summary: 读取技能内容
+      tags: [Skills]
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  content: { type: string }
+
+  /api/v1/skills/refresh:
+    post:
+      summary: 刷新技能
+      tags: [Skills]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/skills/delete:
+    post:
+      summary: 删除技能
+      tags: [Skills]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  # ─── MCP ───
+
+  /api/v1/mcp/servers:
+    get:
+      summary: 列出 MCP 服务器
+      tags: [MCP]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers: { type: array, items: { type: object } }
+
+  /api/v1/mcp/tools:
+    get:
+      summary: 列出 MCP 工具
+      tags: [MCP]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tools: { type: array, items: { type: object } }
+
+  # ─── Config Management ───
+
+  /api/v1/config:
+    post:
+      summary: 设置配置值
+      tags: [Config]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                key: { type: string }
+                value: {}
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/config/provider/add:
+    post:
+      summary: 添加 LLM Provider
+      tags: [Config]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderDef"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/config/provider/remove:
+    post:
+      summary: 移除 LLM Provider
+      tags: [Config]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/config/mcp/add:
+    post:
+      summary: 添加 MCP 服务器
+      tags: [Config]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, command]
+              properties:
+                name: { type: string }
+                command: { type: string }
+                args: { type: array, items: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/config/mcp/remove:
+    post:
+      summary: 移除 MCP 服务器
+      tags: [Config]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  # ─── Security / Stats / System ───
+
+  /api/v1/security:
+    get:
+      summary: 获取安全策略
+      tags: [System]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: { type: string }
+                  block_list: { type: array, items: { type: string } }
+                  safe_commands: { type: array, items: { type: string } }
+
+  /api/v1/stats:
+    get:
+      summary: 上下文统计
+      tags: [System]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  model: { type: string }
+                  history_count: { type: integer }
+                  token_estimate: { type: integer }
+
+  /api/v1/system:
+    get:
+      summary: 系统信息
+      tags: [System]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string }
+                  go_version: { type: string }
+                  os: { type: string }
+                  arch: { type: string }
+                  uptime_ms: { type: integer }
+
+  # ─── Brain Artifacts ───
+
+  /api/v1/brain/list:
+    get:
+      summary: 列出 Brain Artifact
+      tags: [Brain]
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifacts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ArtifactInfo"
+
+  /api/v1/brain/read:
+    get:
+      summary: 读取 Brain Artifact 内容
+      tags: [Brain]
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: name
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  content: { type: string }
+
+  # ─── KI (Knowledge Items) ───
+
+  /api/v1/ki/list:
+    get:
+      summary: 列出知识项
+      tags: [Knowledge]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { type: object } }
+
+  /api/v1/ki/get:
+    get:
+      summary: 获取知识项详情
+      tags: [Knowledge]
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/v1/ki/delete:
+    post:
+      summary: 删除知识项
+      tags: [Knowledge]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/ki/artifacts:
+    get:
+      summary: 列出 KI Artifact
+      tags: [Knowledge]
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifacts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ArtifactInfo"
+
+  /api/v1/ki/artifact/read:
+    get:
+      summary: 读取 KI Artifact 内容
+      tags: [Knowledge]
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: name
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  content: { type: string }
+
+  # ─── Cron ───
+
+  /api/v1/cron/list:
+    get:
+      summary: 列出定时任务
+      tags: [Cron]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs: { type: array, items: { type: object } }
+
+  /api/v1/cron/create:
+    post:
+      summary: 创建定时任务
+      tags: [Cron]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, schedule, prompt]
+              properties:
+                name: { type: string }
+                schedule: { type: string, description: "cron 表达式" }
+                prompt: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/cron/delete:
+    post:
+      summary: 删除定时任务
+      tags: [Cron]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/cron/enable:
+    post:
+      summary: 启用定时任务
+      tags: [Cron]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/cron/disable:
+    post:
+      summary: 禁用定时任务
+      tags: [Cron]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/cron/run:
+    post:
+      summary: 立即执行定时任务
+      tags: [Cron]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/v1/cron/logs:
+    get:
+      summary: 查看任务日志列表
+      tags: [Cron]
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs: { type: array, items: { type: object } }
+
+  /api/v1/cron/log/read:
+    get:
+      summary: 读取任务日志内容
+      tags: [Cron]
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema: { type: string }
+        - name: file
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file: { type: string }
+                  content: { type: string }
+
+components:
+  schemas:
+    StatusResponse:
+      type: object
+      properties:
+        status: { type: string }
+
+    SessionInfo:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        channel: { type: string }
+        created_at: { type: string }
+        updated_at: { type: string }
+
+    HistoryMessage:
+      type: object
+      properties:
+        role: { type: string }
+        content: { type: string }
+        tool_name: { type: string }
+        tool_args: { type: string }
+        reasoning: { type: string }
+
+    ArtifactInfo:
+      type: object
+      properties:
+        name: { type: string }
+        size: { type: integer }
+        mod_time: { type: string }
+
+    ProviderDef:
+      type: object
+      required: [name, base_url, api_key, models]
+      properties:
+        name: { type: string }
+        type: { type: string, default: "openai" }
+        base_url: { type: string }
+        api_key: { type: string }
+        models: { type: array, items: { type: string } }
