@@ -7,69 +7,83 @@
 ## 目录
 
 1. [全局架构](#全局架构)
-2. [Module 1: config](#module-1-config-internalconfig) — 统一配置 + 热更新
-3. [Module 2: engine](#module-2-engine-internalengine) — ReAct Loop + 状态机 + 心跳引擎
-4. [Module 3: llm](#module-3-llm-internalllm) — LLM Provider 路由
-5. [Module 4: prompt](#module-4-prompt-internalprompt) — 15-Section 组装 + 3 层发现 + 4 级裁剪
-6. [Module 5: tool](#module-5-tool-internaltool) — 14 内置工具 + 动态扩展
-7. [Module 6: sandbox](#module-6-sandbox-internalsandbox) — 进程隔离
-8. [Module 7: security](#module-7-security-internalsecurity) — 安全决策链 + 审计 + 心跳/锻造策略
-9. [Module 8: persistence](#module-8-persistence-internalpersistence) — SQLite
-10. [Module 9: server](#module-9-server-internalserver) — gRPC/HTTP + Slash 路由
-11. [Module 10: pkg](#module-10-pkg-pkgctxutil) — 跨层 Context 工具
-12. [Module 11: brain](#module-11-brain-internalbrain) — 会话 Artifact + Checkpoint
-13. [Module 12: knowledge](#module-12-knowledge-internalknowledge) — 跨会话知识
-14. [Module 13: skill](#module-13-skill-internalskill) — 技能系统 + Forge 生命周期
-15. [Module 14: mcp](#module-14-mcp-internalmcp) — MCP 集成
-16. [Module 15: workspace](#module-15-workspace-internalworkspace) — 项目知识 + 心跳存储
-17. [Module 16: forge](#module-16-forge-internalforge) — 能力锻造引擎
-18. [知识生命周期](#知识生命周期) — 闭环数据流 (Brain + KI + Workspace + Forge)
-19. [初始化流程](#初始化流程-builder)
-20. [请求生命周期](#请求生命周期)
-21. [预估总行数](#预估总行数)
+2. [Module 1: domain/service](#module-1-domainservice-internaldomainservice) — AgentLoop · 状态机 · Channel 抽象
+3. [Module 2: config](#module-2-config-internalinfrastructureconfig) — 统一配置 + 热更新
+4. [Module 3: llm](#module-3-llm-internalinfrastructurellm) — LLM Provider 路由 · 降级链
+5. [Module 4: prompt](#module-4-prompt-internalinfrastructureprompt) — 15-Section · prompttext 侧载
+6. [Module 5: tool](#module-5-tool-internalinfrastructuretool) — 21 工具 · 脚本扩展
+7. [Module 6: sandbox](#module-6-sandbox-internalinfrastructuresandbox) — 进程隔离
+8. [Module 7: security](#module-7-security-internalinfrastructuresecurity) — 安全决策链
+9. [Module 8: persistence](#module-8-persistence-internalinfrastructurepersistence) — SQLite + GORM
+10. [Module 9: brain](#module-9-brain-internalinfrastructurebrain) — 会话 Artifact + Checkpoint
+11. [Module 10: knowledge](#module-10-knowledge-internalinfrastructureknowledge) — 跨会话知识 + 向量检索
+12. [Module 11: skill](#module-11-skill-internalinfrastructureskill) — 技能系统 + Forge 生命周期
+13. [Module 12: mcp](#module-12-mcp-internalinfrastructuremcp) — MCP 集成
+14. [Module 13: workspace](#module-13-workspace-internalinfrastructureworkspace) — 项目知识
+15. [Module 14: forge](#module-14-forge-internalinfrastructureforge) — 能力锻造引擎
+16. [Module 15: cron](#module-15-cron-internalinfrastructurecron) — 定时任务
+17. [Module 16: server](#module-16-server-internalinterfacesserver) — HTTP/gRPC
+18. [Module 17: pkg](#module-17-pkg-pkgctxutil) — Context 工具
+19. [知识生命周期](#知识生命周期) — 闭环数据流
+20. [初始化流程](#初始化流程-builder) — 8 阶段依赖注入
+21. [请求生命周期](#请求生命周期) — Channel 分派
+22. [模块统计](#模块统计) — 行数 · 文件数
 
 ---
 
 ## 全局架构
 
-```
-                        ┌──────────────────────┐
-                        │   cmd/ngoagent/main   │
-                        │   Builder.Build()     │
-                        └──────────┬───────────┘
-                                   │
-              ┌────────────────────┼────────────────────┐
-              ▼                    ▼                    ▼
-        ┌──────────┐        ┌──────────┐        ┌──────────┐
-        │  server   │        │  engine   │        │  tool    │
-        │ gRPC/HTTP │───────▶│ AgentLoop │◀───────│ Registry │
-        └──────────┘        │ Heartbeat │        └────┬─────┘
-                            └────┬─────┘             │
-           ┌──────────┬─────────┼──────────┬─────────┤
-           ▼          ▼         ▼          ▼         ▼
-      ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌─────────┐
-      │ prompt │ │  llm   │ │security│ │  brain │ │workspace│
-      │Assembly│ │Provider│ │  Hook  │ │Artifact│ │  Store  │
-      └───┬────┘ └────────┘ └───┬────┘ └───┬────┘ └────┬────┘
-          │                     │           │           │
-     ┌────┴────┐           ┌───┴───┐  ┌────┴─────┐    │
-     │  skill  │◀──状态────│ forge │  │knowledge │    │
-     │ Manager │    反写   │Engine │  │KI Store  │    │
-     └────┬────┘           └───┬───┘  └──────────┘    │
-     ┌────┴────┐               │                       │
-     │   mcp   │               │      ┌───────────┐   │
-     │ Manager │               │      │persistence│   │
-     └─────────┘               │      │  SQLite   │   │
-                               │      └───────────┘   │
-                               │      ┌───────────┐   │
-                               └─────▶│  sandbox  │◀──┘
-                                      │ Process   │
-                                      └───────────┘
+```mermaid
+graph TD
+    Main["cmd/ngoagent/main<br/>Builder.Build()"] --> Server
+    Main --> Engine
+    Main --> Tool
 
+    subgraph Interfaces["接口层"]
+        Server["server<br/>gRPC / HTTP SSE"]
+    end
 
-依赖方向: 上 → 下，零循环
-forge 依赖: sandbox + skill + brain | 被依赖: tool/forge.go, security (策略分支)
+    subgraph Core["核心引擎"]
+        Engine["AgentLoop<br/>ReAct + Heartbeat"]
+    end
+
+    subgraph Infra["基础设施层"]
+        Tool["tool<br/>Registry + Executor"]
+        Prompt["prompt<br/>15-Section Assembly"]
+        LLM["llm<br/>Provider Router"]
+        Security["security<br/>Hook Chain"]
+        Brain["brain<br/>Artifact Store"]
+        WS["workspace<br/>Project Context"]
+        Skill["skill<br/>Manager"]
+        MCP["mcp<br/>Manager"]
+        Forge["forge<br/>Engine"]
+        KI["knowledge<br/>KI Store"]
+        Persist["persistence<br/>SQLite"]
+        Sandbox["sandbox<br/>Process"]
+    end
+
+    Server -->|SSE/gRPC| Engine
+    Engine --> Prompt
+    Engine --> LLM
+    Engine --> Security
+    Engine --> Brain
+    Engine --> WS
+    Engine --> Tool
+    Prompt --> Skill
+    Skill --> MCP
+    Security -.->|策略分支| Forge
+    Forge -->|状态反写| Skill
+    Forge --> Sandbox
+    Brain --> KI
+    WS --> Sandbox
+    Engine --> Persist
+
+    style Core fill:#1a1a2e,stroke:#e94560,color:#fff
+    style Interfaces fill:#16213e,stroke:#0f3460,color:#fff
+    style Infra fill:#0f3460,stroke:#533483,color:#fff
 ```
+
+> 依赖方向: 上 → 下，零循环。forge 依赖: sandbox + skill + brain | 被依赖: tool/forge.go, security (策略分支)
 
 ---
 
@@ -303,11 +317,25 @@ const (
 
 ### 10 状态机
 
-```
-Idle → Streaming → ToolExec → (回到 Streaming)
-                 → Compacting → Retrying → (回到 Streaming)
-                 → Waiting (审批)
-              → Complete / Error / Aborted (终态)
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Streaming : Chat / Retry / Heartbeat
+    Streaming --> ToolExec : actionContinue
+    Streaming --> Complete : actionDone
+    Streaming --> Compacting : actionRetry
+    Streaming --> Error : actionError
+    ToolExec --> Streaming : 工具执行完毕
+    ToolExec --> Waiting : ActionAsk (需审批)
+    Waiting --> ToolExec : 用户批准
+    Waiting --> ToolExec : 用户拒绝 (跳过该工具)
+    Compacting --> Retrying : 压缩完成
+    Retrying --> Streaming : 重试
+    Streaming --> Aborted : ctx.Done()
+    ToolExec --> Aborted : ctx.Done()
+    Complete --> [*]
+    Error --> [*]
+    Aborted --> [*]
 ```
 
 ### 流式协议 (Delta)
@@ -322,7 +350,37 @@ type Delta struct {
     Approval *ApprovalReq    `json:"approval,omitempty"`
 }
 
+type ToolCallDelta struct {
+    ID     string         `json:"id,omitempty"`    // LLM 分配的 call_id (v2 新增)
+    Name   string         `json:"name"`
+    Args   map[string]any `json:"args,omitempty"`
+    Output string         `json:"output,omitempty"`
+    Err    string         `json:"error,omitempty"`
+}
+
 type DeltaType string  // text / reasoning / tool_start / tool_output / tool_end / state / error / approval / done
+```
+
+**DeltaSink 接口** (所有输出通道实现):
+
+```go
+type DeltaSink interface {
+    OnText(text string)
+    OnReasoning(text string)
+    OnToolStart(name string, args map[string]any)
+    OnToolResult(callID string, name string, output string, err error)  // callID: LLM tc.ID
+    OnProgress(taskName, status, summary, mode string)
+    OnPlanReview(message string, paths []string)
+    OnApprovalRequest(approvalID, toolName string, args map[string]any, reason string)
+    OnComplete()
+    OnError(err error)
+}
+```
+
+**SSE tool_result 事件格式** (包含 call_id 用于前端精确匹配):
+
+```json
+{"type": "tool_result", "call_id": "call_abc123", "name": "grep_search", "output": "...", "error": ""}
 ```
 
 4 层管线: `LLM SSE → Engine Delta channel → Server gRPC stream / SSE → Client`
@@ -453,17 +511,22 @@ func (loop *AgentLoop) resolveTokenBudget(s *runState) int
 
 **设计理念**: Planning 不是 Anti 那样的三阶段强制流程 (~3K chars 常驻)，而是一个**按需注入的 Ephemeral** (~500 chars)。
 
-```
-简单任务 (大多数):
-  用户: "把这个函数改个名"
-  → Agent 直接做
-  → 零额外 token 开销
+```mermaid
+flowchart TD
+    Input["用户消息"] --> Check{触发条件?}
+    Check -->|/plan 命令| Inject["注入 PlanningMode Ephemeral"]
+    Check -->|planning_mode=true| Inject
+    Check -->|字数>200 + 多文件| Inject
+    Check -->|简单任务| Direct["Agent 直接执行<br/>零额外 token 开销"]
+    Inject --> Plan["Agent 写 plan.md"]
+    Plan --> Review{用户审批?}
+    Review -->|通过| Execute["执行 + task.md 追踪"]
+    Review -->|修改| Plan
+    Direct --> Done["完成"]
+    Execute --> Done
 
-复杂任务:
-  用户: "重构整个 auth 模块" / 用户输入 /plan
-  → 检测到复杂任务 OR 用户显式触发
-  → 注入 PlanningMode Ephemeral
-  → Agent 写 plan → 用户审批 → 执行
+    style Inject fill:#e94560,color:#fff
+    style Direct fill:#0f3460,color:#fff
 ```
 
 **触发条件** (OR 逻辑):
@@ -548,35 +611,37 @@ func (h *HeartbeatRunner) Reload(cfg config.HeartbeatConfig)
 
 **心跳执行流程:**
 
-```
-time.Ticker 触发
-    │
-    ▼
-HeartbeatRunner.tick():
-    │
-    ├── store.ReadTasks() → heartbeat.md 有内容?
-    │   ├── 空 → 跳过本轮
-    │   └── 有任务 → 构造心跳 prompt
-    │
-    ├── ctx = ctxutil.WithMode(ctx, ModeHeartbeat)
-    │
-    ├── AgentLoop.Chat(ctx, "__heartbeat__", heartbeatPrompt, ChatOptions{
-    │       Mode:     ModeHeartbeat,
-    │       MaxSteps: h.maxSteps,    // config: heartbeat.max_steps
-    │   })
-    │
-    ├── 收集 Delta stream → 分析回复:
-    │   ├── "HEARTBEAT_OK" → 无事，更新 state
-    │   └── 有内容 → notifier.Notify(回复)
-    │
-    └── store.WriteState(): lastRun, runCount
+```mermaid
+sequenceDiagram
+    participant Ticker as time.Ticker
+    participant HB as HeartbeatRunner
+    participant Store as HeartbeatStore
+    participant Loop as AgentLoop
+    participant Notifier as Notifier
+
+    Ticker->>HB: tick()
+    HB->>Store: ReadTasks()
+    alt heartbeat.md 为空
+        Store-->>HB: 空
+        Note over HB: 跳过本轮
+    else 有任务
+        Store-->>HB: 任务内容
+        HB->>Loop: Chat(ctx, "__heartbeat__", prompt,<br/>ChatOptions{Mode: Heartbeat})
+        Loop-->>HB: Delta stream
+        alt HEARTBEAT_OK
+            Note over HB: 无事，更新 state
+        else 有内容
+            HB->>Notifier: Notify(回复)
+        end
+        HB->>Store: WriteState(lastRun, runCount)
+    end
 ```
 
 **~2,600 行 | 17 文件** (含 heartbeat.go, heartbeat_notifier.go)
 
 ---
 
-## Module 3: llm (`internal/llm/`)
+## Module 3: llm (`internal/infrastructure/llm/`)
 
 LLM 提供商抽象 + 多 provider 路由。
 
@@ -597,15 +662,15 @@ type Router struct {
 func (r *Router) Reload(cfg LLMConfig)
 ```
 
-子包: `openai/` (OpenAI-compatible), `codex/`
+子包：`openai/` (OpenAI-compatible)
 
-**~1,020 行 | 7 文件**
+**8 文件，1,024 行**
 
 ---
 
-## Module 4: prompt (`internal/prompt/`)
+## Module 4: prompt (`internal/infrastructure/prompt/`)
 
-15-Section 系统 prompt 组装 + 3 层文件发现 + UserRules + ProjectContext + 4 级预算裁剪。
+15-Section 系统 prompt 组装 + 3 层文件发现 + 4 级预算裁剪。
 
 ### 15 个 Section (U 形注意力布局)
 
@@ -871,11 +936,11 @@ func (e *PromptEngine) Assemble(ctx PromptContext) string {
 | Tight | 70-85% | 丢弃 Skills → Memory → Variant → Knowledge → ProjectContext |
 | Critical | > 85% | 只保留 Identity+Guidelines+Tooling+Runtime+Focus |
 
-**~740 行 | 5 文件**: `engine.go`, `sections.go`, `discovery.go`, `variants.go`, `budget.go`
+**5 文件，825 行**: `engine.go` (253), `prompttext/prompttext.go` (342), `component.go` (123), `discovery.go` (79), `prompttext/template.go` (28)
 
 ---
 
-## Module 5: tool (`internal/tool/`)
+## Module 5: tool (`internal/infrastructure/tool/`)
 
 工具注册 + 执行 + 动态扩展。
 
@@ -902,8 +967,23 @@ type Registry interface {
 
 ### 工具执行生命周期
 
-```
-Get → IsEnabled → Security.BeforeToolCall → ValidateArgs → Execute → TruncateOutput → AfterToolCall → 审计
+```mermaid
+flowchart LR
+    Get["Registry.Get"] --> Enabled{IsEnabled?}
+    Enabled -->|No| Deny1["返回 disabled"]
+    Enabled -->|Yes| Sec["Security<br/>BeforeToolCall"]
+    Sec -->|Allow| Validate["ValidateArgs"]
+    Sec -->|Deny| Deny2["返回 DENIED"]
+    Sec -->|Ask| Approval{用户审批}
+    Approval -->|Yes| Validate
+    Approval -->|No| Deny3["返回 USER_DENIED"]
+    Validate --> Execute["Execute"]
+    Execute --> Truncate["TruncateOutput<br/>>50KB 头尾截断"]
+    Truncate --> After["AfterToolCall"]
+    After --> Audit["审计记录"]
+
+    style Execute fill:#e94560,color:#fff
+    style Sec fill:#533483,color:#fff
 ```
 
 ### 14 个内置工具
@@ -918,6 +998,7 @@ Get → IsEnabled → Security.BeforeToolCall → ValidateArgs → Execute → T
 `path`, `content` (required), `overwrite` (optional, default false)
 - 目录不存在 → 自动 MkdirAll
 - overwrite=false 且已存在 → 报错
+- **写入后自动 MarkRead**: 同步 FileState，确保后续 edit_file 不报 E6
 
 #### edit_file (9 种错误码)
 `path`, `old_string`, `new_string` (required), `replace_all` (optional)
@@ -941,23 +1022,40 @@ Get → IsEnabled → Security.BeforeToolCall → ValidateArgs → Execute → T
 - background=true → 返回 command_id
 - 超时: SIGTERM → 2s → SIGKILL
 - 输出 > 50KB → 头尾截断
+- **可取消等待**: 使用 `select{ctx.Done(), time.After()}` 替代 `time.Sleep`，支持 context 取消
 
 #### command_status
 `command_id` (required), `output_tail`, `wait_seconds` (optional)
 
 #### glob
-`pattern` (required), `path`, `max_results` (optional)
+`pattern` (required), `path`, `type`, `extensions`, `excludes` (optional)
+- 基于 `fd` 命令，`find` 降级后备
+- 支持 `**` 递归 globbing、类型过滤 (file/directory/any)、扩展名过滤
+- 最大结果数限制 (默认 200)
 
 #### grep_search
 `query` (required), `path`, `is_regex`, `includes`, `max_results` (optional)
 - 基于 ripgrep，强制使用此工具而非 shell grep
+- **结构化输出格式** (前端可解析为 FileLink):
+```
+Found N matches for "query" in "path":
+---
+File: src/main.go
+L12: func foo() {
+L45: return foo
+---
+File: src/test.go
+L3: import "foo"
+---
+```
 
 #### web_search
 `query` (required), `limit` (optional)
 
 #### web_fetch
 `url` (required), `max_length` (optional, default 50KB)
-- HTTP GET → HTML → Markdown 转换
+- HTTP GET → HTML → 文本转换
+- **HTML 处理**: 过滤 script/style 标签、解码 HTML 实体、块级元素添加换行
 - 支持 301/307/308 重定向
 - 安全: 仅允许 http/https 协议，domain 级权限检查
 - 和 `web_search` 区别: `web_search` 是搜索引擎查询，`web_fetch` 是直接读取已知 URL
@@ -1103,11 +1201,11 @@ type scriptTool struct {
 }
 ```
 
-**~2,680 行 | 16 文件** (含 update_project_context.go, forge.go, web_fetch.go, save_memory.go)
+**22 文件，2,875 行**: registry, file ops, search tools, command tools, web tools, task tools, brain/knowledge tools, notify, script, cron, mcp, agent tools
 
 ---
 
-## Module 6: sandbox (`internal/sandbox/`)
+## Module 6: sandbox (`internal/infrastructure/sandbox/`)
 
 进程隔离执行。
 
@@ -1124,11 +1222,11 @@ type ProcessManager interface {
 }
 ```
 
-**~400 行 | 2 文件**
+**3 文件，672 行**: sandbox.go (318), shell_state.go (142), sandbox_state_test.go (212)
 
 ---
 
-## Module 7: security (`internal/security/`)
+## Module 7: security (`internal/infrastructure/security/`)
 
 安全钩子，嵌入 Agent Loop 生命周期。**支持心跳模式 + 锻造模式独立安全策略。**
 
@@ -1225,11 +1323,11 @@ func (h *SecurityHook) RegisterApprovalFunc(channel string, fn ApprovalFunc)
 
 所有决策自动记录 `AuditEntry`，管理 API 可查询。
 
-**~600 行 | 5 文件**: `hook.go`, `chain.go`, `config.go`, `approval.go`, `audit.go`
+**1 文件，427 行**: hook.go
 
 ---
 
-## Module 8: persistence (`internal/persistence/`)
+## Module 8: persistence (`internal/infrastructure/persistence/`)
 
 SQLite (GORM)。
 
@@ -1239,11 +1337,11 @@ type Message      struct { ID, ConversationID, Role, Content string; Times }
 type Task         struct { ID, ConversationID, Title, Status string; SortOrder int; Times }
 ```
 
-**~400 行 | 3 文件**
+**3 文件，305 行**: db.go (72), repository.go (139), history.go (94)
 
 ---
 
-## Module 9: server (`internal/server/`)
+## Module 9: server (`internal/interfaces/server/`)
 
 gRPC + HTTP + Slash 命令路由。
 
@@ -1343,7 +1441,7 @@ wsDir     := ctxutil.WorkspaceDirFromContext(ctx)        // tool 定位 context.
 
 ---
 
-## Module 11: brain (`internal/brain/`)
+## Module 9: brain (`internal/infrastructure/brain/`)
 
 会话级 artifact 持久化。
 
@@ -1370,11 +1468,11 @@ type CheckpointSummary struct {
 - Prompt → Brain: Assemble() 读 plan/task 注入 SectionFocus
 - **PostRunHook → Brain**: 读 checkpoint.LearnedFacts，提供给知识生命周期
 
-**~270 行 | 3 文件**
+**2 文件，508 行**: store.go (422), store_test.go (86)
 
 ---
 
-## Module 12: knowledge (`internal/knowledge/`)
+## Module 10: knowledge (`internal/infrastructure/knowledge/`)
 
 跨会话知识蒸馏。
 
@@ -1390,11 +1488,11 @@ type Store interface {
 
 生命周期: 会话中创建/更新 → 会话结束异步蒸馏 → 新会话启动注入摘要
 
-**~510 行 | 4 文件**
+**4 文件，706 行**: store.go (232), embedder.go (130), retriever.go (135), vector_index.go (209)
 
 ---
 
-## Module 13: skill (`internal/skill/`)
+## Module 11: skill (`internal/infrastructure/skill/`)
 
 技能系统 + **Forge 生命周期管理**。
 
@@ -1450,11 +1548,11 @@ type Manager interface {
 }
 ```
 
-**~600 行 | 5 文件** (+100 forge lifecycle)
+**1 文件，269 行**: manager.go
 
 ---
 
-## Module 14: mcp (`internal/mcp/`)
+## Module 12: mcp (`internal/infrastructure/mcp/`)
 
 MCP (Model Context Protocol) 外部服务集成。
 
@@ -1477,11 +1575,11 @@ type MCPServer struct {
 
 生命周期: config 变更 → 停旧启新 | 进程崩溃 → 心跳重启 | 关闭 → SIGTERM
 
-**~400 行 | 3 文件**: `manager.go`, `server.go`, `bridge.go`
+**3 文件，305 行**: db.go (72), repository.go (139), history.go (94): `manager.go`, `server.go`, `bridge.go`
 
 ---
 
-## Module 15: workspace (`internal/workspace/`)
+## Module 13: workspace (`internal/infrastructure/workspace/`)
 
 项目知识存储 + 心跳状态管理。**Agent 自演进的持久化层。**
 
@@ -1552,11 +1650,11 @@ Engine.HeartbeatRunner  → HeartbeatStore.*         心跳状态读写
 Config.Bootstrap()      → Store.Init()            首次进入项目
 ```
 
-**~200 行 | 3 文件**: `store.go`, `heartbeat_store.go`, `init.go`
+**1 文件，203 行**: store.go
 
 ---
 
-## Module 16: forge (`internal/forge/`)
+## Module 14: forge (`internal/infrastructure/forge/`)
 
 能力锻造引擎。**Agent 自演进的第二条腿** — Brain 管知识演进，Forge 管能力演进。
 
@@ -1673,7 +1771,23 @@ func (t *ForgeTool) Description() string { return prompttext.ToolForge }
 // action="cleanup": forge_id → 删除沙箱 → 返回 OK
 ```
 
-**~450 行 | 4 文件**: `engine.go`, `sandbox.go`, `assertion.go`, `diagnosis.go` + `tracker.go`
+**5 文件，655 行**: engine.go (256), sandbox.go (57), assertion.go (132), diagnosis.go (128), tracker.go (82)
+
+---
+
+## Module 15: cron (`internal/infrastructure/cron/`)
+
+定时任务调度。
+
+### 文件结构
+
+**1 文件，263 行**: manager.go
+
+### 职责
+
+- Cron 任务管理（创建/删除/启用/禁用/列表/立即执行）
+- 调度器实现
+- 任务执行
 
 ---
 
@@ -1843,26 +1957,18 @@ User/Heartbeat     Server/Timer       Engine            Security         Tool   
 
 ---
 
-## 预估总行数
+## 模块统计
 
-| 模块 | 行数 | 文件数 | 变化 |
-|------|------|--------|------|
-| config | 400 | 5 | +50 (heartbeat 配置 + bootstrap) |
-| **engine** | **2,600** | **17** | **+300 (HeartbeatRunner + mode)** |
-| llm | 1,020 | 7 | 不变 |
-| prompt | 740 | 5 | +40 (ProjectContext section) |
-| **tool** | **2,680** | **16** | **+480 (update_project_context + forge + web_fetch + save_memory)** |
-| sandbox | 400 | 2 | 不变 |
-| **security** | **630** | **5** | **+60 (heartbeat + forge 策略)** |
-| persistence | 400 | 3 | 不变 |
-| server | 1,050 | 5 | 不变 |
-| pkg | 60 | 1 | +30 (Mode/WorkspaceDir/ActiveForgeID) |
-| brain | 270 | 3 | 不变 |
-| knowledge | 510 | 4 | 不变 |
-| **skill** | **600** | **5** | **+100 (Forge 生命周期)** |
-| mcp | 400 | 3 | 不变 |
-| **workspace** | **200** | **3** | **新增模块** |
-| **forge** | **450** | **4** | **新增模块 (sandbox/assertion/diagnosis/tracker)** |
-| cmd + builder | 300 | 2 | +50 (heartbeat + forge 初始化) |
-| proto | 100 | 1 | 不变 |
-| **总计** | **~12,810** | **90** | **+2,010** |
+| 层级 | 模块 | 行数 | 文件数 | 职责 |
+|------|------|------|--------|------|
+| **Domain** | domain/service | 3,111 | 14 | AgentLoop 核心 · 状态机 · Channel 抽象 |
+| **Infrastructure** | infrastructure/tool | 2,875 | 22 | 21 个工具实现 |
+| | infrastructure/brain + knowledge + workspace + persistence + mcp | 2,085 | 10 | 持久化存储层 |
+| | infrastructure/security + sandbox + config | 1,886 | 9 | 安全·沙箱·配置 |
+| | infrastructure/llm | 1,024 | 8 | LLM 路由 · Provider 适配 |
+| | infrastructure/prompt | 825 | 5 | 提示词引擎 |
+| | infrastructure/forge | 655 | 6 | 锻造引擎 |
+| | infrastructure/cron + skill | 532 | 2 | 定时任务·技能管理 |
+| **Interfaces** | interfaces/server + grpc + application | 2,152 | 5 | HTTP/gRPC·Builder |
+| **Shared** | domain/entity + tool + interfaces/apitype + testing + pkg | 1,270 | 7 | 实体·协议·工具 |
+| **总计** | | **~29,284** | **89** | |

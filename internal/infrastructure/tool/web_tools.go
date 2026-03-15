@@ -193,8 +193,34 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]any) (dtool.
 	return dtool.ToolResult{Output: fmt.Sprintf("URL: %s\nStatus: %d\n\n%s", url, resp.StatusCode, content)}, nil
 }
 
-// stripHTMLTags removes HTML tags from content.
+// stripHTMLTags converts HTML to plain text.
+// Skips script/style content, decodes HTML entities, converts block tags to newlines.
 func stripHTMLTags(s string) string {
+	// Remove script and style blocks (case insensitive)
+	for _, tag := range []string{"script", "style", "noscript"} {
+		for {
+			lower := strings.ToLower(s)
+			start := strings.Index(lower, "<"+tag)
+			if start < 0 {
+				break
+			}
+			end := strings.Index(lower[start:], "</"+tag+">")
+			if end < 0 {
+				// No closing tag, remove to end
+				s = s[:start]
+				break
+			}
+			s = s[:start] + s[start+end+len("</"+tag+">"):]
+		}
+	}
+
+	// Convert block-level tags to newlines
+	for _, tag := range []string{"br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"} {
+		s = strings.ReplaceAll(s, "<"+tag, "\n<"+tag)
+		s = strings.ReplaceAll(s, "</"+tag+">", "\n")
+	}
+
+	// Strip remaining tags
 	var b strings.Builder
 	inTag := false
 	for _, r := range s {
@@ -207,5 +233,21 @@ func stripHTMLTags(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	return b.String()
+	result := b.String()
+
+	// Decode common HTML entities
+	result = strings.ReplaceAll(result, "&amp;", "&")
+	result = strings.ReplaceAll(result, "&lt;", "<")
+	result = strings.ReplaceAll(result, "&gt;", ">")
+	result = strings.ReplaceAll(result, "&nbsp;", " ")
+	result = strings.ReplaceAll(result, "&quot;", "\"")
+	result = strings.ReplaceAll(result, "&#39;", "'")
+	result = strings.ReplaceAll(result, "&#x27;", "'")
+
+	// Compress consecutive blank lines → max 2
+	for strings.Contains(result, "\n\n\n") {
+		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
+	}
+
+	return result
 }

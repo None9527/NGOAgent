@@ -23,6 +23,7 @@ type SkillInfo struct {
 	Description string
 	Type        string
 	Content     string
+	Command     string
 	Path        string
 }
 
@@ -31,13 +32,13 @@ type Deps struct {
 	UserRules      string
 	ProjectContext string
 	SkillInfos     []SkillInfo
-	MemoryContent  string
-	ConvSummary    string
+	ConvSummary    string   // Semantically-retrieved KI summaries
+	PreferenceKI   string   // Preference-tagged KI summaries (always injected)
 	ToolDescs      []ToolDesc
 	Ephemeral      []string
 	FocusFile      string
 	TokenBudget    int
-	Mode           string // chat / heartbeat
+	Mode           string // chat
 	Runtime        string // Pre-built runtime info (OS/time/model/workspace)
 }
 
@@ -88,13 +89,11 @@ func (e *Engine) buildSections(deps Deps) []Section {
 		{Order: 4, Name: "Safety", Content: prompttext.Safety, Priority: 0},
 		// ═══ Mid: Prunable in order ═══
 		{Order: 5, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
-		{Order: 6, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
-		{Order: 7, Name: "Skills", Content: e.buildSkills(deps.SkillInfos), Priority: 3},
-		{Order: 8, Name: "UserRules", Content: e.buildUserRules(deps.UserRules), Priority: 1},
-		{Order: 9, Name: "ProjectContext", Content: e.buildProjectContext(deps.ProjectContext), Priority: 2},
-		{Order: 10, Name: "Memory", Content: e.buildMemory(deps.MemoryContent), Priority: 3},
-		{Order: 11, Name: "Knowledge", Content: e.buildKnowledge(deps.ConvSummary), Priority: 2},
-		// Section 12 removed: ConvSummary is already injected in Section 11 (Knowledge)
+		{Order: 6, Name: "Knowledge", Content: e.buildKnowledge(deps.PreferenceKI, deps.ConvSummary), Priority: 0},
+		{Order: 7, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
+		{Order: 8, Name: "Skills", Content: e.buildSkills(deps.SkillInfos), Priority: 3},
+		{Order: 9, Name: "UserRules", Content: e.buildUserRules(deps.UserRules), Priority: 1},
+		{Order: 10, Name: "ProjectContext", Content: e.buildProjectContext(deps.ProjectContext), Priority: 2},
 		// ═══ Bottom: Required (U-shape) ═══
 		{Order: 13, Name: "Variants", Content: "", Priority: 3}, // Prompt variants (loaded from file)
 		{Order: 14, Name: "Focus", Content: e.buildFocus(deps.FocusFile), Priority: 2},
@@ -128,7 +127,9 @@ func (e *Engine) buildSkills(infos []SkillInfo) string {
 	}
 	var b strings.Builder
 	b.WriteString("You can use specialized 'skills' to help you with complex tasks.\n")
-	b.WriteString("If a skill seems relevant, use `read_file` on its SKILL.md to get full instructions.\n\n")
+	b.WriteString("IMPORTANT: You MUST use `read_file` on a skill's SKILL.md BEFORE using it. ")
+	b.WriteString("SKILL.md contains critical domain knowledge, execution commands, and rules. ")
+	b.WriteString("NEVER guess commands or skip reading SKILL.md.\n\n")
 	b.WriteString("Available skills:\n")
 	for _, s := range infos {
 		skillMd := s.Path + "/SKILL.md"
@@ -151,18 +152,22 @@ func (e *Engine) buildProjectContext(ctx string) string {
 	return "<project_context>\n" + ctx + "\n</project_context>"
 }
 
-func (e *Engine) buildMemory(mem string) string {
-	if mem == "" {
+func (e *Engine) buildKnowledge(preferenceKI, semanticKI string) string {
+	if preferenceKI == "" && semanticKI == "" {
 		return ""
 	}
-	return "<memory>\n" + mem + "\n</memory>"
-}
-
-func (e *Engine) buildKnowledge(summary string) string {
-	if summary == "" {
-		return ""
+	var b strings.Builder
+	b.WriteString("<knowledge_items>\n")
+	b.WriteString("⚠️ 以下知识条目与当前任务相关，请在执行操作前检查。\n")
+	b.WriteString("标记为 [PREFERENCE] 的条目是用户强制偏好，必须遵守。\n\n")
+	if preferenceKI != "" {
+		b.WriteString(preferenceKI)
 	}
-	return "<knowledge>\n" + summary + "\n</knowledge>"
+	if semanticKI != "" {
+		b.WriteString(semanticKI)
+	}
+	b.WriteString("</knowledge_items>")
+	return b.String()
 }
 
 func (e *Engine) buildFocus(path string) string {

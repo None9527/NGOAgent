@@ -79,13 +79,22 @@ func (h *BrainSnapshotHook) OnRunComplete(ctx context.Context, info RunInfo) {
 
 // KIDistillHook uses LLM to distill knowledge after a run.
 type KIDistillHook struct {
-	getKI  func() KIStore
-	llm    KILLMDistiller
+	getKI          func() KIStore
+	llm            KILLMDistiller
+	dedup          KIDuplicateChecker // optional: embedding-based dedup
+	dedupThreshold float64            // cosine similarity threshold for dedup (default 0.60)
 }
 
 // KIStore is the interface needed by the distillation hook.
 type KIStore interface {
 	SaveDistilled(summary, content string, tags, sources []string) error
+	UpdateContent(id, newContent string) error // Append/merge content for existing KI
+}
+
+// KIDuplicateChecker detects duplicate KIs using embedding similarity.
+type KIDuplicateChecker interface {
+	FindDuplicate(text string, threshold float64) (string, float64)
+	EmbedAndIndexByID(id string) error // Re-index after update
 }
 
 // KILLMDistiller abstracts the LLM call for knowledge distillation.
@@ -94,8 +103,16 @@ type KILLMDistiller interface {
 }
 
 // NewKIDistillHook creates the KI distillation hook.
-func NewKIDistillHook(getKI func() KIStore, distiller KILLMDistiller) *KIDistillHook {
-	return &KIDistillHook{getKI: getKI, llm: distiller}
+// dedup can be nil if embedding is not configured.
+func NewKIDistillHook(getKI func() KIStore, distiller KILLMDistiller, threshold float64, dedup ...KIDuplicateChecker) *KIDistillHook {
+	h := &KIDistillHook{getKI: getKI, llm: distiller, dedupThreshold: threshold}
+	if h.dedupThreshold <= 0 {
+		h.dedupThreshold = 0.60
+	}
+	if len(dedup) > 0 {
+		h.dedup = dedup[0]
+	}
+	return h
 }
 
 func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
@@ -110,7 +127,7 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 			}
 		}()
 		// Gate: only distill meaningful conversations
-		if info.Steps < 5 || info.Mode == "heartbeat" || len(info.History) < 3 {
+		if info.Steps < 5 || len(info.History) < 3 {
 			return
 		}
 		log.Printf("[hook] KI distill: calling LLM for session=%s steps=%d", info.SessionID, info.Steps)
@@ -134,6 +151,23 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		// Build full content with summary header
 		content := fmt.Sprintf("# %s\n\n%s\n\n---\n\n%s",
 			result.Title, result.Summary, result.Content)
+
+		// Dedup check: if a similar KI exists, update instead of create
+		if h.dedup != nil {
+			queryText := result.Title + "\n" + result.Summary
+			dupID, score := h.dedup.FindDuplicate(queryText, h.dedupThreshold)
+			if dupID != "" {
+				log.Printf("[hook] KI dedup: found similar KI %q (score=%.3f), updating", dupID, score)
+				appendContent := fmt.Sprintf("\n\n---\n\n## Update from session %s\n\n%s", info.SessionID, result.Content)
+				if err := store.UpdateContent(dupID, appendContent); err != nil {
+					log.Printf("[hook] KI dedup update failed: %v", err)
+				} else {
+					_ = h.dedup.EmbedAndIndexByID(dupID)
+					log.Printf("[hook] KI dedup: updated existing KI %q", dupID)
+				}
+				return
+			}
+		}
 
 		if err := store.SaveDistilled(
 			result.Title, content,
@@ -176,7 +210,7 @@ func NewTitleDistillHook(llm TitleLLMCaller, titler SessionTitler) *TitleDistill
 func (h *TitleDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 	// Only distill if session has a user message and we haven't titled it yet
 	// (The caller checks sess.Title == "" before triggering; here we just guard)
-	if info.UserMessage == "" || info.SessionID == "" || info.Mode == "heartbeat" {
+	if info.UserMessage == "" || info.SessionID == "" {
 		return
 	}
 	go func() {

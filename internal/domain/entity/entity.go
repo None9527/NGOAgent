@@ -30,6 +30,7 @@ type Skill struct {
 	Description string
 	Type        string // workflow / tool / reference
 	Content     string
+	Command     string // Quick command extracted from SKILL.md bash block
 	Path        string
 	Enabled     bool
 	ForgeStatus string // draft / forging / forged / degraded / reforging

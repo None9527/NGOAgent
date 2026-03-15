@@ -136,23 +136,13 @@ func TestWorkspaceStoreMethods(t *testing.T) {
 		t.Fatalf("AppendContext: %v", err)
 	}
 
-	// HeartbeatState
-	state := &workspace.HeartbeatState{Status: "running", TasksDone: 1, TasksTotal: 3}
-	if err := store.WriteHeartbeatState(state); err != nil {
-		t.Fatalf("WriteHeartbeatState: %v", err)
-	}
-	loaded := store.ReadHeartbeatState()
-	if loaded.Status != "running" {
-		t.Fatalf("ReadHeartbeatState: got %q", loaded.Status)
-	}
-
 	// Analyze
 	result := store.Analyze()
 	if result == "" {
 		t.Fatal("Analyze: empty result")
 	}
 
-	t.Log("✅ Workspace: Init/Context/AppendContext/HeartbeatState/Analyze")
+	t.Log("✅ Workspace: Init/Context/AppendContext/Analyze")
 }
 
 func TestSandboxManagerMethods(t *testing.T) {

@@ -35,6 +35,9 @@ func Bootstrap() error {
 		filepath.Join(home, "logs"),
 		filepath.Join(home, "prompts"),
 		filepath.Join(home, "prompts", "variants"),
+		filepath.Join(home, "mcp"),
+		filepath.Join(home, "workspace"),
+		filepath.Join(home, "cron"),
 	}
 
 	for _, dir := range dirs {

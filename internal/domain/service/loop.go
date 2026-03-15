@@ -28,9 +28,10 @@ type ToolExecutor interface {
 type DeltaSink interface {
 	OnText(text string)
 	OnReasoning(text string)
-	OnToolStart(name string, args map[string]any)
-	OnToolResult(name string, output string, err error)
+	OnToolStart(callID string, name string, args map[string]any)
+	OnToolResult(callID string, name string, output string, err error)
 	OnProgress(taskName, status, summary, mode string)
+	OnPlanReview(message string, paths []string)
 	OnApprovalRequest(approvalID, toolName string, args map[string]any, reason string)
 	OnComplete()
 	OnError(err error)
@@ -50,6 +51,7 @@ type HistoryExport struct {
 	Content    string
 	ToolCalls  string // JSON-encoded
 	ToolCallID string
+	Reasoning  string // Thinking/reasoning content (assistant messages only)
 }
 
 // Deps groups all dependencies injected into the AgentLoop.
@@ -64,14 +66,21 @@ type Deps struct {
 	Delta        DeltaSink
 
 	// Storage (data sources for prompt assembly)
-	Brain     *brain.ArtifactStore
-	KIStore   *knowledge.Store
-	Workspace *workspace.Store
-	SkillMgr  *skill.Manager
+	Brain       *brain.ArtifactStore
+	KIStore     *knowledge.Store
+	KIRetriever KISemanticRetriever // Embedding-based KI search (nil = disabled)
+	Workspace   *workspace.Store
+	SkillMgr    *skill.Manager
 
 	// Persistence + Hooks
 	HistoryStore HistoryPersister
+	FileHistory  *workspace.FileHistory // File edit history with snapshot rollback
 	Hooks        *PostRunHookChain
+}
+
+// KISemanticRetriever abstracts semantic search over KIs (avoids import cycle with knowledge.Retriever).
+type KISemanticRetriever interface {
+	RetrieveForPrompt(query string, topK int, budgetChars int) string
 }
 
 // AgentLoop manages a single agent conversation loop.
@@ -97,11 +106,17 @@ type AgentLoop struct {
 	stepsSinceUpdate int    // tool calls since last task_boundary call
 	planModified     bool   // true if plan.md was written/updated this session
 	yieldRequested   bool   // set true by notify_user(blocked_on_user=true)
+	skillLoaded      string // L2: skill name loaded via SKILL.md read (one-shot)
+	skillPath        string // L2: skill directory path
+
+	// Artifact staleness tracking (Anti-style: steps since last interaction)
+	artifactLastStep map[string]int // artifact name → last step that touched it
+	currentStep      int            // global step counter across tool calls
 }
 
 // RunOptions configure a single run.
 type RunOptions struct {
-	Mode  string // chat / heartbeat / forge
+	Mode  string // chat / forge
 	Model string
 }
 
@@ -116,10 +131,11 @@ func NewAgentLoop(deps Deps) *AgentLoop {
 		deps.Brain.SetWorkspaceDir(deps.Workspace.WorkDir())
 	}
 	return &AgentLoop{
-		deps:   deps,
-		state:  StateIdle,
-		stopCh: make(chan struct{}),
-		guard:  NewBehaviorGuard(agentCfg),
+		deps:            deps,
+		state:           StateIdle,
+		stopCh:          make(chan struct{}),
+		guard:           NewBehaviorGuard(agentCfg),
+		artifactLastStep: make(map[string]int),
 		options: RunOptions{
 			Mode: "chat",
 		},
@@ -193,9 +209,17 @@ func (a *AgentLoop) Compact() {
 	a.doCompact()
 }
 
-// Stop signals the loop to terminate.
+// Stop signals the loop to terminate the current run.
+// The stopCh is recreated automatically when the next Run() begins.
 func (a *AgentLoop) Stop() {
-	close(a.stopCh)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	select {
+	case <-a.stopCh:
+		// Already closed
+	default:
+		close(a.stopCh)
+	}
 }
 
 // protoState snapshots the loop's boundary fields into a dtool.LoopState
@@ -225,6 +249,11 @@ func (a *AgentLoop) syncLoopState(ps *dtool.LoopState) {
 	a.boundarySummary = ps.BoundarySummary
 	a.stepsSinceUpdate = ps.StepsSinceUpdate
 	a.yieldRequested = ps.YieldRequested
+	// L2 Progressive Disclosure: capture skill loaded signal
+	if ps.SkillLoaded != "" {
+		a.skillLoaded = ps.SkillLoaded
+		a.skillPath = ps.SkillPath
+	}
 	// Deterministic force: plan.md → must call notify_user next
 	if ps.ForceNextTool != "" {
 		a.guard.SetForceToolName(ps.ForceNextTool)

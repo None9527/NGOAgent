@@ -111,5 +111,14 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 		b.WriteString(fmt.Sprintf("\n... (%d more lines not shown)\n", len(lines)-endLine))
 	}
 
-	return dtool.ToolResult{Output: b.String()}, nil
+	output := b.String()
+
+	// L2 Progressive Disclosure: detect SKILL.md reads and emit signal
+	if filepath.Base(path) == "SKILL.md" {
+		skillDir := filepath.Dir(path)
+		skillName := filepath.Base(skillDir)
+		return dtool.SkillLoadedResult(output, skillName, skillDir)
+	}
+
+	return dtool.ToolResult{Output: output}, nil
 }

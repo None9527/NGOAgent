@@ -134,21 +134,7 @@ func TestEvolution_SecurityAuditLog(t *testing.T) {
 	t.Log("✅ Item 4: Security audit log records all decisions")
 }
 
-func TestEvolution_HeartbeatSecurity(t *testing.T) {
-	hbCfg := &config.HeartbeatSecCfg{
-		AllowedTools: []string{"read_file", "glob"},
-		BlockedTools: []string{"write_file"},
-	}
-	hook := security.NewHook(&config.SecurityConfig{Mode: "ask"}, hbCfg)
-
-	// Heartbeat mode: need to test with proper context
-	// Just verify the heartbeat config is wired
-	if hook == nil {
-		t.Fatal("NewHook with heartbeat config: nil")
-	}
-
-	t.Log("✅ Item 4: HeartbeatSecCfg wired into security hook")
-}
+// =====
 
 // ═══════════════════════════════════════════
 // Item 5: Protocol dispatch (protocol.go)
@@ -246,7 +232,7 @@ func TestEvolution_KIDistillHookFiltering(t *testing.T) {
 		return nil
 	}}
 
-	hook := service.NewKIDistillHook(func() service.KIStore { return mockStore })
+	hook := service.NewKIDistillHook(func() service.KIStore { return mockStore }, nil, 0.60)
 
 	// Short session (< 5 steps) → should NOT save
 	hook.OnRunComplete(context.TODO(), service.RunInfo{
@@ -258,18 +244,6 @@ func TestEvolution_KIDistillHookFiltering(t *testing.T) {
 	waitBrief()
 	if saved {
 		t.Fatal("short session (<5 steps) should not trigger distillation")
-	}
-
-	// Heartbeat mode → should NOT save
-	saved = false
-	hook.OnRunComplete(context.TODO(), service.RunInfo{
-		SessionID: "hb",
-		Steps:     10,
-		Mode:      "heartbeat",
-	})
-	waitBrief()
-	if saved {
-		t.Fatal("heartbeat mode should not trigger distillation")
 	}
 
 	// Meaningful session → SHOULD save
@@ -400,6 +374,7 @@ type testSink struct{}
 
 func (s *testSink) OnProgress(taskName, status, summary, mode string) {}
 func (s *testSink) OnText(text string)                                {}
+func (s *testSink) OnPlanReview(string, []string)                     {}
 
 type mockKIStore struct {
 	saveFn func(summary, content string, tags, sources []string) error
@@ -409,6 +384,10 @@ func (m *mockKIStore) SaveDistilled(summary, content string, tags, sources []str
 	if m.saveFn != nil {
 		return m.saveFn(summary, content, tags, sources)
 	}
+	return nil
+}
+
+func (m *mockKIStore) UpdateContent(id, newContent string) error {
 	return nil
 }
 

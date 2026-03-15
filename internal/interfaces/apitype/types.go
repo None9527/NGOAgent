@@ -39,8 +39,11 @@ type SessionInfo struct {
 
 // HistoryMessage is a simplified history entry.
 type HistoryMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	ToolName  string `json:"tool_name,omitempty"`  // tool name for role=tool messages
+	ToolArgs  string `json:"tool_args,omitempty"`  // JSON arguments for role=tool messages
+	Reasoning string `json:"reasoning,omitempty"`  // thinking/reasoning content (assistant only)
 }
 
 // SecurityResponse holds security policy info.

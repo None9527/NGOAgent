@@ -96,6 +96,15 @@ func (r *Retriever) FindDuplicate(text string, threshold float64) (string, float
 	return results[0].ID, results[0].Score
 }
 
+// EmbedAndIndexByID re-indexes a KI by ID (used after content update).
+func (r *Retriever) EmbedAndIndexByID(id string) error {
+	item, err := r.store.Get(id)
+	if err != nil {
+		return fmt.Errorf("get KI %s: %w", id, err)
+	}
+	return r.EmbedAndIndex(item)
+}
+
 // BuildIndex generates embeddings for all existing KIs that aren't already indexed.
 // Called on startup.
 func (r *Retriever) BuildIndex() error {

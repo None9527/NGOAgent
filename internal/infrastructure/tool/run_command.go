@@ -102,8 +102,12 @@ func (t *RunCommandTool) executeHybrid(ctx context.Context, command, cwd string,
 		return t.formatResult(result, waitMs), nil
 	}
 
-	// Wait the remaining time
-	time.Sleep(waitDur)
+	// Wait the remaining time (context-aware, can be cancelled)
+	select {
+	case <-time.After(waitDur):
+	case <-ctx.Done():
+		return dtool.ToolResult{Output: fmt.Sprintf("Command cancelled. ID: %s\nUse command_status to check output.", id)}, nil
+	}
 	result, err = t.sandbox.GetStatus(id, 0)
 	if err != nil {
 		return dtool.ToolResult{Output: fmt.Sprintf("Error: %v", err)}, nil

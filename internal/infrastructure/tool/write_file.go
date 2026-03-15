@@ -7,11 +7,14 @@ import (
 	"path/filepath"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 )
 
 // WriteFileTool writes content to a file, creating parent directories as needed.
-type WriteFileTool struct{}
+type WriteFileTool struct {
+	FileHistory *workspace.FileHistory // If set, backs up files before write
+}
 
 func (t *WriteFileTool) Name() string        { return "write_file" }
 func (t *WriteFileTool) Description() string { return prompttext.ToolWriteFile }
@@ -51,9 +54,17 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) (dtool
 		return dtool.ToolResult{Output: fmt.Sprintf("Error creating directory: %v", err)}, nil
 	}
 
+	// FileHistory: backup before writing
+	if t.FileHistory != nil {
+		t.FileHistory.TrackEdit(path)
+	}
+
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return dtool.ToolResult{Output: fmt.Sprintf("Error writing file: %v", err)}, nil
 	}
+
+	// Sync FileState so subsequent edit_file calls don't get E6/E7 errors
+	globalFileState.MarkRead(path, []byte(content))
 
 	return dtool.ToolResult{Output: fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), path)}, nil
 }

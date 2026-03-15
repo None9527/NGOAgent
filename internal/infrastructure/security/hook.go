@@ -1,5 +1,5 @@
 // Package security provides the security decision chain, audit logging,
-// multi-channel approval, and specialized strategies for heartbeat/forge modes.
+// multi-channel approval, and specialized strategies for forge mode.
 package security
 
 import (
@@ -43,7 +43,7 @@ type AuditEntry struct {
 	Decision  Decision
 	Level     DecisionLevel
 	Reason    string
-	Mode      string // chat / heartbeat / forge
+	Mode      string // chat / forge
 }
 
 // ApprovalFunc blocks until user approves/denies. Returns true=approved.
@@ -93,9 +93,6 @@ func (h *Hook) BeforeToolCall(ctx context.Context, toolName string, args map[str
 	var level DecisionLevel
 
 	switch {
-	case mode == "heartbeat":
-		decision, reason = h.heartbeatDecide(toolName, args)
-		level = LevelPolicy
 	case forgeID != "":
 		decision, reason = h.forgeDecide(toolName, args, forgeID)
 		level = LevelPolicy
@@ -292,7 +289,12 @@ func (h *Hook) normalDecide(_ context.Context, toolName string, args map[string]
 			cmdParts := strings.Fields(cmd)
 			for _, blocked := range h.cfg.BlockList {
 				if len(cmdParts) > 0 && cmdParts[0] == blocked {
-					return Ask, fmt.Sprintf("高危命令: %s (需要确认)", blocked), LevelBlock
+					// Safe zone: /tmp/ or workspace → auto-allow
+					if isInSafeZone(cmd, h.cfg.Workspace) {
+						return Allow, fmt.Sprintf("%s in safe zone", blocked), LevelPolicy
+					}
+					// Outside safe zone: Ask (NOT Deny) — no fatal rejections
+					return Ask, fmt.Sprintf("命令 %s 目标在安全区域外 (需要确认)", blocked), LevelBlock
 				}
 			}
 		}
@@ -301,19 +303,6 @@ func (h *Hook) normalDecide(_ context.Context, toolName string, args map[string]
 	default: // "ask" or any other value
 		return Ask, "mode=ask", LevelPolicy
 	}
-}
-
-// heartbeatDecide restricts cron/heartbeat tools to read-only operations.
-func (h *Hook) heartbeatDecide(toolName string, _ map[string]any) (Decision, string) {
-	// Hardcoded blocklist: destructive tools not allowed in cron mode
-	blocked := map[string]bool{
-		"run_command": true, "edit_file": true, "write_file": true, "forge": true,
-	}
-	if blocked[toolName] {
-		return Deny, fmt.Sprintf("tool %s blocked in heartbeat mode", toolName)
-	}
-	// All other tools allowed (read_file, glob, grep_search, web_search, etc.)
-	return Allow, "heartbeat allowed"
 }
 
 // forgeDecide allows operations within the forge sandbox.
@@ -362,6 +351,26 @@ func hasShellInjection(cmd string) bool {
 	}
 	// Check for shell metacharacters that could indicate injection
 	return shellInjectionRe.MatchString(cmd)
+}
+
+// isInSafeZone checks if all path arguments target /tmp/ or the configured workspace.
+// Returns false if any argument targets a path outside safe zones, preventing bypasses
+// like "rm /tmp/foo /etc/passwd".
+func isInSafeZone(cmd string, workspace string) bool {
+	parts := strings.Fields(cmd)
+	hasPath := false
+	for _, p := range parts[1:] { // skip the command itself
+		if strings.HasPrefix(p, "-") {
+			continue // skip flags like -rf, -f, --force
+		}
+		hasPath = true
+		isTmp := strings.HasPrefix(p, "/tmp/") || p == "/tmp"
+		isWs := workspace != "" && strings.HasPrefix(p, workspace)
+		if !isTmp && !isWs {
+			return false
+		}
+	}
+	return hasPath // must have at least one path argument
 }
 
 // isDependencyInstall checks if a command is a package manager install.

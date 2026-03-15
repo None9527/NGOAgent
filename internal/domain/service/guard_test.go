@@ -46,7 +46,7 @@ func TestGuardNilConfig(t *testing.T) {
 
 func TestGuardPreToolCheck_PlanningCodeModify(t *testing.T) {
 	g := NewBehaviorGuard(&config.AgentConfig{})
-	g.SetPlanningState(true, false) // no plan.md
+	g.SetModeState(true, false, false, "planning") // no plan.md, no task.md
 
 	// Mark boundary so tracking works
 	g.PostToolRecord("task_boundary")
@@ -65,7 +65,7 @@ func TestGuardPreToolCheck_PlanningCodeModify(t *testing.T) {
 
 	// With planExists=true, no warning
 	g2 := NewBehaviorGuard(&config.AgentConfig{})
-	g2.SetPlanningState(true, true) // plan.md exists
+	g2.SetModeState(true, true, false, "planning") // plan.md exists
 	g2.PostToolRecord("task_boundary")
 	v = g2.PreToolCheck("write_file")
 	if v != nil {
@@ -122,7 +122,7 @@ func TestGuardPostToolRecord(t *testing.T) {
 
 func TestGuardResetTurn(t *testing.T) {
 	g := NewBehaviorGuard(nil)
-	g.SetPlanningState(true, false)
+	g.SetModeState(true, false, false, "planning")
 	g.PostToolRecord("task_boundary")
 	g.PostToolRecord("notify_user")
 	g.PreToolCheck("write_file")

@@ -135,6 +135,25 @@ type AgentServiceClient interface {
 	GetLogs(ctx context.Context, in *GetLogsRequest, opts ...grpc.CallOption) (*LogEntriesResponse, error)
 	// ─── Task Plan ───
 	GetTasks(ctx context.Context, in *TasksRequest, opts ...grpc.CallOption) (*TasksResponse, error)
+	// ─── Brain Artifacts ───
+	ListBrainArtifacts(ctx context.Context, in *BrainListRequest, opts ...grpc.CallOption) (*BrainListResponse, error)
+	ReadBrainArtifact(ctx context.Context, in *BrainReadRequest, opts ...grpc.CallOption) (*BrainReadResponse, error)
+	// ─── KI (Knowledge Items) ───
+	ListKI(ctx context.Context, in *EmptyRequest, opts ...grpc.CallOption) (*KIListResponse, error)
+	GetKI(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*KIDetailResponse, error)
+	DeleteKI(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*CommandResponse, error)
+	ListKIArtifacts(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*BrainListResponse, error)
+	ReadKIArtifact(ctx context.Context, in *BrainReadRequest, opts ...grpc.CallOption) (*BrainReadResponse, error)
+	// ─── Skills CRUD ───
+	RefreshSkills(ctx context.Context, in *EmptyRequest, opts ...grpc.CallOption) (*CommandResponse, error)
+	DeleteSkill(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*CommandResponse, error)
+	ReadSkillContent(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*BrainReadResponse, error)
+	// ─── Provider Management ───
+	AddProvider(ctx context.Context, in *AddProviderRequest, opts ...grpc.CallOption) (*CommandResponse, error)
+	RemoveProvider(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*CommandResponse, error)
+	// ─── Cron Logs ───
+	ListCronLogs(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*CronLogsResponse, error)
+	ReadCronLog(ctx context.Context, in *CronLogReadRequest, opts ...grpc.CallOption) (*BrainReadResponse, error)
 }
 
 type agentServiceClient struct {
@@ -1014,6 +1033,132 @@ func (c *agentServiceClient) GetTasks(ctx context.Context, in *TasksRequest, opt
 	return out, nil
 }
 
+func (c *agentServiceClient) ListBrainArtifacts(ctx context.Context, in *BrainListRequest, opts ...grpc.CallOption) (*BrainListResponse, error) {
+	out := new(BrainListResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/ListBrainArtifacts", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ReadBrainArtifact(ctx context.Context, in *BrainReadRequest, opts ...grpc.CallOption) (*BrainReadResponse, error) {
+	out := new(BrainReadResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/ReadBrainArtifact", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ListKI(ctx context.Context, in *EmptyRequest, opts ...grpc.CallOption) (*KIListResponse, error) {
+	out := new(KIListResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/ListKI", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) GetKI(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*KIDetailResponse, error) {
+	out := new(KIDetailResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/GetKI", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) DeleteKI(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*CommandResponse, error) {
+	out := new(CommandResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/DeleteKI", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ListKIArtifacts(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*BrainListResponse, error) {
+	out := new(BrainListResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/ListKIArtifacts", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ReadKIArtifact(ctx context.Context, in *BrainReadRequest, opts ...grpc.CallOption) (*BrainReadResponse, error) {
+	out := new(BrainReadResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/ReadKIArtifact", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) RefreshSkills(ctx context.Context, in *EmptyRequest, opts ...grpc.CallOption) (*CommandResponse, error) {
+	out := new(CommandResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/RefreshSkills", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) DeleteSkill(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*CommandResponse, error) {
+	out := new(CommandResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/DeleteSkill", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ReadSkillContent(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*BrainReadResponse, error) {
+	out := new(BrainReadResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/ReadSkillContent", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) AddProvider(ctx context.Context, in *AddProviderRequest, opts ...grpc.CallOption) (*CommandResponse, error) {
+	out := new(CommandResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/AddProvider", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) RemoveProvider(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*CommandResponse, error) {
+	out := new(CommandResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/RemoveProvider", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ListCronLogs(ctx context.Context, in *StringValueRequest, opts ...grpc.CallOption) (*CronLogsResponse, error) {
+	out := new(CronLogsResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/ListCronLogs", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ReadCronLog(ctx context.Context, in *CronLogReadRequest, opts ...grpc.CallOption) (*BrainReadResponse, error) {
+	out := new(BrainReadResponse)
+	err := c.cc.Invoke(ctx, "/ngoclaw.agent.v1.AgentService/ReadCronLog", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServiceServer is the server API for AgentService service.
 // All implementations must embed UnimplementedAgentServiceServer
 // for forward compatibility
@@ -1131,6 +1276,25 @@ type AgentServiceServer interface {
 	GetLogs(context.Context, *GetLogsRequest) (*LogEntriesResponse, error)
 	// ─── Task Plan ───
 	GetTasks(context.Context, *TasksRequest) (*TasksResponse, error)
+	// ─── Brain Artifacts ───
+	ListBrainArtifacts(context.Context, *BrainListRequest) (*BrainListResponse, error)
+	ReadBrainArtifact(context.Context, *BrainReadRequest) (*BrainReadResponse, error)
+	// ─── KI (Knowledge Items) ───
+	ListKI(context.Context, *EmptyRequest) (*KIListResponse, error)
+	GetKI(context.Context, *StringValueRequest) (*KIDetailResponse, error)
+	DeleteKI(context.Context, *StringValueRequest) (*CommandResponse, error)
+	ListKIArtifacts(context.Context, *StringValueRequest) (*BrainListResponse, error)
+	ReadKIArtifact(context.Context, *BrainReadRequest) (*BrainReadResponse, error)
+	// ─── Skills CRUD ───
+	RefreshSkills(context.Context, *EmptyRequest) (*CommandResponse, error)
+	DeleteSkill(context.Context, *StringValueRequest) (*CommandResponse, error)
+	ReadSkillContent(context.Context, *StringValueRequest) (*BrainReadResponse, error)
+	// ─── Provider Management ───
+	AddProvider(context.Context, *AddProviderRequest) (*CommandResponse, error)
+	RemoveProvider(context.Context, *StringValueRequest) (*CommandResponse, error)
+	// ─── Cron Logs ───
+	ListCronLogs(context.Context, *StringValueRequest) (*CronLogsResponse, error)
+	ReadCronLog(context.Context, *CronLogReadRequest) (*BrainReadResponse, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }
 
@@ -1419,6 +1583,48 @@ func (UnimplementedAgentServiceServer) GetLogs(context.Context, *GetLogsRequest)
 }
 func (UnimplementedAgentServiceServer) GetTasks(context.Context, *TasksRequest) (*TasksResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetTasks not implemented")
+}
+func (UnimplementedAgentServiceServer) ListBrainArtifacts(context.Context, *BrainListRequest) (*BrainListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListBrainArtifacts not implemented")
+}
+func (UnimplementedAgentServiceServer) ReadBrainArtifact(context.Context, *BrainReadRequest) (*BrainReadResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadBrainArtifact not implemented")
+}
+func (UnimplementedAgentServiceServer) ListKI(context.Context, *EmptyRequest) (*KIListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListKI not implemented")
+}
+func (UnimplementedAgentServiceServer) GetKI(context.Context, *StringValueRequest) (*KIDetailResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetKI not implemented")
+}
+func (UnimplementedAgentServiceServer) DeleteKI(context.Context, *StringValueRequest) (*CommandResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteKI not implemented")
+}
+func (UnimplementedAgentServiceServer) ListKIArtifacts(context.Context, *StringValueRequest) (*BrainListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListKIArtifacts not implemented")
+}
+func (UnimplementedAgentServiceServer) ReadKIArtifact(context.Context, *BrainReadRequest) (*BrainReadResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadKIArtifact not implemented")
+}
+func (UnimplementedAgentServiceServer) RefreshSkills(context.Context, *EmptyRequest) (*CommandResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RefreshSkills not implemented")
+}
+func (UnimplementedAgentServiceServer) DeleteSkill(context.Context, *StringValueRequest) (*CommandResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteSkill not implemented")
+}
+func (UnimplementedAgentServiceServer) ReadSkillContent(context.Context, *StringValueRequest) (*BrainReadResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadSkillContent not implemented")
+}
+func (UnimplementedAgentServiceServer) AddProvider(context.Context, *AddProviderRequest) (*CommandResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddProvider not implemented")
+}
+func (UnimplementedAgentServiceServer) RemoveProvider(context.Context, *StringValueRequest) (*CommandResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RemoveProvider not implemented")
+}
+func (UnimplementedAgentServiceServer) ListCronLogs(context.Context, *StringValueRequest) (*CronLogsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListCronLogs not implemented")
+}
+func (UnimplementedAgentServiceServer) ReadCronLog(context.Context, *CronLogReadRequest) (*BrainReadResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadCronLog not implemented")
 }
 func (UnimplementedAgentServiceServer) mustEmbedUnimplementedAgentServiceServer() {}
 
@@ -3128,6 +3334,258 @@ func _AgentService_GetTasks_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentService_ListBrainArtifacts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BrainListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ListBrainArtifacts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/ListBrainArtifacts",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ListBrainArtifacts(ctx, req.(*BrainListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ReadBrainArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BrainReadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ReadBrainArtifact(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/ReadBrainArtifact",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ReadBrainArtifact(ctx, req.(*BrainReadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ListKI_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EmptyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ListKI(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/ListKI",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ListKI(ctx, req.(*EmptyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_GetKI_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StringValueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).GetKI(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/GetKI",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).GetKI(ctx, req.(*StringValueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_DeleteKI_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StringValueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).DeleteKI(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/DeleteKI",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).DeleteKI(ctx, req.(*StringValueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ListKIArtifacts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StringValueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ListKIArtifacts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/ListKIArtifacts",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ListKIArtifacts(ctx, req.(*StringValueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ReadKIArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BrainReadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ReadKIArtifact(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/ReadKIArtifact",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ReadKIArtifact(ctx, req.(*BrainReadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_RefreshSkills_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EmptyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).RefreshSkills(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/RefreshSkills",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).RefreshSkills(ctx, req.(*EmptyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_DeleteSkill_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StringValueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).DeleteSkill(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/DeleteSkill",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).DeleteSkill(ctx, req.(*StringValueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ReadSkillContent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StringValueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ReadSkillContent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/ReadSkillContent",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ReadSkillContent(ctx, req.(*StringValueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_AddProvider_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddProviderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).AddProvider(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/AddProvider",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).AddProvider(ctx, req.(*AddProviderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_RemoveProvider_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StringValueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).RemoveProvider(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/RemoveProvider",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).RemoveProvider(ctx, req.(*StringValueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ListCronLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StringValueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ListCronLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/ListCronLogs",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ListCronLogs(ctx, req.(*StringValueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ReadCronLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CronLogReadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ReadCronLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/ngoclaw.agent.v1.AgentService/ReadCronLog",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ReadCronLog(ctx, req.(*CronLogReadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentService_ServiceDesc is the grpc.ServiceDesc for AgentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3506,6 +3964,62 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetTasks",
 			Handler:    _AgentService_GetTasks_Handler,
+		},
+		{
+			MethodName: "ListBrainArtifacts",
+			Handler:    _AgentService_ListBrainArtifacts_Handler,
+		},
+		{
+			MethodName: "ReadBrainArtifact",
+			Handler:    _AgentService_ReadBrainArtifact_Handler,
+		},
+		{
+			MethodName: "ListKI",
+			Handler:    _AgentService_ListKI_Handler,
+		},
+		{
+			MethodName: "GetKI",
+			Handler:    _AgentService_GetKI_Handler,
+		},
+		{
+			MethodName: "DeleteKI",
+			Handler:    _AgentService_DeleteKI_Handler,
+		},
+		{
+			MethodName: "ListKIArtifacts",
+			Handler:    _AgentService_ListKIArtifacts_Handler,
+		},
+		{
+			MethodName: "ReadKIArtifact",
+			Handler:    _AgentService_ReadKIArtifact_Handler,
+		},
+		{
+			MethodName: "RefreshSkills",
+			Handler:    _AgentService_RefreshSkills_Handler,
+		},
+		{
+			MethodName: "DeleteSkill",
+			Handler:    _AgentService_DeleteSkill_Handler,
+		},
+		{
+			MethodName: "ReadSkillContent",
+			Handler:    _AgentService_ReadSkillContent_Handler,
+		},
+		{
+			MethodName: "AddProvider",
+			Handler:    _AgentService_AddProvider_Handler,
+		},
+		{
+			MethodName: "RemoveProvider",
+			Handler:    _AgentService_RemoveProvider_Handler,
+		},
+		{
+			MethodName: "ListCronLogs",
+			Handler:    _AgentService_ListCronLogs_Handler,
+		},
+		{
+			MethodName: "ReadCronLog",
+			Handler:    _AgentService_ReadCronLog_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -12,7 +12,7 @@ import (
 
 // cwdMarker is the sentinel injected into command output to extract
 // the post-execution working directory.
-const cwdMarker = "__NGOCLAW_CWD_MARKER__"
+const cwdMarker = "__NGOAGENT_CWD_MARKER__"
 
 // ShellState tracks persistent shell context across independent bash processes.
 type ShellState struct {

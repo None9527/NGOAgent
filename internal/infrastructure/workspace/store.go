@@ -1,8 +1,7 @@
-// Package workspace provides project-level knowledge and heartbeat state storage.
+// Package workspace provides project-level knowledge and state storage.
 package workspace
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,22 +52,6 @@ func (s *Store) WriteContext(content string) error {
 	os.MkdirAll(s.agentDir, 0755)
 	return os.WriteFile(filepath.Join(s.agentDir, "context.md"), []byte(content), 0644)
 }
-
-// ReadHeartbeat reads the heartbeat task list.
-// Project-level heartbeat overrides global if present.
-func (s *Store) ReadHeartbeat(globalHeartbeatPath string) string {
-	// Try project first
-	projectPath := filepath.Join(s.agentDir, "heartbeat.md")
-	if data, err := os.ReadFile(projectPath); err == nil {
-		return strings.TrimSpace(string(data))
-	}
-	// Fall back to global
-	if data, err := os.ReadFile(globalHeartbeatPath); err == nil {
-		return strings.TrimSpace(string(data))
-	}
-	return ""
-}
-
 // SkillsDir returns the project-level skills directory.
 func (s *Store) SkillsDir() string {
 	return filepath.Join(s.agentDir, "skills")
@@ -86,38 +69,6 @@ func (s *Store) WorkDir() string { return s.workDir }
 func (s *Store) Exists() bool {
 	_, err := os.Stat(s.agentDir)
 	return err == nil
-}
-
-// HeartbeatState tracks heartbeat execution status.
-type HeartbeatState struct {
-	LastRun    string `json:"last_run"`
-	NextRun    string `json:"next_run"`
-	TasksDone  int    `json:"tasks_done"`
-	TasksTotal int    `json:"tasks_total"`
-	Status     string `json:"status"` // idle / running / error
-}
-
-// ReadHeartbeatState loads heartbeat-state.json.
-func (s *Store) ReadHeartbeatState() *HeartbeatState {
-	data, err := os.ReadFile(filepath.Join(s.agentDir, "heartbeat-state.json"))
-	if err != nil {
-		return &HeartbeatState{Status: "idle"}
-	}
-	var state HeartbeatState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return &HeartbeatState{Status: "idle"}
-	}
-	return &state
-}
-
-// WriteHeartbeatState saves heartbeat-state.json.
-func (s *Store) WriteHeartbeatState(state *HeartbeatState) error {
-	os.MkdirAll(s.agentDir, 0755)
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(s.agentDir, "heartbeat-state.json"), data, 0644)
 }
 
 // AppendContext appends to context.md with dedup and 5KB max.

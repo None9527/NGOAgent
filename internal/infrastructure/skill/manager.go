@@ -53,11 +53,13 @@ func (m *Manager) Discover() {
 				name = entry.Name()
 			}
 
+			cmd := parseSkillCommand(string(content))
 			m.skills[name] = &entity.Skill{
 				ID:          name,
 				Name:        name,
 				Description: desc,
 				Type:        "workflow",
+				Command:     cmd,
 				Path:        filepath.Join(dir, entry.Name()),
 				Content:     string(content),
 				Enabled:     true,
@@ -72,6 +74,19 @@ func (m *Manager) Discover() {
 func (m *Manager) Get(name string) (*entity.Skill, bool) {
 	s, ok := m.skills[name]
 	return s, ok
+}
+
+// Delete removes a skill by name (from memory and disk).
+func (m *Manager) Delete(name string) error {
+	s, ok := m.skills[name]
+	if !ok {
+		return fmt.Errorf("skill not found: %s", name)
+	}
+	if err := os.RemoveAll(s.Path); err != nil {
+		return fmt.Errorf("delete skill dir: %w", err)
+	}
+	delete(m.skills, name)
+	return nil
 }
 
 // List returns all discovered skills.
@@ -150,6 +165,32 @@ func (m *Manager) RecordForgeRun(name string, run entity.ForgeRun) error {
 	fmt.Fprintf(f, "[%s] %s retries=%d deps=%v\n",
 		run.Timestamp.Format(time.RFC3339), status, run.Retries, run.DepsAdded)
 	return nil
+}
+
+// parseSkillCommand extracts the first ```bash code block from the SKILL.md body
+// as the quick-run command. This lets the prompt inject a ready-to-use command
+// so the agent doesn't need to read SKILL.md just to find the execution path.
+func parseSkillCommand(content string) string {
+	lines := strings.Split(content, "\n")
+	inBlock := false
+	var cmd strings.Builder
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !inBlock && (trimmed == "```bash" || trimmed == "```shell") {
+			inBlock = true
+			continue
+		}
+		if inBlock {
+			if trimmed == "```" {
+				break
+			}
+			if cmd.Len() > 0 {
+				cmd.WriteString(" ")
+			}
+			cmd.WriteString(strings.TrimSpace(line))
+		}
+	}
+	return cmd.String()
 }
 
 // parseSkillHeader extracts name and description from SKILL.md YAML frontmatter.

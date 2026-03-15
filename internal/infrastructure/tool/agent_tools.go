@@ -39,8 +39,9 @@ func (t *SpawnAgentTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"task":    map[string]any{"type": "string", "description": "Detailed task description for the sub-agent"},
-			"context": map[string]any{"type": "string", "description": "Additional context to pass"},
+			"task":      map[string]any{"type": "string", "description": "Detailed task description for the sub-agent"},
+			"task_name": map[string]any{"type": "string", "description": "Short human-readable name (e.g. 'Fix Auth Tests')"},
+			"context":   map[string]any{"type": "string", "description": "Additional context to pass"},
 		},
 		"required": []string{"task"},
 	}
@@ -52,14 +53,26 @@ func (t *SpawnAgentTool) Execute(ctx context.Context, args map[string]any) (dtoo
 		return dtool.ToolResult{Output: "Error: 'task' is required"}, nil
 	}
 
+	taskName, _ := args["task_name"].(string)
+	if taskName == "" {
+		taskName = "sub-agent"
+	}
+
 	extraCtx, _ := args["context"].(string)
 	if extraCtx != "" {
 		task = task + "\n\nContext:\n" + extraCtx
 	}
 
+	// Auto-inject workspace directory
+	if cwd, err := os.Getwd(); err == nil {
+		task = fmt.Sprintf("Working directory: %s\n\n", cwd) + task
+	}
+
 	if t.spawnFn == nil {
 		return dtool.ToolResult{Output: "Error: spawn agent not available (factory not configured)"}, nil
 	}
+
+	fmt.Printf("[spawn] Starting sub-agent: %s\n", taskName)
 
 	// 5 minute timeout for sub-agent
 	subCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -67,10 +80,12 @@ func (t *SpawnAgentTool) Execute(ctx context.Context, args map[string]any) (dtoo
 
 	result, err := t.spawnFn(subCtx, task)
 	if err != nil {
-		return dtool.ToolResult{Output: fmt.Sprintf("Sub-agent failed: %v", err)}, nil
+		fmt.Printf("[spawn] Sub-agent '%s' failed: %v\n", taskName, err)
+		return dtool.ToolResult{Output: fmt.Sprintf("Sub-agent '%s' failed: %v", taskName, err)}, nil
 	}
 
-	return dtool.ToolResult{Output: fmt.Sprintf("[Sub-agent completed]\n%s", result)}, nil
+	fmt.Printf("[spawn] Sub-agent '%s' completed\n", taskName)
+	return dtool.ToolResult{Output: fmt.Sprintf("[Sub-agent '%s' completed]\n%s", taskName, result)}, nil
 }
 
 // ForgeTool constructs, executes, and validates structured task environments.

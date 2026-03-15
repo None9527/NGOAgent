@@ -1,0 +1,59 @@
+# NGOAgent Configuration Example
+# Copy to ~/.ngoagent/config.yaml and customize.
+
+agent:
+  planning_mode: false
+  max_steps: 200
+  workspace: "~/.ngoagent/workspace"
+
+llm:
+  providers:
+    - name: "default"
+      type: "openai"
+      base_url: "https://api.openai.com/v1"
+      api_key: "${OPENAI_API_KEY}"         # Set via environment variable
+      models: ["gpt-4"]
+
+server:
+  http_port: 19997
+  grpc_port: 19998
+  # timezone: "Asia/Shanghai"              # Or "system" for OS default
+
+security:
+  mode: "auto"                             # allow | auto | ask
+  block_list: ["rm", "rmdir", "mkfs", "dd", "shutdown"]
+  safe_commands: ["ls", "cat", "grep", "find", "go", "npm", "git"]
+
+storage:
+  db_path: "~/.ngoagent/data/ngoagent.db"
+  brain_dir: "~/.ngoagent/brain"
+  knowledge_dir: "~/.ngoagent/knowledge"
+  skills_dir: "~/.ngoagent/skills"
+
+cron:
+  enabled: true
+
+forge:
+  sandbox_dir: "/tmp/ngoagent-forge"
+  max_retries: 5
+  auto_forge_on_install: true
+  history_limit: 20
+
+# mcp:
+#   servers:
+#     - name: "example-mcp"
+#       command: "npx"
+#       args: ["-y", "@example/mcp-server"]
+
+# embedding:
+#   provider: "dashscope"                  # "dashscope" | "openai" | "" (disabled)
+#   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+#   api_key: "${DASHSCOPE_API_KEY}"
+#   model: "text-embedding-v3"
+#   dimensions: 1024
+#   similarity_threshold: 0.85
+#   min_ki_for_embedding: 30
+#   top_k: 5
+
+# search:
+#   endpoint: "http://localhost:8888"       # SearXNG endpoint

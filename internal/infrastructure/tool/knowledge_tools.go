@@ -98,7 +98,15 @@ func (t *TaskPlanTool) Execute(ctx context.Context, args map[string]any) (dtool.
 		if err != nil {
 			return dtool.ToolResult{Output: fmt.Sprintf("Error: %v", err)}, nil
 		}
-		completed := strings.ReplaceAll(data, "- [ ]", "- [x]")
+		// Replace only line-leading checklist items (not inside code blocks)
+		lines := strings.Split(data, "\n")
+		for i, line := range lines {
+			trimmed := strings.TrimLeft(line, " \t")
+			if strings.HasPrefix(trimmed, "- [ ]") {
+				lines[i] = strings.Replace(line, "- [ ]", "- [x]", 1)
+			}
+		}
+		completed := strings.Join(lines, "\n")
 		completed += fmt.Sprintf("\n\n---\nCompleted at: %s\n", time.Now().Format(time.RFC3339))
 		if err := store.Write(filename, completed); err != nil {
 			return dtool.ToolResult{Output: fmt.Sprintf("Error: %v", err)}, nil
@@ -194,31 +202,37 @@ func (t *UpdateProjectContextTool) Execute(ctx context.Context, args map[string]
 	}
 }
 
-// SaveMemoryTool saves knowledge to the cross-session persistent store.
-type SaveMemoryTool struct {
-	store *knowledge.Store
+// SaveKnowledgeTool saves knowledge to the cross-session persistent store.
+// Supports embedding-based dedup if a retriever is provided.
+type SaveKnowledgeTool struct {
+	store     *knowledge.Store
+	retriever *knowledge.Retriever // optional: for dedup + re-indexing
+	threshold float64              // cosine similarity threshold for dedup
 }
 
-func NewSaveMemoryTool(store *knowledge.Store) *SaveMemoryTool {
-	return &SaveMemoryTool{store: store}
+func NewSaveKnowledgeTool(store *knowledge.Store, retriever *knowledge.Retriever, threshold float64) *SaveKnowledgeTool {
+	if threshold <= 0 {
+		threshold = 0.60
+	}
+	return &SaveKnowledgeTool{store: store, retriever: retriever, threshold: threshold}
 }
 
-func (t *SaveMemoryTool) Name() string        { return "save_memory" }
-func (t *SaveMemoryTool) Description() string { return prompttext.ToolSaveMemory }
+func (t *SaveKnowledgeTool) Name() string        { return "save_knowledge" }
+func (t *SaveKnowledgeTool) Description() string { return prompttext.ToolSaveMemory }
 
-func (t *SaveMemoryTool) Schema() map[string]any {
+func (t *SaveKnowledgeTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"key":     map[string]any{"type": "string", "description": "Descriptive key for this knowledge"},
 			"content": map[string]any{"type": "string", "description": "Knowledge content to store"},
-			"tags":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional categorization tags"},
+			"tags":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional categorization tags (use 'preference' for user preferences)"},
 		},
 		"required": []string{"key", "content"},
 	}
 }
 
-func (t *SaveMemoryTool) Execute(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
+func (t *SaveKnowledgeTool) Execute(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
 	key, _ := args["key"].(string)
 	content, _ := args["content"].(string)
 
@@ -231,6 +245,19 @@ func (t *SaveMemoryTool) Execute(ctx context.Context, args map[string]any) (dtoo
 	if rawTags, ok := args["tags"].([]any); ok {
 		for _, rt := range rawTags {
 			tags = append(tags, fmt.Sprint(rt))
+		}
+	}
+
+	// Dedup check: if a similar KI exists, update instead of create
+	if t.retriever != nil {
+		dupID, score := t.retriever.FindDuplicate(key+"\n"+content, t.threshold)
+		if dupID != "" {
+			appendContent := fmt.Sprintf("\n\n---\n\n## Manual Update\n\n%s", content)
+			if err := t.store.UpdateContent(dupID, appendContent); err != nil {
+				return dtool.ToolResult{Output: fmt.Sprintf("Error updating existing KI: %v", err)}, nil
+			}
+			_ = t.retriever.EmbedAndIndexByID(dupID)
+			return dtool.ToolResult{Output: fmt.Sprintf("Updated existing knowledge %q (similarity=%.2f)", dupID, score)}, nil
 		}
 	}
 
@@ -247,8 +274,13 @@ func (t *SaveMemoryTool) Execute(ctx context.Context, args map[string]any) (dtoo
 		Tags:    tags,
 	}
 	if err := t.store.Save(item); err != nil {
-		return dtool.ToolResult{Output: fmt.Sprintf("Error saving memory: %v", err)}, nil
+		return dtool.ToolResult{Output: fmt.Sprintf("Error saving knowledge: %v", err)}, nil
 	}
 
-	return dtool.ToolResult{Output: fmt.Sprintf("Memory saved: %s → %s/%s/", key, t.store.BaseDir(), item.ID)}, nil
+	// Index the new KI if retriever is available
+	if t.retriever != nil {
+		_ = t.retriever.EmbedAndIndex(item)
+	}
+
+	return dtool.ToolResult{Output: fmt.Sprintf("Knowledge saved: %s → %s/%s/", key, t.store.BaseDir(), item.ID)}, nil
 }

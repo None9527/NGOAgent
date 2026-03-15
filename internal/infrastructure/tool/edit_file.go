@@ -8,12 +8,14 @@ import (
 	"strings"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 )
 
 // EditFileTool performs string replacement editing on files.
 type EditFileTool struct {
-	WorkDir string // If set, enforces path within workspace (E5)
+	WorkDir     string                  // If set, enforces path within workspace (E5)
+	FileHistory *workspace.FileHistory  // If set, backs up files before edit
 }
 
 func (t *EditFileTool) Name() string        { return "edit_file" }
@@ -92,6 +94,10 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 		// Create new file
 		dir := filepath.Dir(path)
 		os.MkdirAll(dir, 0755)
+		// FileHistory: track before creation (records as "new file")
+		if t.FileHistory != nil {
+			t.FileHistory.TrackEdit(path)
+		}
 		if err := os.WriteFile(path, []byte(newStr), 0644); err != nil {
 			return dtool.ToolResult{Output: fmt.Sprintf("Error writing file: %v", err)}, nil
 		}
@@ -119,8 +125,19 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 	count := strings.Count(normalizedContent, normalizedOld)
 
 	if count == 0 {
-		// Error code 8: String not found
-		return dtool.ToolResult{Output: fmt.Sprintf("Error [code 8]: old_string not found in file.\nString: %s", oldStr)}, nil
+		// Cascade fuzzy matching: L1 unicode → L2 line-trim → L3 block-anchor
+		if fuzzyMatch := cascadeFuzzyMatch(normalizedContent, normalizedOld); fuzzyMatch != "" {
+			// Use the matched slice for replacement instead of the original oldStr
+			normalizedOld = fuzzyMatch
+			count = 1
+		} else {
+			// Error code 8: String not found — include best candidate feedback
+			errMsg := fmt.Sprintf("Error [code 8]: old_string not found in file.\nString: %s", oldStr)
+			if hint := findSimilarLines(normalizedContent, normalizedOld, 0.6); hint != "" {
+				errMsg += fmt.Sprintf("\n\nDid you mean to match this section?\n```\n%s\n```\nPlease re-read the file and try again with the correct old_string.", hint)
+			}
+			return dtool.ToolResult{Output: errMsg}, nil
+		}
 	}
 
 	if count > 1 && !replaceAll {
@@ -153,6 +170,11 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 		newContent = strings.ReplaceAll(normalizedContent, normalizedOld, newStr)
 	} else {
 		newContent = strings.Replace(normalizedContent, normalizedOld, newStr, 1)
+	}
+
+	// FileHistory: backup before overwriting
+	if t.FileHistory != nil {
+		t.FileHistory.TrackEdit(path)
 	}
 
 	if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {

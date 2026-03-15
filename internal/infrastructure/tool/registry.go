@@ -3,6 +3,7 @@ package tool
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
@@ -24,11 +25,12 @@ type ToolInfo struct {
 	Enabled     bool
 }
 
-// Registry manages tool registration, lookup, and enable/disable.
+// Registry manages tool registration, lookup, enable/disable, and path resolution.
 type Registry struct {
-	mu       sync.RWMutex
-	tools    map[string]Tool
-	disabled map[string]bool
+	mu           sync.RWMutex
+	tools        map[string]Tool
+	disabled     map[string]bool
+	workspaceDir string // Default workspace for resolving relative paths
 }
 
 // NewRegistry creates an empty tool registry.
@@ -37,6 +39,29 @@ func NewRegistry() *Registry {
 		tools:    make(map[string]Tool),
 		disabled: make(map[string]bool),
 	}
+}
+
+// SetWorkspaceDir sets the default workspace directory for path resolution.
+// Relative paths in tool args will be resolved against this directory.
+func (r *Registry) SetWorkspaceDir(dir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.workspaceDir = dir
+}
+
+// ResolvePath resolves a path: absolute paths pass through, relative paths
+// are joined with the configured workspace directory.
+func (r *Registry) ResolvePath(path string) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	r.mu.RLock()
+	ws := r.workspaceDir
+	r.mu.RUnlock()
+	if ws == "" {
+		return path // No workspace configured, return as-is
+	}
+	return filepath.Join(ws, path)
 }
 
 // Register adds a tool to the registry.
@@ -55,6 +80,7 @@ func (r *Registry) Get(name string) (Tool, bool) {
 }
 
 // Execute runs a tool by name with the given arguments.
+// Before execution, resolves relative file paths against the workspace directory.
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]any) (dtool.ToolResult, error) {
 	r.mu.RLock()
 	t, ok := r.tools[name]
@@ -67,7 +93,41 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 	if disabled {
 		return dtool.ToolResult{}, &ToolError{Code: "disabled", Message: "tool is disabled: " + name}
 	}
+
+	// ── Path Resolution: resolve relative paths against workspace ──
+	r.resolveToolPaths(name, args)
+
 	return t.Execute(ctx, args)
+}
+
+// resolveToolPaths resolves relative paths in tool args based on tool type.
+// File tools: resolves "path" arg. Shell tools: sets default "cwd".
+func (r *Registry) resolveToolPaths(name string, args map[string]any) {
+	r.mu.RLock()
+	ws := r.workspaceDir
+	r.mu.RUnlock()
+	if ws == "" {
+		return
+	}
+
+	switch name {
+	case "read_file", "write_file", "edit_file", "glob", "grep_search", "undo_edit":
+		// Resolve the "path" argument
+		if p, ok := args["path"].(string); ok && p != "" && !filepath.IsAbs(p) {
+			args["path"] = filepath.Join(ws, p)
+		}
+		// grep_search also has "directory" field
+		if d, ok := args["directory"].(string); ok && d != "" && !filepath.IsAbs(d) {
+			args["directory"] = filepath.Join(ws, d)
+		}
+	case "run_command":
+		// Set default cwd to workspace if not specified
+		if cwd, ok := args["cwd"].(string); !ok || cwd == "" {
+			args["cwd"] = ws
+		} else if !filepath.IsAbs(cwd) {
+			args["cwd"] = filepath.Join(ws, cwd)
+		}
+	}
 }
 
 // ListDefinitions returns LLM-compatible tool definitions for all enabled tools.

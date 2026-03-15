@@ -76,6 +76,7 @@ type DeltaEvent struct {
 
 // ToolCallDelta describes a tool call event.
 type ToolCallDelta struct {
+	ID     string         `json:"id,omitempty"`
 	Name   string         `json:"name"`
 	Args   map[string]any `json:"args,omitempty"`
 	Output string         `json:"output,omitempty"`
@@ -108,7 +109,7 @@ func (da *DeltaAdapter) Emit(event DeltaEvent) {
 		da.inner.OnReasoning(event.Text)
 	case DeltaToolStart:
 		if event.ToolCall != nil {
-			da.inner.OnToolStart(event.ToolCall.Name, event.ToolCall.Args)
+			da.inner.OnToolStart(event.ToolCall.ID, event.ToolCall.Name, event.ToolCall.Args)
 		}
 	case DeltaToolResult:
 		if event.ToolCall != nil {
@@ -116,7 +117,7 @@ func (da *DeltaAdapter) Emit(event DeltaEvent) {
 			if event.ToolCall.Err != "" {
 				err = &toolError{msg: event.ToolCall.Err}
 			}
-			da.inner.OnToolResult(event.ToolCall.Name, event.ToolCall.Output, err)
+			da.inner.OnToolResult(event.ToolCall.ID, event.ToolCall.Name, event.ToolCall.Output, err)
 		}
 	case DeltaError:
 		if event.Error != "" {

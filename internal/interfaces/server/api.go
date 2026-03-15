@@ -121,10 +121,76 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "disabled", "tool": req.Name})
 	})
 
-	// ─── Skills ───
+	mux.HandleFunc("/api/v1/skills/list", func(w http.ResponseWriter, r *http.Request) {
+		skills, err := s.api.ListSkills()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"skills": skills})
+	})
 
-	mux.HandleFunc("/api/v1/skills", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"skills": s.api.ListSkills()})
+	mux.HandleFunc("/api/v1/skills/read", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name required", http.StatusBadRequest)
+			return
+		}
+		content, err := s.api.ReadSkillContent(name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"name": name, "content": content})
+	})
+
+	mux.HandleFunc("/api/v1/skills/refresh", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := s.api.RefreshSkills(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "refreshed"})
+	})
+
+	mux.HandleFunc("/api/v1/skills/delete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct{ Name string `json:"name"` }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			http.Error(w, "name required", http.StatusBadRequest)
+			return
+		}
+		if err := s.api.DeleteSkill(req.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "name": req.Name})
+	})
+
+	// ─── MCP ───
+
+	mux.HandleFunc("/api/v1/mcp/servers", func(w http.ResponseWriter, r *http.Request) {
+		servers, err := s.api.ListMCPServers()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"servers": servers})
+	})
+
+	mux.HandleFunc("/api/v1/mcp/tools", func(w http.ResponseWriter, r *http.Request) {
+		tools, err := s.api.ListMCPTools()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tools": tools})
 	})
 
 	// ─── Config set ───
@@ -241,10 +307,6 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 		json.NewEncoder(w).Encode(s.api.GetSystemInfo())
 	})
 
-	mux.HandleFunc("/api/v1/heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(s.api.CronStatus())
-	})
-
 	// ─── Brain artifacts ───
 
 	mux.HandleFunc("/api/v1/brain/list", func(w http.ResponseWriter, r *http.Request) {
@@ -322,5 +384,126 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]string{"name": name, "content": content})
+	})
+
+	// ─── Cron management ───
+
+	mux.HandleFunc("/api/v1/cron/list", func(w http.ResponseWriter, r *http.Request) {
+		jobs, err := s.api.ListCronJobs()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"jobs": jobs})
+	})
+
+	mux.HandleFunc("/api/v1/cron/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Name     string `json:"name"`
+			Schedule string `json:"schedule"`
+			Prompt   string `json:"prompt"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if req.Name == "" || req.Schedule == "" || req.Prompt == "" {
+			http.Error(w, "name, schedule, prompt required", http.StatusBadRequest)
+			return
+		}
+		if err := s.api.CreateCronJob(req.Name, req.Schedule, req.Prompt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "created", "name": req.Name})
+	})
+
+	mux.HandleFunc("/api/v1/cron/delete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct{ Name string `json:"name"` }
+		json.NewDecoder(r.Body).Decode(&req)
+		if err := s.api.DeleteCronJob(req.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	})
+
+	mux.HandleFunc("/api/v1/cron/enable", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct{ Name string `json:"name"` }
+		json.NewDecoder(r.Body).Decode(&req)
+		if err := s.api.EnableCronJob(req.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "enabled", "name": req.Name})
+	})
+
+	mux.HandleFunc("/api/v1/cron/disable", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct{ Name string `json:"name"` }
+		json.NewDecoder(r.Body).Decode(&req)
+		if err := s.api.DisableCronJob(req.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "disabled", "name": req.Name})
+	})
+
+	mux.HandleFunc("/api/v1/cron/run", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct{ Name string `json:"name"` }
+		json.NewDecoder(r.Body).Decode(&req)
+		if err := s.api.RunCronJobNow(req.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "triggered", "name": req.Name})
+	})
+
+	mux.HandleFunc("/api/v1/cron/logs", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name required", http.StatusBadRequest)
+			return
+		}
+		logs, err := s.api.ListCronLogs(name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"logs": logs})
+	})
+
+	mux.HandleFunc("/api/v1/cron/log/read", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("name")
+		file := r.URL.Query().Get("file")
+		if name == "" || file == "" {
+			http.Error(w, "name and file required", http.StatusBadRequest)
+			return
+		}
+		content, err := s.api.ReadCronLog(name, file)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"file": file, "content": content})
 	})
 }

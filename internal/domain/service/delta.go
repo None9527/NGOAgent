@@ -1,15 +1,19 @@
 package service
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Delta is a default DeltaSink implementation that records events.
 // Server layer creates its own protocol-specific sink (SSE, gRPC, etc.)
 type Delta struct {
 	OnTextFunc       func(string)
 	OnReasoningFunc  func(string)
-	OnToolStartFunc  func(string, map[string]any)
-	OnToolResultFunc func(string, string, error)
+	OnToolStartFunc  func(string, string, map[string]any)
+	OnToolResultFunc func(string, string, string, error)
 	OnProgressFunc   func(taskName, status, summary, mode string)
+	OnPlanReviewFunc func(message string, paths []string)
 	OnApprovalRequestFunc func(approvalID, toolName string, args map[string]any, reason string)
 	OnCompleteFunc   func()
 	OnErrorFunc      func(error)
@@ -27,21 +31,27 @@ func (d *Delta) OnReasoning(text string) {
 	}
 }
 
-func (d *Delta) OnToolStart(name string, args map[string]any) {
+func (d *Delta) OnToolStart(callID string, name string, args map[string]any) {
 	if d.OnToolStartFunc != nil {
-		d.OnToolStartFunc(name, args)
+		d.OnToolStartFunc(callID, name, args)
 	}
 }
 
-func (d *Delta) OnToolResult(name string, output string, err error) {
+func (d *Delta) OnToolResult(callID string, name string, output string, err error) {
 	if d.OnToolResultFunc != nil {
-		d.OnToolResultFunc(name, output, err)
+		d.OnToolResultFunc(callID, name, output, err)
 	}
 }
 
 func (d *Delta) OnProgress(taskName, status, summary, mode string) {
 	if d.OnProgressFunc != nil {
 		d.OnProgressFunc(taskName, status, summary, mode)
+	}
+}
+
+func (d *Delta) OnPlanReview(message string, paths []string) {
+	if d.OnPlanReviewFunc != nil {
+		d.OnPlanReviewFunc(message, paths)
 	}
 }
 
@@ -63,18 +73,72 @@ func (d *Delta) OnError(err error) {
 	}
 }
 
-// OutputCollector is a DeltaSink that accumulates text output.
-// Used by spawn_agent to collect sub-agent results without SSE streaming.
+// OutputCollector is a DeltaSink that accumulates text output AND tool events.
+// Used by spawn_agent to collect sub-agent results with structured tool info.
 type OutputCollector struct {
-	buf strings.Builder
+	buf        strings.Builder
+	events     []ToolEvent
+	pending    map[string]pendingTool // callID → start info
 }
 
-func (c *OutputCollector) OnText(text string)                        { c.buf.WriteString(text) }
-func (c *OutputCollector) OnReasoning(string)                        {}
-func (c *OutputCollector) OnToolStart(string, map[string]any)        {}
-func (c *OutputCollector) OnToolResult(string, string, error)        {}
-func (c *OutputCollector) OnProgress(string, string, string, string) {}
+// ToolEvent records a single tool invocation by the sub-agent.
+type ToolEvent struct {
+	Name   string         `json:"name"`
+	Args   map[string]any `json:"args,omitempty"`
+	Output string         `json:"output,omitempty"`
+	Error  string         `json:"error,omitempty"`
+}
+
+type pendingTool struct {
+	name string
+	args map[string]any
+}
+
+func (c *OutputCollector) OnText(text string) { c.buf.WriteString(text) }
+func (c *OutputCollector) OnReasoning(string) {}
+func (c *OutputCollector) OnToolStart(callID string, name string, args map[string]any) {
+	if c.pending == nil {
+		c.pending = make(map[string]pendingTool)
+	}
+	c.pending[callID] = pendingTool{name: name, args: args}
+}
+func (c *OutputCollector) OnToolResult(callID string, name string, output string, err error) {
+	ev := ToolEvent{Name: name, Output: output}
+	if p, ok := c.pending[callID]; ok {
+		ev.Args = p.args
+		delete(c.pending, callID)
+	}
+	if err != nil {
+		ev.Error = err.Error()
+	}
+	// Truncate long output for structured view
+	if len(ev.Output) > 500 {
+		ev.Output = ev.Output[:500] + "..."
+	}
+	c.events = append(c.events, ev)
+}
+func (c *OutputCollector) OnProgress(string, string, string, string)          {}
+func (c *OutputCollector) OnPlanReview(string, []string)                      {}
 func (c *OutputCollector) OnApprovalRequest(string, string, map[string]any, string) {}
-func (c *OutputCollector) OnComplete()                               {}
-func (c *OutputCollector) OnError(error)                             {}
-func (c *OutputCollector) Result() string                            { return c.buf.String() }
+func (c *OutputCollector) OnComplete()                                        {}
+func (c *OutputCollector) OnError(error)                                      {}
+
+// Result returns the accumulated text (backward compat).
+func (c *OutputCollector) Result() string { return c.buf.String() }
+
+// StructuredResult returns JSON with text + tool_events for rich rendering.
+func (c *OutputCollector) StructuredResult() string {
+	if len(c.events) == 0 {
+		return c.buf.String()
+	}
+	type structured struct {
+		Text       string      `json:"text"`
+		ToolEvents []ToolEvent `json:"tool_events"`
+	}
+	data := structured{Text: c.buf.String(), ToolEvents: c.events}
+	b, err := json.Marshal(data)
+	if err != nil {
+		return c.buf.String()
+	}
+	return string(b)
+}

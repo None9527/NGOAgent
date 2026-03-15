@@ -25,6 +25,8 @@ type BehaviorGuard struct {
 	codeModInPlan    int      // write/edit calls while isPlanning=true
 	isPlanning       bool     // Sync'd from doPrepare each turn
 	planExists       bool     // Sync'd from doPrepare each turn
+	taskMdExists     bool     // Sync'd from doPrepare each turn
+	currentMode      string   // Sync'd from doPrepare (planning/execution/verification)
 	forceToolName    string   // Non-empty → force this tool on next LLM call
 	stepsSinceBoundary int    // Tool calls since last task_boundary (for ephemeral gating)
 }
@@ -102,10 +104,12 @@ func (g *BehaviorGuard) Check(response string, toolCalls int, step int) GuardVer
 // Step-level: Pre/Post tool hooks (new)
 // ═══════════════════════════════════════════
 
-// SetPlanningState is called by doPrepare to sync planning context.
-func (g *BehaviorGuard) SetPlanningState(isPlanning, planExists bool) {
+// SetModeState is called by doPrepare to sync planning/mode context.
+func (g *BehaviorGuard) SetModeState(isPlanning, planExists, taskMdExists bool, mode string) {
 	g.isPlanning = isPlanning
 	g.planExists = planExists
+	g.taskMdExists = taskMdExists
+	g.currentMode = mode
 }
 
 // PreToolCheck runs before each tool execution (step-level guard).
@@ -121,6 +125,13 @@ func (g *BehaviorGuard) PreToolCheck(toolName string) *GuardVerdict {
 			return &GuardVerdict{Action: "warn", Rule: "planning_code_modify",
 				Message: "你在 planning 模式下直接修改了代码。请先创建 plan.md 并调用 notify_user 等待审批。"}
 		}
+	}
+
+	// Rule 8: Execution + no task.md + code modification → warn
+	if g.currentMode == "execution" && !g.taskMdExists &&
+		(toolName == "write_file" || toolName == "edit_file") {
+		return &GuardVerdict{Action: "warn", Rule: "execution_no_task_md",
+			Message: "You are modifying code in execution mode but task.md doesn't exist. Create it first via task_plan(action=create, type=task)."}
 	}
 
 	// Rule 7: notify_user(blocked=true) was called but agent continues calling tools

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -99,6 +100,7 @@ func Build() (*App, error) {
 		os.MkdirAll(workspaceDir, 0755)
 	}
 	sbMgr := sandbox.NewManager(workspaceDir)
+	cfg.Security.Workspace = workspaceDir // Inject resolved workspace path for safe-zone checks
 	secHook := security.NewHook(&cfg.Security)
 
 	// ═══════════════════════════════════════════
@@ -111,8 +113,38 @@ func Build() (*App, error) {
 	kiDir := config.ResolvePath(cfg.Storage.KnowledgeDir)
 	kiStore := knowledge.NewStore(kiDir)
 
-	workDir, _ := os.Getwd()
+	// KI Embedding pipeline — only if provider is configured
+	var kiRetriever *knowledge.Retriever
+	if cfg.Embedding.Provider != "" && cfg.Embedding.BaseURL != "" {
+		dims := cfg.Embedding.Dimensions
+		if dims == 0 {
+			dims = 1024
+		}
+		embedder := knowledge.NewDashScopeEmbedder(
+			cfg.Embedding.BaseURL, cfg.Embedding.APIKey,
+			cfg.Embedding.Model, dims,
+		)
+		vecIndex := knowledge.NewVectorIndex(dims, filepath.Join(kiDir, "index"))
+		if err := vecIndex.Load(); err != nil {
+			log.Printf("Warning: vector index load: %v", err)
+		}
+		kiRetriever = knowledge.NewRetriever(kiStore, embedder, vecIndex)
+		if err := kiRetriever.BuildIndex(); err != nil {
+			log.Printf("Warning: KI index build: %v", err)
+		}
+		log.Printf("[ki] Embedding pipeline active: provider=%s model=%s dims=%d",
+			cfg.Embedding.Provider, cfg.Embedding.Model, dims)
+	}
+
+	workDir := workspaceDir
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
 	wsStore := workspace.NewStore(workDir)
+
+	// FileHistory: snapshot-based file edit rollback
+	fileHistory := workspace.NewFileHistory(workDir, sessionID)
+	log.Printf("[file-history] initialized: dir=%s session=%s", fileHistory.BaseDir(), sessionID)
 
 	skillsDir := config.ResolvePath(cfg.Storage.SkillsDir)
 	skillMgr := skill.NewManager(skillsDir)
@@ -123,9 +155,10 @@ func Build() (*App, error) {
 	// Phase 4: Tool Registration
 	// ═══════════════════════════════════════════
 	registry := tool.NewRegistry()
+	registry.SetWorkspaceDir(workspaceDir) // Resolve relative paths against workspace
 	registry.Register(&tool.ReadFileTool{})
-	registry.Register(&tool.WriteFileTool{})
-	registry.Register(&tool.EditFileTool{})
+	registry.Register(&tool.WriteFileTool{FileHistory: fileHistory})
+	registry.Register(&tool.EditFileTool{FileHistory: fileHistory})
 	registry.Register(&tool.GlobTool{})
 	registry.Register(&tool.GrepSearchTool{})
 	registry.Register(tool.NewRunCommandTool(sbMgr))
@@ -136,7 +169,7 @@ func Build() (*App, error) {
 	registry.Register(tool.NewTaskBoundaryTool())
 	registry.Register(tool.NewNotifyUserTool())
 	registry.Register(&tool.UpdateProjectContextTool{})
-	registry.Register(tool.NewSaveMemoryTool(kiStore))
+	registry.Register(tool.NewSaveKnowledgeTool(kiStore, kiRetriever, cfg.Embedding.SimilarityThreshold))
 	registry.Register(tool.NewSendMessageTool(brainDir))
 	registry.Register(tool.NewTaskListTool(brainDir))
 	spawnTool := tool.NewSpawnAgentTool(nil) // Lazy: SpawnFunc set after loop creation
@@ -144,6 +177,7 @@ func Build() (*App, error) {
 	registry.Register(tool.NewForgeTool(cfg.Forge.SandboxDir))
 	brainArtifactTool := tool.NewBrainArtifactTool(nil) // Lazy: Brain set per-session
 	registry.Register(brainArtifactTool)
+	registry.Register(tool.NewUndoEditTool(fileHistory))
 	// manage_cron tool is registered after CronManager creation (Phase 7)
 
 	// ═══════════════════════════════════════════
@@ -151,8 +185,12 @@ func Build() (*App, error) {
 	// ═══════════════════════════════════════════
 	// PostRun hooks: KI distillation after meaningful sessions
 	kiDistiller := llm.NewKnowledgeDistiller(router)
+	var dedupChecker service.KIDuplicateChecker
+	if kiRetriever != nil {
+		dedupChecker = kiRetriever
+	}
 	hookChain := service.NewPostRunHookChain(
-		service.NewKIDistillHook(func() service.KIStore { return kiStore }, kiDistiller),
+		service.NewKIDistillHook(func() service.KIStore { return kiStore }, kiDistiller, cfg.Embedding.SimilarityThreshold, dedupChecker),
 	)
 
 	baseDeps := service.Deps{
@@ -165,9 +203,11 @@ func Build() (*App, error) {
 		Delta:        &service.Delta{}, // Overridden per-channel
 		Brain:        brainStore,
 		KIStore:      kiStore,
+		KIRetriever:  kiRetriever,
 		Workspace:    wsStore,
 		SkillMgr:     skillMgr,
 		HistoryStore: &historyAdapter{store: historyStore},
+		FileHistory:  fileHistory,
 		Hooks:        hookChain,
 	}
 	factory := service.NewLoopFactory(baseDeps, 8) // max 8 concurrent runs
@@ -203,6 +243,11 @@ func Build() (*App, error) {
 		llm.NewTitleDistiller(router),
 		sessMgr,
 	))
+
+	// MarkReady: transition .state.json from "new" → "ready" after first conversation
+	if !config.IsBootstrapped() {
+		hookChain.Add(&bootstrapReadyHook{})
+	}
 
 	// ═══════════════════════════════════════════
 	// Phase 6: Hot-Reload Subscriptions
@@ -260,17 +305,20 @@ func Build() (*App, error) {
 	// ═══════════════════════════════════════════
 	stopCh := make(chan struct{})
 
-	// Start cron manager — purely SQLite-driven, no default jobs.
+	// Start cron manager — file-based, each job = directory + job.json + logs/
 	// Jobs are created/managed by the agent via manage_cron tool.
-	cronMgr, err := cron.NewManager(db, func() cron.Runner {
-		// Create a new per-run session tagged as "cron" channel
-		conv, convErr := repo.CreateConversation("cron", "")
-		cronSID := sessionID // fallback to global session
-		if convErr == nil {
-			cronSID = conv.ID
-		}
-		run := factory.Create(cronSID, service.NewHeartbeatChannel(nil))
-		return run.Loop
+	cronDir := filepath.Join(config.HomeDir(), "cron")
+	cronMgr, err := cron.NewManager(cronDir, func(jobName string) cron.Runner {
+		// Cron loops use isolated deps: no KI hooks, no KI distillation.
+		// Cron output stays in session history + log files only.
+		cronDeps := baseDeps
+		cronDeps.Hooks = nil       // Disable KIDistillHook
+		cronDeps.KIStore = nil     // Prevent save_memory from writing to KI
+		cronDeps.KIRetriever = nil // No KI retrieval injection
+		cronDeps.Delta = &service.LogSink{Prefix: "[cron]"}
+		cronDeps.Brain = brain.NewArtifactStoreFromDir(filepath.Join(cronDir, jobName, "artifacts"))
+		cronLoop := service.NewAgentLoop(cronDeps)
+		return cronLoop
 	})
 	if err != nil {
 		log.Printf("Warning: cron manager init: %v", err)
@@ -318,7 +366,7 @@ func Build() (*App, error) {
 	agentAPI := NewAgentAPI(
 		loop, loopPool, chatEngine,
 		sessMgr, modelMgr, toolAdmin,
-		secHook, skillMgr, cronMgr,
+		secHook, skillMgr, cronMgr, mcpMgr,
 		cfgMgr, router,
 		&historyAdapter{store: historyStore},
 		brainDir,
@@ -385,6 +433,7 @@ func (a *historyAdapter) SaveAll(sessionID string, msgs []service.HistoryExport)
 			Content:    m.Content,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
+			Reasoning:  m.Reasoning,
 		}
 	}
 	return a.store.SaveAll(sessionID, rows)
@@ -402,6 +451,7 @@ func (a *historyAdapter) LoadAll(sessionID string) ([]service.HistoryExport, err
 			Content:    r.Content,
 			ToolCalls:  r.ToolCalls,
 			ToolCallID: r.ToolCallID,
+			Reasoning:  r.Reasoning,
 		}
 	}
 	return exports, nil
@@ -419,6 +469,7 @@ func (a *historyAdapter) AppendAll(sessionID string, msgs []service.HistoryExpor
 			Content:    m.Content,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
+			Reasoning:  m.Reasoning,
 		}
 	}
 	return a.store.AppendBatch(sessionID, rows)
@@ -484,3 +535,16 @@ func (a *toolRegistryAdapter) List() []service.ToolInfo {
 
 func (a *toolRegistryAdapter) Enable(name string) error  { return a.reg.Enable(name) }
 func (a *toolRegistryAdapter) Disable(name string) error { return a.reg.Disable(name) }
+
+// bootstrapReadyHook marks the system as "ready" after the first successful conversation.
+type bootstrapReadyHook struct{}
+
+func (h *bootstrapReadyHook) OnRunComplete(_ context.Context, info service.RunInfo) {
+	if info.Steps > 0 {
+		if err := config.MarkReady(); err != nil {
+			log.Printf("[bootstrap] MarkReady failed: %v", err)
+		} else {
+			log.Printf("[bootstrap] System marked as ready after first conversation (session=%s)", info.SessionID)
+		}
+	}
+}

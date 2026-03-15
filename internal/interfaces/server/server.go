@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -54,7 +57,14 @@ type API interface {
 	ListTools() []apitype.ToolInfoResponse
 	EnableTool(name string) error
 	DisableTool(name string) error
-	ListSkills() []apitype.SkillInfoResponse
+	ListSkills() (any, error)
+	ReadSkillContent(name string) (string, error)
+	RefreshSkills() error
+	DeleteSkill(name string) error
+
+	// MCP
+	ListMCPServers() (any, error)
+	ListMCPTools() (any, error)
 
 	// Status
 	Health() apitype.HealthResponse
@@ -62,6 +72,16 @@ type API interface {
 	GetContextStats() apitype.ContextStats
 	GetSystemInfo() apitype.SystemInfoResponse
 	CronStatus() map[string]any
+
+	// Cron management
+	ListCronJobs() (any, error)
+	CreateCronJob(name, schedule, prompt string) error
+	DeleteCronJob(name string) error
+	EnableCronJob(name string) error
+	DisableCronJob(name string) error
+	RunCronJobNow(name string) error
+	ListCronLogs(jobName string) (any, error)
+	ReadCronLog(jobName, logFile string) (string, error)
 
 	// Brain artifacts
 	ListBrainArtifacts(sessionID string) ([]apitype.BrainArtifactInfo, error)
@@ -130,6 +150,12 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "model": req.Model})
 	})
+
+	// ─── Local file proxy (images, media) ───
+	mux.HandleFunc("/v1/file", s.handleFile)
+
+	// ─── File upload (user attaches files to chat) ───
+	mux.HandleFunc("/v1/upload", s.handleUpload)
 
 	// ─── REST API routes ───
 	s.registerAPIRoutes(mux)
@@ -227,16 +253,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			data, _ := json.Marshal(map[string]string{"type": "thinking", "content": text})
 			writeSSE(data)
 		},
-		OnToolStartFunc: func(name string, args map[string]any) {
-			data, _ := json.Marshal(map[string]any{"type": "tool_start", "name": name, "args": args})
+		OnToolStartFunc: func(callID string, name string, args map[string]any) {
+			data, _ := json.Marshal(map[string]any{"type": "tool_start", "call_id": callID, "name": name, "args": args})
 			writeSSE(data)
 		},
-		OnToolResultFunc: func(name, output string, err error) {
+		OnToolResultFunc: func(callID, name, output string, err error) {
 			errStr := ""
 			if err != nil {
 				errStr = err.Error()
 			}
-			data, _ := json.Marshal(map[string]any{"type": "tool_result", "name": name, "output": output, "error": errStr})
+			data, _ := json.Marshal(map[string]any{"type": "tool_result", "call_id": callID, "name": name, "output": output, "error": errStr})
 			writeSSE(data)
 		},
 		OnCompleteFunc: func() {
@@ -251,6 +277,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			data, _ := json.Marshal(map[string]any{
 				"type": "progress", "task_name": taskName,
 				"status": status, "summary": summary, "mode": mode,
+			})
+			writeSSE(data)
+		},
+		OnPlanReviewFunc: func(message string, paths []string) {
+			data, _ := json.Marshal(map[string]any{
+				"type": "plan_review", "message": message, "paths": paths,
 			})
 			writeSSE(data)
 		},
@@ -384,13 +416,24 @@ func (s *Server) execSlash(input string) string {
 		return "Commands: /model /models /set /forge /plan /skill /status /clear /compact /help"
 
 	case "/skill":
-		skills := s.api.ListSkills()
+		skillsRaw, err := s.api.ListSkills()
+		if err != nil {
+			return "Error: " + err.Error()
+		}
+		data, _ := json.Marshal(skillsRaw)
+		var skills []struct {
+			Name        string `json:"name"`
+			Type        string `json:"type"`
+			Description string `json:"description"`
+			ForgeStatus string `json:"forge_status"`
+		}
+		json.Unmarshal(data, &skills)
 		if len(skills) == 0 {
 			return "No skills discovered."
 		}
 		var lines []string
 		for _, sk := range skills {
-			lines = append(lines, fmt.Sprintf("  %s [%s] (%s) — %s", sk.Name, sk.Status, sk.Type, sk.Description))
+			lines = append(lines, fmt.Sprintf("  %s [%s] (%s) — %s", sk.Name, sk.ForgeStatus, sk.Type, sk.Description))
 		}
 		return "Skills:\n" + strings.Join(lines, "\n")
 
@@ -405,4 +448,97 @@ func (s *Server) execSlash(input string) string {
 	default:
 		return "Unknown command: " + cmd
 	}
+}
+
+// handleFile serves a local file over HTTP for browser rendering (images, media, etc.).
+// Usage: GET /v1/file?path=/absolute/path/to/file.png
+func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rawPath := r.URL.Query().Get("path")
+	if rawPath == "" {
+		http.Error(w, "missing 'path' parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve to absolute and clean to prevent directory traversal
+	absPath := filepath.Clean(rawPath)
+	if !filepath.IsAbs(absPath) {
+		http.Error(w, "path must be absolute", http.StatusBadRequest)
+		return
+	}
+
+	// Verify file exists and is not a directory
+	info, err := os.Stat(absPath)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	if info.IsDir() {
+		http.Error(w, "cannot serve directories", http.StatusForbidden)
+		return
+	}
+
+	// Serve the file (Go auto-detects Content-Type from extension)
+	http.ServeFile(w, r, absPath)
+}
+
+// handleUpload receives multipart file uploads from the web UI.
+// Saves files to {workspace}/uploads/ and returns the absolute path.
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// 50MB max
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
+		http.Error(w, "file too large (max 50MB)", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing 'file' field", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Determine upload directory: workspace/uploads/
+	c := s.api.GetConfig()
+	agent, _ := c["agent"].(map[string]any)
+	workspace, _ := agent["workspace"].(string)
+	if workspace == "" {
+		workspace = os.TempDir()
+	}
+	uploadDir := filepath.Join(workspace, "uploads")
+	os.MkdirAll(uploadDir, 0755)
+
+	// Timestamp-prefixed filename to avoid conflicts
+	safeFilename := fmt.Sprintf("%d_%s", time.Now().UnixMilli(), filepath.Base(header.Filename))
+	dstPath := filepath.Join(uploadDir, safeFilename)
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to create file: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, file); err != nil {
+		http.Error(w, fmt.Sprintf("failed to save file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"path":     dstPath,
+		"filename": header.Filename,
+		"size":     fmt.Sprintf("%d", header.Size),
+	})
 }

@@ -11,7 +11,7 @@ import (
 )
 
 // BrainArtifactTool lets the agent read/write versioned brain artifacts.
-// Mirrors Antigravity's pattern: source.md + .metadata.json + .resolved.N.
+// Brain artifact pattern: source.md + .metadata.json + .resolved.N.
 type BrainArtifactTool struct {
 	brain *brain.ArtifactStore
 }

@@ -114,7 +114,7 @@ func (m *Manager) Set(key string, value any) error {
 }
 
 // Subscribe registers a callback for changes to a specific section.
-// Sections: "llm", "security", "mcp", "agent", "storage", "heartbeat", "forge"
+// Sections: "llm", "security", "mcp", "agent", "storage", "forge"
 func (m *Manager) Subscribe(section string, fn ConfigChangeFunc) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

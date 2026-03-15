@@ -17,7 +17,7 @@ type PromptComponent struct {
 }
 
 // RequiresClause checks if all conditions are met.
-// Conditions: "planning_mode", "heartbeat_mode", "model:xxx", "channel:xxx"
+// Conditions: "planning_mode", "model:xxx", "channel:xxx"
 func (pc *PromptComponent) RequiresClause(ctx map[string]string) bool {
 	for _, req := range pc.Requires {
 		parts := strings.SplitN(req, ":", 2)

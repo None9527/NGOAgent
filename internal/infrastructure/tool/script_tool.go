@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -54,10 +55,10 @@ func (t *ScriptTool) Execute(ctx context.Context, args map[string]any) (dtool.To
 	scriptPath := t.skill.Path + "/run.sh"
 	runner := "bash"
 
-	// Check for Python script
-	if _, err := exec.LookPath(scriptPath); err != nil {
+	// Check for Python script (os.Stat checks file existence; LookPath only searches $PATH)
+	if _, err := os.Stat(scriptPath); err != nil {
 		pyPath := t.skill.Path + "/run.py"
-		if _, err := exec.LookPath(pyPath); err == nil {
+		if _, err := os.Stat(pyPath); err == nil {
 			scriptPath = pyPath
 			runner = "python3"
 		}

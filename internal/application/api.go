@@ -19,6 +19,7 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/cron"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/mcp"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
 	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
@@ -48,6 +49,7 @@ type AgentAPI struct {
 	secHook    *security.Hook
 	skillMgr   *skill.Manager
 	cronMgr    *cron.Manager
+	mcpMgr     *mcp.Manager
 	cfg        *config.Manager
 	router     *llm.Router
 	histQuery  HistoryQuerier
@@ -67,6 +69,7 @@ func NewAgentAPI(
 	secHook *security.Hook,
 	skillMgr *skill.Manager,
 	cronMgr *cron.Manager,
+	mcpMgr *mcp.Manager,
 	cfg *config.Manager,
 	router *llm.Router,
 	histQuery HistoryQuerier,
@@ -83,6 +86,7 @@ func NewAgentAPI(
 		secHook:    secHook,
 		skillMgr:   skillMgr,
 		cronMgr:    cronMgr,
+		mcpMgr:     mcpMgr,
 		cfg:        cfg,
 		router:     router,
 		histQuery:  histQuery,
@@ -231,9 +235,45 @@ func (a *AgentAPI) GetHistory(sessionID string) ([]apitype.HistoryMessage, error
 	if err != nil {
 		return nil, err
 	}
+
+	// Build toolCallID → tool name/args maps from assistant messages' ToolCalls
+	nameMap := make(map[string]string)
+	argsMap := make(map[string]string)
+	for _, e := range exports {
+		if e.Role == "assistant" && e.ToolCalls != "" {
+			var calls []struct {
+				ID       string `json:"id"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			}
+			if json.Unmarshal([]byte(e.ToolCalls), &calls) == nil {
+				for _, c := range calls {
+					if c.ID != "" {
+						if c.Function.Name != "" {
+							nameMap[c.ID] = c.Function.Name
+						}
+						if c.Function.Arguments != "" {
+							argsMap[c.ID] = c.Function.Arguments
+						}
+					}
+				}
+			}
+		}
+	}
+
 	msgs := make([]apitype.HistoryMessage, len(exports))
 	for i, e := range exports {
-		msgs[i] = apitype.HistoryMessage{Role: e.Role, Content: e.Content}
+		m := apitype.HistoryMessage{Role: e.Role, Content: e.Content}
+		if e.Role == "tool" && e.ToolCallID != "" {
+			m.ToolName = nameMap[e.ToolCallID]
+			m.ToolArgs = argsMap[e.ToolCallID]
+		}
+		if e.Role == "assistant" && e.Reasoning != "" {
+			m.Reasoning = e.Reasoning
+		}
+		msgs[i] = m
 	}
 	return msgs, nil
 }
@@ -320,21 +360,6 @@ func (a *AgentAPI) EnableTool(name string) error {
 // DisableTool disables a tool by name.
 func (a *AgentAPI) DisableTool(name string) error {
 	return a.toolAdmin.Disable(name)
-}
-
-// ListSkills returns all discovered skills.
-func (a *AgentAPI) ListSkills() []apitype.SkillInfoResponse {
-	skills := a.skillMgr.List()
-	result := make([]apitype.SkillInfoResponse, len(skills))
-	for i, sk := range skills {
-		result[i] = apitype.SkillInfoResponse{
-			Name:        sk.Name,
-			Type:        sk.Type,
-			Status:      sk.ForgeStatus,
-			Description: sk.Description,
-		}
-	}
-	return result
 }
 
 // ─── Status & Info ───
@@ -424,6 +449,174 @@ func (a *AgentAPI) CronStatus() map[string]any {
 		"total":   len(jobs),
 		"active":  active,
 	}
+}
+
+// ListCronJobs returns all cron jobs.
+func (a *AgentAPI) ListCronJobs() (any, error) {
+	if a.cronMgr == nil {
+		return nil, fmt.Errorf("cron not enabled")
+	}
+	return a.cronMgr.List()
+}
+
+// CreateCronJob creates a new cron job.
+func (a *AgentAPI) CreateCronJob(name, schedule, prompt string) error {
+	if a.cronMgr == nil {
+		return fmt.Errorf("cron not enabled")
+	}
+	return a.cronMgr.Create(name, schedule, prompt)
+}
+
+// DeleteCronJob removes a cron job.
+func (a *AgentAPI) DeleteCronJob(name string) error {
+	if a.cronMgr == nil {
+		return fmt.Errorf("cron not enabled")
+	}
+	return a.cronMgr.Delete(name)
+}
+
+// EnableCronJob activates a job.
+func (a *AgentAPI) EnableCronJob(name string) error {
+	if a.cronMgr == nil {
+		return fmt.Errorf("cron not enabled")
+	}
+	return a.cronMgr.Enable(name)
+}
+
+// DisableCronJob deactivates a job.
+func (a *AgentAPI) DisableCronJob(name string) error {
+	if a.cronMgr == nil {
+		return fmt.Errorf("cron not enabled")
+	}
+	return a.cronMgr.Disable(name)
+}
+
+// RunCronJobNow triggers a job immediately.
+func (a *AgentAPI) RunCronJobNow(name string) error {
+	if a.cronMgr == nil {
+		return fmt.Errorf("cron not enabled")
+	}
+	return a.cronMgr.RunNow(name)
+}
+
+// ListCronLogs returns log entries for a specific cron job.
+func (a *AgentAPI) ListCronLogs(jobName string) (any, error) {
+	if a.cronMgr == nil {
+		return nil, fmt.Errorf("cron not enabled")
+	}
+	return a.cronMgr.ListLogs(jobName)
+}
+
+// ReadCronLog reads a specific cron job log file.
+func (a *AgentAPI) ReadCronLog(jobName, logFile string) (string, error) {
+	if a.cronMgr == nil {
+		return "", fmt.Errorf("cron not enabled")
+	}
+	return a.cronMgr.ReadLog(jobName, logFile)
+}
+
+// ═══════════════════════════════════════════
+// Skills
+// ═══════════════════════════════════════════
+
+// ListSkills returns all discovered skills.
+func (a *AgentAPI) ListSkills() (any, error) {
+	if a.skillMgr == nil {
+		return nil, fmt.Errorf("skill manager not configured")
+	}
+	skills := a.skillMgr.List()
+	type skillInfo struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Path        string `json:"path"`
+		Type        string `json:"type"`
+		Enabled     bool   `json:"enabled"`
+		ForgeStatus string `json:"forge_status"`
+	}
+	var result []skillInfo
+	for _, s := range skills {
+		result = append(result, skillInfo{
+			Name:        s.Name,
+			Description: s.Description,
+			Path:        s.Path,
+			Type:        s.Type,
+			Enabled:     s.Enabled,
+			ForgeStatus: s.ForgeStatus,
+		})
+	}
+	return result, nil
+}
+
+// ReadSkillContent reads SKILL.md content for a named skill.
+func (a *AgentAPI) ReadSkillContent(name string) (string, error) {
+	if a.skillMgr == nil {
+		return "", fmt.Errorf("skill manager not configured")
+	}
+	s, ok := a.skillMgr.Get(name)
+	if !ok {
+		return "", fmt.Errorf("skill %q not found", name)
+	}
+	return s.Content, nil
+}
+
+// RefreshSkills re-discovers all skills from disk.
+func (a *AgentAPI) RefreshSkills() error {
+	if a.skillMgr == nil {
+		return fmt.Errorf("skill manager not configured")
+	}
+	a.skillMgr.Discover()
+	return nil
+}
+
+// DeleteSkill removes a skill by name.
+func (a *AgentAPI) DeleteSkill(name string) error {
+	if a.skillMgr == nil {
+		return fmt.Errorf("skill manager not configured")
+	}
+	return a.skillMgr.Delete(name)
+}
+
+// ═══════════════════════════════════════════
+// MCP Servers
+// ═══════════════════════════════════════════
+
+// ListMCPServers returns all MCP server names and their running status.
+func (a *AgentAPI) ListMCPServers() (any, error) {
+	if a.mcpMgr == nil {
+		return nil, fmt.Errorf("MCP not configured")
+	}
+	servers := a.mcpMgr.ListServers()
+	type srvInfo struct {
+		Name    string `json:"name"`
+		Running bool   `json:"running"`
+	}
+	var result []srvInfo
+	for name, running := range servers {
+		result = append(result, srvInfo{Name: name, Running: running})
+	}
+	return result, nil
+}
+
+// ListMCPTools returns all tools exposed by MCP servers.
+func (a *AgentAPI) ListMCPTools() (any, error) {
+	if a.mcpMgr == nil {
+		return nil, fmt.Errorf("MCP not configured")
+	}
+	tools := a.mcpMgr.ListTools()
+	type toolInfo struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Server      string `json:"server"`
+	}
+	var result []toolInfo
+	for _, t := range tools {
+		result = append(result, toolInfo{
+			Name:        t.Name,
+			Description: t.Description,
+			Server:      t.ServerName,
+		})
+	}
+	return result, nil
 }
 
 // ═══════════════════════════════════════════

@@ -2,7 +2,7 @@
 //
 // This is the centralized protocol layer for agent↔tool communication.
 // All signal types, terminal step configuration, and dispatch logic live here,
-// mirroring Antigravity's CascadeExecutorConfig.terminal_step_types pattern.
+// defines terminal step types for the agent protocol.
 package tool
 
 // ─── Signal Enum ─────────────────────────────────────────────
@@ -11,9 +11,10 @@ package tool
 type Signal int
 
 const (
-	SignalNone     Signal = iota // No special side-effect
-	SignalProgress               // State update (task_boundary)
-	SignalYield                  // Yield control to user (notify_user)
+	SignalNone        Signal = iota // No special side-effect
+	SignalProgress                  // State update (task_boundary)
+	SignalYield                     // Yield control to user (notify_user)
+	SignalSkillLoaded               // SKILL.md was read by agent (L2 trigger)
 )
 
 // ─── Terminal Step Configuration (declarative, like Anti) ─────
@@ -45,6 +46,7 @@ type ToolResult struct {
 type DeltaSink interface {
 	OnProgress(taskName, status, summary, mode string)
 	OnText(text string)
+	OnPlanReview(message string, paths []string)
 }
 
 // LoopState is a mutable bag of state the dispatcher writes back.
@@ -58,6 +60,8 @@ type LoopState struct {
 	StepsSinceUpdate int
 	YieldRequested   bool
 	ForceNextTool    string // Force next LLM call to use this tool (via tool_choice)
+	SkillLoaded      string // L2: skill name just loaded via SKILL.md read
+	SkillPath        string // L2: skill directory path
 }
 
 // ─── Signal Handlers ─────────────────────────────────────────
@@ -68,8 +72,9 @@ type SignalHandler func(result ToolResult, sink DeltaSink, state *LoopState)
 // handlers maps each signal to its dispatch logic.
 // Add new signal behavior here — one place, one registration.
 var handlers = map[Signal]SignalHandler{
-	SignalProgress: handleProgress,
-	SignalYield:    handleYield,
+	SignalProgress:    handleProgress,
+	SignalYield:       handleYield,
+	SignalSkillLoaded: handleSkillLoaded,
 }
 
 func handleProgress(result ToolResult, sink DeltaSink, state *LoopState) {
@@ -94,10 +99,40 @@ func handleProgress(result ToolResult, sink DeltaSink, state *LoopState) {
 }
 
 func handleYield(result ToolResult, sink DeltaSink, state *LoopState) {
-	if msg, ok := result.Payload["message"].(string); ok {
+	msg, _ := result.Payload["message"].(string)
+	paths := extractStringSlice(result.Payload["paths_to_review"])
+	if len(paths) > 0 {
+		sink.OnPlanReview(msg, paths)
+	} else if msg != "" {
 		sink.OnText(msg)
 	}
 	state.YieldRequested = true
+}
+
+// extractStringSlice safely converts an any value to []string.
+func extractStringSlice(v any) []string {
+	if v == nil {
+		return nil
+	}
+	switch s := v.(type) {
+	case []string:
+		return s
+	case []any:
+		var out []string
+		for _, item := range s {
+			if str, ok := item.(string); ok {
+				out = append(out, str)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func handleSkillLoaded(result ToolResult, _ DeltaSink, state *LoopState) {
+	state.SkillLoaded, _ = result.Payload["skill_name"].(string)
+	state.SkillPath, _ = result.Payload["skill_path"].(string)
 }
 
 // ─── Dispatcher ──────────────────────────────────────────────
@@ -127,5 +162,16 @@ func ProgressResult(output string, payload map[string]any) (ToolResult, error) {
 
 func YieldResult(output string, payload map[string]any) (ToolResult, error) {
 	return ToolResult{Output: output, Signal: SignalYield, Payload: payload}, nil
+}
+
+func SkillLoadedResult(output, skillName, skillPath string) (ToolResult, error) {
+	return ToolResult{
+		Output: output,
+		Signal: SignalSkillLoaded,
+		Payload: map[string]any{
+			"skill_name": skillName,
+			"skill_path": skillPath,
+		},
+	}, nil
 }
 

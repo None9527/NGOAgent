@@ -29,10 +29,15 @@ func (c *Config) Sanitized() map[string]any {
 		}
 	}
 
+	grpcPort := c.Server.GRPCPort
+	if grpcPort == 0 {
+		grpcPort = 19998
+	}
+
 	return map[string]any{
 		"server": map[string]any{
 			"http_port": c.Server.HTTPPort,
-			"grpc_port": c.Server.GRPCPort,
+			"grpc_port": grpcPort,
 			"mode":      c.Server.Mode,
 			"timezone":  c.Server.Timezone,
 		},
@@ -179,6 +184,7 @@ type SecurityConfig struct {
 	Mode         string   `yaml:"mode"` // allow / auto / ask
 	BlockList    []string `yaml:"block_list"`
 	SafeCommands []string `yaml:"safe_commands"`
+	Workspace    string   `yaml:"-"` // populated from AgentConfig.Workspace at startup (not persisted)
 }
 
 // StorageConfig defines paths for data storage.

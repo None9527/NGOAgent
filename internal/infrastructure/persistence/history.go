@@ -14,6 +14,7 @@ type HistoryMessage struct {
 	Content    string `gorm:"type:text"`
 	ToolCalls  string `gorm:"type:text"` // JSON-encoded tool calls
 	ToolCallID string
+	Reasoning  string `gorm:"type:text"` // Thinking/reasoning content
 	CreatedAt  time.Time
 }
 

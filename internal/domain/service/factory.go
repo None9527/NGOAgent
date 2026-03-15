@@ -1,7 +1,7 @@
 // Package service — factory.go provides the LoopFactory for creating
 // independent AgentLoop instances with unified lifecycle management.
 //
-// All agent execution contexts (chat, heartbeat, subagent, forge) use
+// All agent execution contexts (chat, subagent, forge) use
 // LoopFactory.Create() instead of directly calling NewAgentLoop().
 package service
 
@@ -34,7 +34,7 @@ func MakeRunID(parentSID, channel string) string {
 type AgentRun struct {
 	ID        string       // e.g. "c4c76450:sub:d4e5f6"
 	ParentID  string       // empty for top-level runs
-	Channel   AgentChannel // chat/heartbeat/subagent/forge
+	Channel   AgentChannel // chat/subagent/forge
 	Loop      *AgentLoop
 	StartedAt time.Time
 	cancel    context.CancelFunc
@@ -45,7 +45,7 @@ type AgentRun struct {
 // ────────────────────────────────────────────
 
 // LoopFactory creates and tracks independent AgentLoop instances.
-// All consumers (chat, heartbeat, subagent, forge) go through this factory.
+// All consumers (chat, subagent, forge) go through this factory.
 type LoopFactory struct {
 	baseDeps      Deps           // Shared infrastructure (LLM, tools, brain, etc.)
 	mu            sync.Mutex
@@ -119,7 +119,7 @@ func (f *LoopFactory) RunAsync(ctx context.Context, run *AgentRun, message strin
 		err := run.Loop.Run(runCtx, message)
 		result := ""
 		if collector, ok := run.Channel.DeltaSink().(*OutputCollector); ok {
-			result = collector.Result()
+			result = collector.StructuredResult()
 		}
 		run.Channel.OnComplete(run.ID, result, err)
 		cancel()

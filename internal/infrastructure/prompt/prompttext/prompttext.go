@@ -26,12 +26,15 @@ Guidelines:
 - NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one.
 - NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested.
 - When you discover important project information (tech stack, build commands, architectural conventions, gotchas), use the update_project_context tool to record it. This knowledge will be automatically injected in future sessions.
+- Before executing any task, check the <knowledge_items> section for relevant knowledge. Items marked [PREFERENCE] are user-enforced preferences and MUST be followed.
+- For complex multi-step tasks, consider using spawn_agent to parallelize independent subtasks. The sub-agent gets full tool access and its own context window.
 
 Response format:
 - Every response MUST end with a summary of what you actually completed, not what you plan to do next.
 - NEVER end a response with "接下来我将..." or "I will..." or future plans. The user sees your response as the final word on that turn.
 - If a multi-step task is in progress, use task_boundary to report structured progress updates as you work. Each major step should have a progress update.
 - Keep responses concise: state what was done, what the result was, and any issues found.
+- Smart tool selection: Always prefer the purpose-built tool over run_command for the same job. For example, edit_file over sed, grep_search over grep, read_file over cat, glob over find. Reserve run_command for tasks that have no dedicated tool (build, test, git, package managers, etc.).
 
 CRITICAL — Mandatory Tool Protocol (violation = test failure):
 1. Starting work on a NEW request → your VERY FIRST tool call MUST be task_boundary(mode="planning"). No exceptions.
@@ -191,10 +194,27 @@ IMMEDIATE REQUIRED ACTIONS:
 
 FAILURE TO CREATE task.md AND walkthrough.md IS A CRITICAL ERROR.`
 
-const ToolSpawnAgent = `Spawn a sub-agent to execute an independent task autonomously.
-- task: detailed description of what the sub-agent should do
-- The sub-agent gets its own context and history
-- Results are returned when the sub-agent completes`
+const ToolSpawnAgent = `Spawn a sub-agent to handle an independent subtask.
+The sub-agent gets its own context, history, and full tool access.
+
+When to use spawn_agent:
+- Parallel independent subtasks (e.g., fix module A while you work on module B)
+- Research/analysis that would bloat your context (large codebase audit)
+- Browser/web-related tasks (testing local app, scraping, form filling)
+- Long-running verification (run full test suite while you continue coding)
+- Tasks requiring different expertise (code review while you implement)
+
+Task description MUST include:
+1. Complete context — the sub-agent CANNOT see your conversation history
+2. Clear stop condition ("return when tests pass" / "return the audit report")
+3. What information to return in the final report
+4. File paths, relevant code snippets, and any constraints
+
+Tips:
+- Be extremely detailed — treat the task field as a complete prompt
+- Include file paths and code context, not just high-level instructions
+- Set clear boundaries ("only modify files in /src/auth/")
+- task_name is displayed in logs — make it human-readable`
 
 const ToolUpdateProjectContext = `Update the project's persistent knowledge store.
 - action: append / replace_section / read
@@ -202,9 +222,10 @@ const ToolUpdateProjectContext = `Update the project's persistent knowledge stor
 - Use for: tech stack, build commands, architecture conventions, gotchas`
 
 const ToolSaveMemory = `Save knowledge to the persistent cross-session store.
-- key: descriptive identifier (e.g., "user_prefers_tabs")
+- key: descriptive identifier (e.g., "image_output_directory")
 - content: the knowledge to store
-- tags: optional categorization tags
+- tags: use "preference" for user preferences that must be enforced; other tags for categorization
+- If a similar KI already exists (embedding similarity > 0.85), the content is merged instead of creating a duplicate
 - Available across ALL future sessions, regardless of project
 - Use update_project_context instead for project-specific info`
 
@@ -236,7 +257,8 @@ Rules:
 - plan.md must list specific files with [MODIFY]/[NEW]/[DELETE] tags and file:// URIs.
 - task.md must use [x]/[/]/[ ] markers with file+function granularity.
 - walkthrough.md must summarize what changed, what was tested, and results.
-- If the task is simple (single file, ≤3 steps), skip planning and execute directly.`
+- If the task is simple (single file, ≤3 steps), skip planning and execute directly.
+- For tasks with 3+ independent components, consider spawning sub-agents for parallel execution.`
 
 const EphContextStatus = `Context window usage: {{.Percent}}% ({{.Used}}/{{.Total}} tokens).
 {{if ge .Percent 80}}WARNING: Context is running low. Be concise and focused.{{end}}`
@@ -251,15 +273,6 @@ const EphForgeMode = `You are now forging a capability. Use the forge tool to:
 5. forge(action="cleanup") — remove sandbox
 
 CRITICAL: Never modify files OUTSIDE the forge sandbox.`
-
-const EphHeartbeatContext = `You are running in heartbeat mode. Your task list:
-
-{{.Tasks}}
-
-Rules:
-- Only use allowed tools (read-only + knowledge updates)
-- Keep responses concise
-- Report "HEARTBEAT_OK" if no action needed`
 
 const EphSubAgentContext = `### FORKING CONVERSATION CONTEXT ###
 - The messages above are from the main thread. They are context only.
@@ -288,9 +301,6 @@ Capture these four dimensions (4D summary):
 2. SessionSummary: Key decisions, discoveries, and progress
 3. CodeChanges: Files created, modified, or deleted (with paths)
 4. LearnedFacts: Important facts discovered during the session`
-
-const HeartbeatSystem = `Check heartbeat.md task checklist. Execute only the tasks listed.
-Report results concisely. Say "HEARTBEAT_OK" if nothing to do.`
 
 // ═══════════════════════════════════════════
 // v2 Placeholders (Multi-Agent Team)

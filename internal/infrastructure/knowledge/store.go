@@ -125,6 +125,7 @@ func (s *Store) Search(query string) ([]*Item, error) {
 }
 
 // GenerateSummaries returns a formatted string of all KI summaries for prompt injection.
+// Enhanced format: title + [PREFERENCE] marker + summary + tags + artifact paths.
 func (s *Store) GenerateSummaries() string {
 	items, err := s.List()
 	if err != nil || len(items) == 0 {
@@ -133,9 +134,56 @@ func (s *Store) GenerateSummaries() string {
 
 	var b strings.Builder
 	for _, item := range items {
-		b.WriteString(fmt.Sprintf("- **%s**: %s\n", item.Title, item.Summary))
+		prefix := ""
+		if hasTag(item.Tags, "preference") {
+			prefix = " [PREFERENCE]"
+		}
+		b.WriteString(fmt.Sprintf("# %s%s\n", item.Title, prefix))
+		b.WriteString(fmt.Sprintf("摘要: %s\n", item.Summary))
+		if len(item.Tags) > 0 {
+			b.WriteString(fmt.Sprintf("标签: %s\n", strings.Join(item.Tags, ", ")))
+		}
+		artifacts := s.ListArtifacts(item.ID)
+		if len(artifacts) > 0 {
+			b.WriteString(fmt.Sprintf("文件: %s\n", strings.Join(artifacts, ", ")))
+		}
+		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// GeneratePreferenceSummaries returns only preference-tagged KIs formatted as enforceable rules.
+func (s *Store) GeneratePreferenceSummaries() string {
+	items, err := s.List()
+	if err != nil || len(items) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	for _, item := range items {
+		if !hasTag(item.Tags, "preference") {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("- %s\n", item.Summary))
+	}
+	return b.String()
+}
+
+// ListArtifacts returns relative paths of artifact files for a KI.
+func (s *Store) ListArtifacts(id string) []string {
+	artDir := filepath.Join(s.baseDir, id, "artifacts")
+	entries, err := os.ReadDir(artDir)
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		paths = append(paths, filepath.Join(s.baseDir, id, "artifacts", e.Name()))
+	}
+	return paths
 }
 
 // BaseDir returns the knowledge store root path.
@@ -152,6 +200,17 @@ func (s *Store) SaveDistilled(summary, content string, tags, sources []string) e
 	})
 }
 
+// UpdateContent appends new content to an existing KI's overview.md artifact.
+func (s *Store) UpdateContent(id, newContent string) error {
+	artPath := filepath.Join(s.baseDir, id, "artifacts", "overview.md")
+	existing, err := os.ReadFile(artPath)
+	if err != nil {
+		return fmt.Errorf("read existing KI %s: %w", id, err)
+	}
+	updated := string(existing) + newContent
+	return os.WriteFile(artPath, []byte(updated), 0644)
+}
+
 func sanitizeID(title string) string {
 	id := strings.ToLower(title)
 	id = strings.ReplaceAll(id, " ", "_")
@@ -160,4 +219,14 @@ func sanitizeID(title string) string {
 		id = id[:64]
 	}
 	return id
+}
+
+// hasTag checks if a tag exists in the tag list (case-insensitive).
+func hasTag(tags []string, target string) bool {
+	for _, t := range tags {
+		if strings.EqualFold(t, target) {
+			return true
+		}
+	}
+	return false
 }

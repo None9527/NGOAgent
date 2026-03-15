@@ -1,27 +1,60 @@
-# Build output
+# ── Build output ──
 ngoagent
 *.exe
 
-# Python cache
+# ── Go ──
+vendor/
+
+# ── Python ──
 __pycache__/
 *.pyc
+*.pyo
+venv/
+.venv/
 
-# Logs
+# ── Node / Frontend ──
+webui/node_modules/
+webui/dist/
+cli/node_modules/
+
+# ── Logs ──
 *.log
 
-# Test/forge scripts
+# ── Runtime data (user-specific) ──
+.ngoagent/
+workspace/
+uploads/
+
+# ── Config (contains API keys) ──
+config.yaml
+config.yml
+
+# ── Test / Forge scripts ──
 forge_*.py
 heartbeat.py
 
-# IDE
+# ── IDE ──
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
-# OS
+# ── OS ──
 .DS_Store
 Thumbs.db
 
-# Debug artifacts
+# ── Debug artifacts ──
 debug_*
+pw_debug*
+dom.html
+screencapture.py
+test.mjs
+test.ts
+test_pw.py
+
+# ── Database ──
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

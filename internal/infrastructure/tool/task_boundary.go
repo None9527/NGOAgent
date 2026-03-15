@@ -9,7 +9,7 @@ import (
 )
 
 // TaskBoundaryTool indicates task state transitions and reports structured progress.
-// Mirrors Antigravity's task_boundary: sets Mode, TaskName, TaskStatus, TaskSummary.
+// Task boundary tool: sets Mode, TaskName, TaskStatus, TaskSummary.
 // The infrastructure tracks the latest state and re-injects it via ephemeral reminders.
 type TaskBoundaryTool struct{}
 
@@ -70,8 +70,17 @@ func (t *TaskBoundaryTool) Execute(ctx context.Context, args map[string]any) (dt
 	}
 
 	data, _ := json.Marshal(update)
+	output := "Task boundary updated."
+	switch mode {
+	case "planning":
+		output += " Next: create plan.md via task_plan if not already done."
+	case "execution":
+		output += " Next: create/update task.md via task_plan to track progress."
+	case "verification":
+		output += " Next: after tests pass, create walkthrough.md via task_plan."
+	}
 	return dtool.ToolResult{
-		Output:  "Task boundary updated.",
+		Output:  output,
 		Signal:  dtool.SignalProgress,
 		Payload: map[string]any{
 			"task_name": taskName,

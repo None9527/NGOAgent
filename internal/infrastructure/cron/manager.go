@@ -1,33 +1,42 @@
-// Package cron provides dynamic background task scheduling with SQLite persistence.
-// Replaces the old heartbeat engine with a fully manageable cron system.
+// Package cron provides dynamic background task scheduling with file-based persistence.
+// Each job is a directory under baseDir with job.json config and logs/ subdirectory.
 // Agent can create, delete, enable, disable, and list cron jobs via manage_cron tool.
 package cron
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 // ─── Model ───────────────────────────────────────────
 
-// Job represents a persistent cron job stored in SQLite.
+// Job represents a cron job stored as job.json in its directory.
 type Job struct {
-	ID        string    `gorm:"primaryKey" json:"id"`
-	Name      string    `gorm:"uniqueIndex;not null" json:"name"`
-	Schedule  string    `gorm:"not null" json:"schedule"` // interval like "30s" or cron "*/5 * * * *"
-	Prompt    string    `gorm:"type:text;not null" json:"prompt"`
-	Enabled   bool      `gorm:"default:true" json:"enabled"`
-	RunCount  int       `json:"run_count"`
-	FailCount int       `json:"fail_count"`
+	Name      string     `json:"name"`
+	Schedule  string     `json:"schedule"`    // interval like "30s", "5m", "1h"
+	Prompt    string     `json:"prompt"`
+	Enabled   bool       `json:"enabled"`
+	RunCount  int        `json:"run_count"`
+	FailCount int        `json:"fail_count"`
 	LastRun   *time.Time `json:"last_run,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// LogEntry represents a single execution log file.
+type LogEntry struct {
+	File    string `json:"file"`
+	Time    string `json:"time"`
+	Size    int64  `json:"size"`
+	Success bool   `json:"success"`
 }
 
 // ─── Runner Interface ────────────────────────────────
@@ -38,7 +47,8 @@ type Runner interface {
 }
 
 // RunnerFactory creates a new Runner for each cron job execution.
-type RunnerFactory func() Runner
+// The string parameter is the job name (used for log capture).
+type RunnerFactory func(jobName string) Runner
 
 // ─── Active Job (in-memory scheduler) ────────────────
 
@@ -49,9 +59,9 @@ type activeJob struct {
 
 // ─── Manager ─────────────────────────────────────────
 
-// Manager provides dynamic cron job management with SQLite persistence.
+// Manager provides dynamic cron job management with file-based persistence.
 type Manager struct {
-	db            *gorm.DB
+	baseDir       string // ~/.ngoagent/cron/
 	runnerFactory RunnerFactory
 	active        map[string]*activeJob // name → running job
 	mu            sync.RWMutex
@@ -59,16 +69,15 @@ type Manager struct {
 	cancel        context.CancelFunc
 }
 
-// NewManager creates a cron manager. Call Start() to begin scheduling.
-func NewManager(db *gorm.DB, factory RunnerFactory) (*Manager, error) {
-	// Auto-migrate the Job table
-	if err := db.AutoMigrate(&Job{}); err != nil {
-		return nil, fmt.Errorf("cron migrate: %w", err)
+// NewManager creates a cron manager with file-based storage.
+func NewManager(baseDir string, factory RunnerFactory) (*Manager, error) {
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		return nil, fmt.Errorf("cron mkdir: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		db:            db,
+		baseDir:       baseDir,
 		runnerFactory: factory,
 		active:        make(map[string]*activeJob),
 		ctx:           ctx,
@@ -76,18 +85,25 @@ func NewManager(db *gorm.DB, factory RunnerFactory) (*Manager, error) {
 	}, nil
 }
 
-// Start loads all enabled jobs from DB and schedules them.
+// BaseDir returns the cron base directory.
+func (m *Manager) BaseDir() string { return m.baseDir }
+
+// Start loads all enabled jobs from disk and schedules them.
 func (m *Manager) Start() error {
-	var jobs []Job
-	if err := m.db.Where("enabled = ?", true).Find(&jobs).Error; err != nil {
+	jobs, err := m.List()
+	if err != nil {
 		return fmt.Errorf("load cron jobs: %w", err)
 	}
 
+	count := 0
 	for _, j := range jobs {
-		m.schedule(j)
+		if j.Enabled {
+			m.schedule(j)
+			count++
+		}
 	}
 
-	log.Printf("[cron] Started with %d active jobs", len(jobs))
+	log.Printf("[cron] Started with %d active jobs", count)
 	return nil
 }
 
@@ -103,24 +119,40 @@ func (m *Manager) Stop() {
 	log.Println("[cron] Stopped")
 }
 
-// ─── CRUD Operations (called by manage_cron tool) ────
+// ─── CRUD Operations ─────────────────────────────────
 
 // Create adds a new cron job.
 func (m *Manager) Create(name, schedule, prompt string) error {
 	if _, err := parseInterval(schedule); err != nil {
 		return fmt.Errorf("invalid schedule %q: %w", schedule, err)
 	}
-
-	job := Job{
-		ID:       uuid.New().String(),
-		Name:     name,
-		Schedule: schedule,
-		Prompt:   prompt,
-		Enabled:  true,
+	if name == "" || strings.ContainsAny(name, "/\\. ") {
+		return fmt.Errorf("invalid job name %q (no spaces, dots, or slashes)", name)
 	}
 
-	if err := m.db.Create(&job).Error; err != nil {
-		return fmt.Errorf("create job %q: %w", name, err)
+	jobDir := filepath.Join(m.baseDir, name)
+	if _, err := os.Stat(jobDir); err == nil {
+		return fmt.Errorf("job %q already exists", name)
+	}
+
+	// Create job directory + logs subdirectory
+	if err := os.MkdirAll(filepath.Join(jobDir, "logs"), 0755); err != nil {
+		return fmt.Errorf("create job dir: %w", err)
+	}
+
+	now := time.Now()
+	job := Job{
+		Name:      name,
+		Schedule:  schedule,
+		Prompt:    prompt,
+		Enabled:   true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := m.saveJob(job); err != nil {
+		os.RemoveAll(jobDir) // Cleanup on failure
+		return err
 	}
 
 	m.schedule(job)
@@ -128,10 +160,11 @@ func (m *Manager) Create(name, schedule, prompt string) error {
 	return nil
 }
 
-// Delete removes a cron job.
+// Delete removes a cron job and all its logs.
 func (m *Manager) Delete(name string) error {
 	m.unschedule(name)
-	if err := m.db.Where("name = ?", name).Delete(&Job{}).Error; err != nil {
+	jobDir := filepath.Join(m.baseDir, name)
+	if err := os.RemoveAll(jobDir); err != nil {
 		return fmt.Errorf("delete job %q: %w", name, err)
 	}
 	log.Printf("[cron] Deleted job %q", name)
@@ -140,12 +173,15 @@ func (m *Manager) Delete(name string) error {
 
 // Enable activates a disabled job and schedules it.
 func (m *Manager) Enable(name string) error {
-	var job Job
-	if err := m.db.Where("name = ?", name).First(&job).Error; err != nil {
-		return fmt.Errorf("job %q not found: %w", name, err)
+	job, err := m.getJob(name)
+	if err != nil {
+		return err
 	}
-	m.db.Model(&job).Update("enabled", true)
 	job.Enabled = true
+	job.UpdatedAt = time.Now()
+	if err := m.saveJob(job); err != nil {
+		return err
+	}
 	m.schedule(job)
 	log.Printf("[cron] Enabled job %q", name)
 	return nil
@@ -154,30 +190,134 @@ func (m *Manager) Enable(name string) error {
 // Disable stops and deactivates a job.
 func (m *Manager) Disable(name string) error {
 	m.unschedule(name)
-	if err := m.db.Model(&Job{}).Where("name = ?", name).Update("enabled", false).Error; err != nil {
-		return fmt.Errorf("disable job %q: %w", name, err)
+	job, err := m.getJob(name)
+	if err != nil {
+		return err
+	}
+	job.Enabled = false
+	job.UpdatedAt = time.Now()
+	if err := m.saveJob(job); err != nil {
+		return err
 	}
 	log.Printf("[cron] Disabled job %q", name)
 	return nil
 }
 
-// List returns all cron jobs.
+// List returns all cron jobs sorted by creation time.
 func (m *Manager) List() ([]Job, error) {
-	var jobs []Job
-	if err := m.db.Order("created_at ASC").Find(&jobs).Error; err != nil {
-		return nil, fmt.Errorf("list jobs: %w", err)
+	entries, err := os.ReadDir(m.baseDir)
+	if err != nil {
+		return nil, fmt.Errorf("list cron dir: %w", err)
 	}
+
+	var jobs []Job
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		job, err := m.getJob(e.Name())
+		if err != nil {
+			continue // Skip broken job dirs
+		}
+		jobs = append(jobs, job)
+	}
+
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].CreatedAt.Before(jobs[j].CreatedAt)
+	})
 	return jobs, nil
 }
 
 // RunNow triggers a job immediately (outside its schedule).
 func (m *Manager) RunNow(name string) error {
-	var job Job
-	if err := m.db.Where("name = ?", name).First(&job).Error; err != nil {
-		return fmt.Errorf("job %q not found: %w", name, err)
+	job, err := m.getJob(name)
+	if err != nil {
+		return err
 	}
 	go m.execute(job)
 	return nil
+}
+
+// ListLogs returns log entries for a specific job, newest first.
+func (m *Manager) ListLogs(name string) ([]LogEntry, error) {
+	logsDir := filepath.Join(m.baseDir, name, "logs")
+	entries, err := os.ReadDir(logsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var logs []LogEntry
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		info, _ := e.Info()
+		size := int64(0)
+		if info != nil {
+			size = info.Size()
+		}
+		// Parse filename: 2026-03-14T14-30-00_ok.md or 2026-03-14T14-30-00_fail.md
+		fname := e.Name()
+		success := !strings.Contains(fname, "_fail")
+		timeStr := strings.TrimSuffix(fname, ".md")
+		timeStr = strings.TrimSuffix(timeStr, "_ok")
+		timeStr = strings.TrimSuffix(timeStr, "_fail")
+
+		logs = append(logs, LogEntry{
+			File:    fname,
+			Time:    timeStr,
+			Size:    size,
+			Success: success,
+		})
+	}
+
+	// Sort newest first
+	sort.Slice(logs, func(i, j int) bool {
+		return logs[i].File > logs[j].File
+	})
+	return logs, nil
+}
+
+// ReadLog reads a specific log file.
+func (m *Manager) ReadLog(name, logFile string) (string, error) {
+	// Security: prevent path traversal
+	if strings.Contains(logFile, "..") || strings.Contains(logFile, "/") {
+		return "", fmt.Errorf("invalid log file name")
+	}
+	data, err := os.ReadFile(filepath.Join(m.baseDir, name, "logs", logFile))
+	if err != nil {
+		return "", fmt.Errorf("read log: %w", err)
+	}
+	return string(data), nil
+}
+
+// ─── Internal: File I/O ──────────────────────────────
+
+func (m *Manager) jobPath(name string) string {
+	return filepath.Join(m.baseDir, name, "job.json")
+}
+
+func (m *Manager) getJob(name string) (Job, error) {
+	data, err := os.ReadFile(m.jobPath(name))
+	if err != nil {
+		return Job{}, fmt.Errorf("job %q not found: %w", name, err)
+	}
+	var job Job
+	if err := json.Unmarshal(data, &job); err != nil {
+		return Job{}, fmt.Errorf("parse job %q: %w", name, err)
+	}
+	return job, nil
+}
+
+func (m *Manager) saveJob(job Job) error {
+	data, err := json.MarshalIndent(job, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal job: %w", err)
+	}
+	return os.WriteFile(m.jobPath(job.Name), data, 0644)
 }
 
 // ─── Internal Scheduling ─────────────────────────────
@@ -207,7 +347,16 @@ func (m *Manager) schedule(job Job) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				m.execute(aj.job)
+				// Re-read job from disk to get latest config
+				latest, err := m.getJob(aj.job.Name)
+				if err != nil {
+					log.Printf("[cron] Job %q disappeared, stopping", aj.job.Name)
+					return
+				}
+				if !latest.Enabled {
+					continue
+				}
+				m.execute(latest)
 			}
 		}
 	}()
@@ -228,29 +377,42 @@ func (m *Manager) execute(job Job) {
 	tickCtx, cancel := context.WithTimeout(m.ctx, 5*time.Minute)
 	defer cancel()
 
-	runner := m.runnerFactory()
+	runner := m.runnerFactory(job.Name)
 	now := time.Now()
+	timestamp := now.Format("2006-01-02T15-04-05")
 
-	if err := runner.Run(tickCtx, job.Prompt); err != nil {
+	err := runner.Run(tickCtx, job.Prompt)
+
+	// Write execution log
+	suffix := "_ok"
+	if err != nil {
+		suffix = "_fail"
 		log.Printf("[cron] Job %q failed: %v", job.Name, err)
-		m.db.Model(&Job{}).Where("name = ?", job.Name).Updates(map[string]any{
-			"fail_count": gorm.Expr("fail_count + 1"),
-			"last_run":   now,
-		})
-		return
 	}
 
-	m.db.Model(&Job{}).Where("name = ?", job.Name).Updates(map[string]any{
-		"run_count": gorm.Expr("run_count + 1"),
-		"last_run":  now,
-	})
+	logFile := filepath.Join(m.baseDir, job.Name, "logs", timestamp+suffix+".md")
+	logContent := fmt.Sprintf("# %s — %s\n\n", job.Name, now.Format("2006-01-02 15:04:05"))
+	logContent += fmt.Sprintf("**Schedule:** %s\n**Prompt:** %s\n\n", job.Schedule, job.Prompt)
+	if err != nil {
+		logContent += fmt.Sprintf("**Status:** ❌ Failed\n**Error:** %v\n", err)
+	} else {
+		logContent += "**Status:** ✅ Success\n"
+	}
+	os.WriteFile(logFile, []byte(logContent), 0644)
+
+	// Update job stats
+	job.RunCount++
+	if err != nil {
+		job.FailCount++
+	}
+	job.LastRun = &now
+	job.UpdatedAt = now
+	m.saveJob(job)
 }
 
 // ─── Schedule Parser ─────────────────────────────────
 
 // parseInterval converts a schedule string to a time.Duration.
-// Supports Go duration format: "30s", "5m", "1h", etc.
-// Future: add cron expression support via robfig/cron.
 func parseInterval(schedule string) (time.Duration, error) {
 	d, err := time.ParseDuration(schedule)
 	if err != nil {

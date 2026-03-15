@@ -54,6 +54,12 @@ func (a *AgentLoop) RunWithoutAcquire(ctx context.Context, userMessage string) e
 func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 
 	a.mu.Lock()
+	// Recreate stopCh if it was closed by a previous Stop()
+	select {
+	case <-a.stopCh:
+		a.stopCh = make(chan struct{})
+	default:
+	}
 	a.history = append(a.history, llm.Message{Role: "user", Content: userMessage})
 	a.state = StatePrepare
 	a.mu.Unlock()
@@ -224,6 +230,11 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			a.transition(StateGenerate)
 
 		case StateDone:
+			// Snapshot file edit history for this message turn
+			if a.deps.FileHistory != nil && a.deps.FileHistory.HasPendingEdits() {
+				msgID := fmt.Sprintf("%s_step%d", a.SessionID(), steps)
+				a.deps.FileHistory.Snapshot(msgID)
+			}
 			a.state = StateIdle
 			a.persistHistory()
 			a.fireHooks(ctx, steps)
@@ -269,7 +280,13 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 			planExists = true
 		}
 	}
-	a.guard.SetPlanningState(isPlanning, planExists)
+	taskMdExists := false
+	if a.deps.Brain != nil {
+		if _, err := a.deps.Brain.Read("task.md"); err == nil {
+			taskMdExists = true
+		}
+	}
+	a.guard.SetModeState(isPlanning, planExists, taskMdExists, boundaryMode)
 
 	// === Layer 1: Planning mode base template ===
 	if isPlanning {
@@ -294,28 +311,31 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 	}
 
 	// === Layer 2b: Boundary frequency nudge (Anti's num_steps pattern) ===
-	// When too many tools called without task_boundary, inject a stronger reminder.
-	// This is a soft nudge, NOT a forced interruption — LLM can finish current work first.
-	if ssb := a.guard.StepsSinceBoundary(); ssb >= 10 {
+	if ssb := a.guard.StepsSinceBoundary(); ssb >= 5 {
 		a.InjectEphemeral(fmt.Sprintf(
 			"<ephemeral_message>You have made %d tool calls without updating task progress. "+
 				"Call task_boundary to report your current status when you reach a natural pause point.</ephemeral_message>", ssb))
 	}
 
-	// === Layer 3a: Artifact reminder (frequency gated: every 5 steps) ===
-	if a.deps.Brain != nil && (steps == 0 || steps%5 == 0) {
-		if files, err := a.deps.Brain.List(); err == nil {
-			var mdFiles []string
-			for _, f := range files {
-				if strings.HasSuffix(f, ".md") && !strings.Contains(f, ".resolved") && !strings.Contains(f, ".metadata") {
-					mdFiles = append(mdFiles, f)
-				}
+	// === Layer 3a: Artifact staleness reminder (Anti-style: steps since last interaction) ===
+	a.mu.Lock()
+	curStep := a.currentStep
+	a.mu.Unlock()
+	if a.deps.Brain != nil {
+		checks := map[string]int{
+			"task.md": 8,  // 8 steps without touching → remind
+			"plan.md": 15, // plan is less frequently updated
+		}
+		for name, threshold := range checks {
+			a.mu.Lock()
+			lastStep, tracked := a.artifactLastStep[name]
+			a.mu.Unlock()
+			if !tracked {
+				continue // not created yet — handled by mode-switch check below
 			}
-			if len(mdFiles) > 0 {
-				a.InjectEphemeral(prompttext.Render(
-					prompttext.EphArtifactReminder,
-					map[string]any{"ArtifactList": strings.Join(mdFiles, "\n")},
-				))
+			if gap := curStep - lastStep; gap >= threshold {
+				a.InjectEphemeral(fmt.Sprintf(
+					"You have not updated %s in %d steps. Review and update it if needed.", name, gap))
 			}
 		}
 	}
@@ -342,6 +362,13 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 		} else if prevMode == "planning" {
 			a.InjectEphemeral(prompttext.EphExitingPlanningMode)
 		}
+		// Fix 3: Mode switch artifact existence check
+		if boundaryMode == "execution" && a.deps.Brain != nil {
+			if _, err := a.deps.Brain.Read("task.md"); err != nil {
+				a.InjectEphemeral("You switched to EXECUTION mode but task.md doesn't exist. " +
+					"Create it via task_plan(action=create, type=task) IMMEDIATELY.")
+			}
+		}
 	}
 
 	// Context usage warning
@@ -357,20 +384,17 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 		a.InjectEphemeral(msg)
 	}
 
-	// Heartbeat mode
-	if ctxutil.ModeFromContext(ctx) == "heartbeat" {
-		tasks := ""
-		if a.deps.Workspace != nil {
-			globalHbPath := ""
-			if a.deps.ConfigMgr != nil {
-				globalHbPath = config.ResolvePath("heartbeat.md")
-			}
-			tasks = a.deps.Workspace.ReadHeartbeat(globalHbPath)
-		}
-		if tasks != "" {
-			msg := prompttext.Render(prompttext.EphHeartbeatContext, map[string]any{"Tasks": tasks})
-			a.InjectEphemeral(msg)
-		}
+	// L2 Progressive Disclosure: inject skill instruction after SKILL.md read
+	a.mu.Lock()
+	skillName := a.skillLoaded
+	a.skillLoaded = "" // one-shot: clear after injection
+	a.skillPath = ""
+	a.mu.Unlock()
+	if skillName != "" {
+		msg := prompttext.Render(prompttext.EphSkillInstruction, map[string]any{
+			"SkillName": skillName,
+		})
+		a.InjectEphemeral(msg)
 	}
 }
 
@@ -478,6 +502,7 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 		switch chunk.Type {
 		case llm.ChunkText:
 			textBuf.WriteString(chunk.Text)
+			a.deps.Delta.OnText(chunk.Text) // Stream in real-time
 		case llm.ChunkReasoning:
 			a.deps.Delta.OnReasoning(chunk.Text)
 		case llm.ChunkToolCall:
@@ -490,14 +515,11 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 		}
 	}
 
-	// Flush buffered text only when StopReason indicates final answer.
-	// "stop" / "" = pure text response → flush
-	// "tool_calls"  = tool invocation  → suppress (intermediate reasoning)
+	// Flush buffered text to SSE client.
+	// Always flush regardless of StopReason to ensure SSE output matches
+	// what gets persisted to DB (resp.Content is stored unconditionally).
 	if resp != nil {
 		log.Printf("[doGenerate] StopReason=%q textLen=%d toolCalls=%d", resp.StopReason, textBuf.Len(), len(resp.ToolCalls))
-	}
-	if textBuf.Len() > 0 && resp != nil && resp.StopReason != "tool_calls" {
-		a.deps.Delta.OnText(textBuf.String())
 	}
 
 	if genErr != nil {
@@ -528,9 +550,26 @@ func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunO
 		deps.UserRules = rules
 	}
 
-	// Knowledge — KI summaries
+	// Knowledge — hybrid injection strategy
 	if a.deps.KIStore != nil {
-		deps.ConvSummary = a.deps.KIStore.GenerateSummaries()
+		// 1. Preference KIs: always injected (full dump of preference-tagged items)
+		deps.PreferenceKI = a.deps.KIStore.GeneratePreferenceSummaries()
+
+		// 2. Semantic KIs: retrieve top-K relevant items based on user message
+		if a.deps.KIRetriever != nil {
+			userMsg := a.lastUserMessage()
+			if userMsg != "" {
+				topK := 5
+				if a.deps.Config != nil && a.deps.Config.Embedding.TopK > 0 {
+					topK = a.deps.Config.Embedding.TopK
+				}
+				deps.ConvSummary = a.deps.KIRetriever.RetrieveForPrompt(userMsg, topK, 2000)
+			}
+		}
+		// Fallback: if no retriever, inject all KI summaries
+		if deps.ConvSummary == "" && a.deps.KIRetriever == nil {
+			deps.ConvSummary = a.deps.KIStore.GenerateSummaries()
+		}
 	}
 
 	// Skills — summaries for prompt injection
@@ -541,6 +580,7 @@ func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunO
 				Name:        s.Name,
 				Description: s.Description,
 				Type:        s.Type,
+				Command:     s.Command,
 				Path:        s.Path,
 			})
 		}
@@ -558,15 +598,49 @@ func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunO
 	return deps
 }
 
+// lastUserMessage returns the content of the most recent user message in history.
+func (a *AgentLoop) lastUserMessage() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := len(a.history) - 1; i >= 0; i-- {
+		if a.history[i].Role == "user" {
+			content := a.history[i].Content
+			// Truncate for embedding query efficiency
+			if len([]rune(content)) > 200 {
+				content = string([]rune(content)[:200])
+			}
+			return content
+		}
+	}
+	return ""
+}
+
 // buildRuntimeInfo generates runtime context (OS, time, model, workspace).
 func (a *AgentLoop) buildRuntimeInfo(model string) string {
 	var b strings.Builder
-	cwd, _ := os.Getwd()
 	b.WriteString("# Environment\n")
 	b.WriteString(fmt.Sprintf("- OS: %s/%s\n", runtime.GOOS, runtime.GOARCH))
 	b.WriteString(fmt.Sprintf("- Time: %s\n", time.Now().Format("2006-01-02 15:04:05 MST")))
 	b.WriteString(fmt.Sprintf("- Model: %s\n", model))
-	b.WriteString(fmt.Sprintf("- Workspace: %s\n", cwd))
+
+	// Agent home: ~/.ngoagent/ (skills, brain, knowledge, config)
+	homeDir := config.HomeDir()
+	b.WriteString(fmt.Sprintf("- Agent Home: %s\n", homeDir))
+
+	// Workspace: configured project working directory
+	if a.deps.Config != nil && a.deps.Config.Agent.Workspace != "" {
+		ws := a.deps.Config.Agent.Workspace
+		if strings.HasPrefix(ws, "~") {
+			if h, err := os.UserHomeDir(); err == nil {
+				ws = h + ws[1:]
+			}
+		}
+		b.WriteString(fmt.Sprintf("- Workspace: %s\n", ws))
+	} else {
+		cwd, _ := os.Getwd()
+		b.WriteString(fmt.Sprintf("- Workspace: %s\n", cwd))
+	}
+
 	return b.String()
 }
 
@@ -575,6 +649,7 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 	// Track how many tool calls since last task_boundary update
 	a.mu.Lock()
 	a.stepsSinceUpdate++
+	a.currentStep++
 	a.mu.Unlock()
 
 	// Step-level guard: pre-check (planning behavior enforcement)
@@ -602,7 +677,7 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 		// 1. Register pending approval
 		pending := a.deps.Security.RequestApproval(tc.Function.Name, args, reason)
 		// 2. Send SSE events so client can respond via POST /v1/approve
-		a.deps.Delta.OnToolStart(tc.Function.Name+" [待审批: "+reason+"]", args)
+		a.deps.Delta.OnToolStart(tc.ID, tc.Function.Name+" [待审批: "+reason+"]", args)
 		a.deps.Delta.OnApprovalRequest(pending.ID, tc.Function.Name, args, reason)
 		// 3. Block until client responds, context cancelled, or TIMEOUT
 		var approved bool
@@ -622,7 +697,7 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 		}
 	}
 
-	a.deps.Delta.OnToolStart(tc.Function.Name, args)
+	a.deps.Delta.OnToolStart(tc.ID, tc.Function.Name, args)
 	// Inject fully-configured brain store into tool context (single key, carries sessionID + workspaceDir)
 	toolCtx := ctx
 	if a.deps.Brain != nil {
@@ -636,7 +711,7 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 		output = output[:25*1024] + "\n... (output truncated) ...\n" + output[len(output)-25*1024:]
 	}
 
-	a.deps.Delta.OnToolResult(tc.Function.Name, output, err)
+	a.deps.Delta.OnToolResult(tc.ID, tc.Function.Name, output, err)
 	a.deps.Security.AfterToolCall(ctx, tc.Function.Name, output, err)
 
 	// --- Protocol Dispatch (centralized in protocol.go) ---
@@ -648,16 +723,27 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 	a.guard.PostToolRecord(tc.Function.Name)
 
 	// Track plan.md modifications for EphPlanModifiedReminder
+	// + Artifact staleness tracking (record last step for each artifact)
 	if tc.Function.Name == "task_plan" {
 		var planArgs struct {
 			Action string `json:"action"`
 			Type   string `json:"type"`
 		}
 		if json.Unmarshal([]byte(tc.Function.Arguments), &planArgs) == nil {
-			if (planArgs.Action == "create" || planArgs.Action == "update") &&
-				(planArgs.Type == "plan" || planArgs.Type == "") {
+			if planArgs.Action == "create" || planArgs.Action == "update" {
+				// Track plan.md modification
+				if planArgs.Type == "plan" || planArgs.Type == "" {
+					a.mu.Lock()
+					a.planModified = true
+					a.mu.Unlock()
+				}
+				// Record artifact last step for staleness tracking
+				artifactName := planArgs.Type + ".md"
+				if planArgs.Type == "" {
+					artifactName = "plan.md"
+				}
 				a.mu.Lock()
-				a.planModified = true
+				a.artifactLastStep[artifactName] = a.currentStep
 				a.mu.Unlock()
 			}
 		}
@@ -874,6 +960,7 @@ func (a *AgentLoop) persistHistory() {
 			Content:    m.Content,
 			ToolCalls:  string(tc),
 			ToolCallID: m.ToolCallID,
+			Reasoning:  m.Reasoning,
 		}
 	}
 	a.persistedCount = len(a.history)
@@ -902,6 +989,7 @@ func (a *AgentLoop) persistFullHistory() {
 			Content:    m.Content,
 			ToolCalls:  string(tc),
 			ToolCallID: m.ToolCallID,
+			Reasoning:  m.Reasoning,
 		}
 	}
 	a.persistedCount = len(a.history)

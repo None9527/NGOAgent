@@ -1,5 +1,5 @@
 // Package service — channel.go defines the AgentChannel protocol.
-// Each channel type (chat, heartbeat, subagent, forge) implements this interface,
+// Each channel type (chat, subagent, forge) implements this interface,
 // controlling how an AgentLoop receives input, produces output, and handles completion.
 package service
 
@@ -8,11 +8,11 @@ import "log"
 // AgentChannel defines the protocol for a specific agent execution context.
 // Different channels have different output sinks, tool policies, and completion behaviors.
 type AgentChannel interface {
-	// Name returns the channel type identifier: "chat", "heartbeat", "subagent", "forge".
+	// Name returns the channel type identifier: "chat", "subagent", "forge".
 	Name() string
 
 	// DeltaSink returns the output sink for this channel.
-	// Chat → SSE writer, Subagent → OutputCollector, Heartbeat → log.
+	// Chat → SSE writer, Subagent → OutputCollector.
 	DeltaSink() DeltaSink
 
 	// OnComplete is called when the agent run finishes.
@@ -36,32 +36,6 @@ func NewChatChannel(sink DeltaSink) *ChatChannel {
 func (c *ChatChannel) Name() string          { return "chat" }
 func (c *ChatChannel) DeltaSink() DeltaSink  { return c.sink }
 func (c *ChatChannel) OnComplete(string, string, error) {} // Chat streams directly, no announce needed
-
-// ────────────────────────────────────────────
-// HeartbeatChannel: periodic background tasks
-// ────────────────────────────────────────────
-
-// HeartbeatChannel runs background heartbeat tasks.
-// Output goes to log; completion state is recorded.
-type HeartbeatChannel struct {
-	sink       DeltaSink
-	onDoneFn   func(result string, err error) // Optional callback to record state
-}
-
-func NewHeartbeatChannel(onDone func(result string, err error)) *HeartbeatChannel {
-	return &HeartbeatChannel{
-		sink:     &LogSink{prefix: "[heartbeat]"},
-		onDoneFn: onDone,
-	}
-}
-
-func (c *HeartbeatChannel) Name() string          { return "heartbeat" }
-func (c *HeartbeatChannel) DeltaSink() DeltaSink  { return c.sink }
-func (c *HeartbeatChannel) OnComplete(_ string, result string, err error) {
-	if c.onDoneFn != nil {
-		c.onDoneFn(result, err)
-	}
-}
 
 // ────────────────────────────────────────────
 // SubagentChannel: child agent with announce-back
@@ -120,22 +94,23 @@ func (c *ForgeChannel) OnComplete(string, string, error) {}
 
 // LogSink is a DeltaSink that writes to log.Printf.
 type LogSink struct {
-	prefix string
+	Prefix string
 }
 
 func (s *LogSink) OnText(text string) {
 	if text != "" {
-		log.Printf("%s text: %s", s.prefix, text)
+		log.Printf("%s text: %s", s.Prefix, text)
 	}
 }
 func (s *LogSink) OnReasoning(string)                        {}
-func (s *LogSink) OnToolStart(string, map[string]any)        {}
-func (s *LogSink) OnToolResult(string, string, error)        {}
+func (s *LogSink) OnToolStart(string, string, map[string]any)        {}
+func (s *LogSink) OnToolResult(string, string, string, error)        {}
 func (s *LogSink) OnProgress(string, string, string, string) {}
+func (s *LogSink) OnPlanReview(string, []string)              {}
 func (s *LogSink) OnApprovalRequest(string, string, map[string]any, string) {}
 func (s *LogSink) OnComplete() {}
 func (s *LogSink) OnError(err error) {
 	if err != nil {
-		log.Printf("%s error: %v", s.prefix, err)
+		log.Printf("%s error: %v", s.Prefix, err)
 	}
 }

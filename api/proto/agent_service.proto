@@ -1,0 +1,538 @@
+syntax = "proto3";
+
+package ngoclaw.agent.v1;
+
+option go_package = "github.com/ngoclaw/ngoagent/internal/interfaces/grpc/agentpb";
+
+// ─── Chat Streaming Messages ───
+
+message AgentChatRequest {
+    string message       = 1;
+    string session_id       = 2;
+    string model         = 3;
+    string system_prompt = 4;
+    string workspace     = 5;
+}
+
+message AgentChatEvent {
+    string type          = 1;  // thinking/text_delta/tool_call/tool_result/step_done/error/done/approval_request
+    string text          = 2;
+    string tool_name     = 3;
+    string tool_input    = 4;
+    string tool_output   = 5;
+    bool   tool_approved = 6;
+    string error         = 7;
+    string call_id       = 8;
+    string status        = 9;
+    string thinking      = 10;
+    string step_type     = 11;
+    int32  step_number   = 12;
+    int32  total_steps   = 13;
+    int32  token_count   = 14;  // cumulative token usage
+    string model_used    = 15;  // model that generated this step
+    bool   success       = 16;  // tool execution success
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+    bool   healthy  = 1;
+    string version  = 2;
+    int32  tools    = 3;
+    string model    = 4;
+}
+
+message ChatMessage {
+    string role    = 1;
+    string content = 2;
+}
+
+// ═══════════════════════════════════════════════════════
+// AgentService — full Engine interface over gRPC
+// ═══════════════════════════════════════════════════════
+
+service AgentService {
+    // ─── RunController ───
+    rpc Chat(AgentChatRequest) returns (stream AgentChatEvent);
+    rpc StopRun(SessionRequest) returns (CommandResponse);
+    rpc SendMessage(SendMessageRequest) returns (CommandResponse);
+    rpc ApproveToolCall(ApproveToolCallRequest) returns (CommandResponse);
+
+    // ─── SessionManager ───
+    rpc NewSession(NewSessionRequest) returns (CommandResponse);
+    rpc SwitchModel(SwitchModelRequest) returns (CommandResponse);
+    rpc GetStatus(SessionRequest) returns (StatusResponse);
+    rpc ListModels(EmptyRequest) returns (ListModelsResponse);
+    rpc GetDelegationMode(SessionRequest) returns (CommandResponse);
+    rpc SetDelegationMode(SetStringRequest) returns (CommandResponse);
+
+    // ─── SettingsManager ───
+    rpc GetSettings(SessionRequest) returns (SettingsResponse);
+    rpc UpdateSettings(UpdateSettingsRequest) returns (CommandResponse);
+
+    // ─── ContextManager ───
+    rpc GetHistory(SessionRequest) returns (GetHistoryResponse);
+    rpc ClearHistory(SessionRequest) returns (CommandResponse);
+    rpc AppendHistory(AppendHistoryRequest) returns (CommandResponse);
+    rpc CompactContext(CompactRequest) returns (CommandResponse);
+    rpc GetContextStats(SessionRequest) returns (ContextStatsResponse);
+
+    // ─── SecurityPolicy ───
+    rpc GetSecurity(EmptyRequest) returns (SecurityResponse);
+    rpc SetApprovalMode(StringValueRequest) returns (CommandResponse);
+    rpc TrustTool(StringValueRequest) returns (CommandResponse);
+    rpc UntrustTool(StringValueRequest) returns (CommandResponse);
+    rpc TrustCommand(StringValueRequest) returns (CommandResponse);
+
+    // ─── ToolManager ───
+    rpc ListTools(EmptyRequest) returns (ListToolsInfoResponse);
+    rpc GetToolDetail(StringValueRequest) returns (ToolDetailResponse);
+    rpc EnableTool(StringValueRequest) returns (CommandResponse);
+    rpc DisableTool(StringValueRequest) returns (CommandResponse);
+
+    // ─── SkillManager ───
+    rpc ListSkills(EmptyRequest) returns (ListSkillsResponse);
+    rpc GetSkillDetail(StringValueRequest) returns (SkillDetailResponse);
+    rpc InstallSkill(StringValueRequest) returns (SkillInfoResponse);
+    rpc UninstallSkill(StringValueRequest) returns (CommandResponse);
+    rpc EnableSkill(StringValueRequest) returns (CommandResponse);
+    rpc DisableSkill(StringValueRequest) returns (CommandResponse);
+    rpc UpdateSkillConfig(UpdateSkillConfigRequest) returns (CommandResponse);
+
+    // ─── SubagentTracker ───
+    rpc ListSubagents(SessionRequest) returns (ListSubagentsResponse);
+    rpc StopSubagent(StopSubagentRequest) returns (CommandResponse);
+    rpc StopAllSubagents(SessionRequest) returns (CommandResponse);
+    rpc GetSubagentLog(GetSubagentLogRequest) returns (LogEntriesResponse);
+
+    // ─── MCPManager ───
+    rpc ListMCPServers(EmptyRequest) returns (ListMCPServersResponse);
+    rpc AddMCPServer(AddMCPServerRequest) returns (CommandResponse);
+    rpc RemoveMCPServer(StringValueRequest) returns (CommandResponse);
+    rpc GetMCPServerTools(StringValueRequest) returns (ListToolsInfoResponse);
+
+    // ─── PromptTemplateManager ───
+    rpc ListPromptTemplates(UserIDRequest) returns (ListPromptTemplatesResponse);
+    rpc CreatePromptTemplate(CreatePromptTemplateRequest) returns (PromptTemplateResponse);
+    rpc GetPromptTemplate(StringValueRequest) returns (PromptTemplateResponse);
+    rpc UpdatePromptTemplate(UpdatePromptTemplateRequest) returns (CommandResponse);
+    rpc DeletePromptTemplate(StringValueRequest) returns (CommandResponse);
+
+    // ─── Scheduler ───
+    rpc ListCronJobs(EmptyRequest) returns (CronJobsResponse);
+    rpc CronAdd(CronAddRequest) returns (CommandResponse);
+    rpc CronRemove(StringValueRequest) returns (CommandResponse);
+    rpc CronEnable(StringValueRequest) returns (CommandResponse);
+    rpc CronDisable(StringValueRequest) returns (CommandResponse);
+    rpc CronRunNow(StringValueRequest) returns (CommandResponse);
+
+    // ─── SessionPersistence ───
+    rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+    rpc SearchSessions(SearchSessionsRequest) returns (ListSessionsResponse);
+    rpc GetSessionDetail(StringValueRequest) returns (SessionDetailResponse);
+    rpc DeleteSession(StringValueRequest) returns (CommandResponse);
+    rpc RenameSession(RenameSessionRequest) returns (CommandResponse);
+    rpc RestoreSession(RestoreSessionRequest) returns (CommandResponse);
+    rpc ExportSession(ExportSessionRequest) returns (ExportSessionResponse);
+    rpc ListTags(UserIDRequest) returns (StringListResponse);
+    rpc TagSession(TagSessionRequest) returns (CommandResponse);
+    rpc ListFolders(UserIDRequest) returns (ListFoldersResponse);
+    rpc MoveSessionToFolder(MoveSessionRequest) returns (CommandResponse);
+
+    // ─── DataManager: Files ───
+    rpc UploadFile(UploadFileRequest) returns (FileInfoResponse);
+    rpc ListFiles(UserIDRequest) returns (ListFilesResponse);
+    rpc GetFile(StringValueRequest) returns (FileInfoResponse);
+    rpc DeleteFile(StringValueRequest) returns (CommandResponse);
+    rpc GetFileContent(StringValueRequest) returns (FileContentResponse);
+    rpc SearchFiles(SearchFilesRequest) returns (ListFilesResponse);
+
+    // ─── DataManager: Memory ───
+    rpc ListMemories(UserIDRequest) returns (ListMemoriesResponse);
+    rpc AddMemory(AddMemoryRequest) returns (MemoryResponse);
+    rpc UpdateMemory(UpdateMemoryRequest) returns (CommandResponse);
+    rpc DeleteMemory(StringValueRequest) returns (CommandResponse);
+    rpc QueryMemory(QueryMemoryRequest) returns (ListMemoriesResponse);
+
+    // ─── DataManager: Knowledge Base ───
+    rpc ListKnowledgeBases(UserIDRequest) returns (ListKBResponse);
+    rpc CreateKnowledgeBase(CreateKBRequest) returns (KBResponse);
+    rpc GetKnowledgeBase(StringValueRequest) returns (KBResponse);
+    rpc UpdateKnowledgeBase(UpdateKBRequest) returns (CommandResponse);
+    rpc DeleteKnowledgeBase(StringValueRequest) returns (CommandResponse);
+    rpc AddFileToKnowledge(AddFileToKBRequest) returns (CommandResponse);
+    rpc QueryKnowledge(QueryKBRequest) returns (KBQueryResponse);
+
+    // ─── StatsProvider ───
+    rpc GetSessionStats(SessionRequest) returns (SessionStatsResponse);
+    rpc GetGlobalStats(EmptyRequest) returns (GlobalStatsResponse);
+
+    // ─── ConfigManager ───
+    rpc GetConfig(EmptyRequest) returns (ConfigResponse);
+    rpc GetConfigValue(StringValueRequest) returns (ConfigValueResponse);
+    rpc SetConfigValue(SetConfigValueRequest) returns (CommandResponse);
+    rpc ResetConfig(StringValueRequest) returns (CommandResponse);
+    rpc GetConfigSchema(EmptyRequest) returns (ConfigResponse);
+
+    // ─── SystemAdmin ───
+    rpc GetSystemInfo(EmptyRequest) returns (SystemInfoResponse);
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    rpc RestartSystem(EmptyRequest) returns (CommandResponse);
+    rpc GetUpdateStatus(EmptyRequest) returns (UpdateStatusResponse);
+    rpc GetLogs(GetLogsRequest) returns (LogEntriesResponse);
+
+    // ─── Task Plan ───
+    rpc GetTasks(TasksRequest) returns (TasksResponse);
+
+    // ─── Brain Artifacts ───
+    rpc ListBrainArtifacts(BrainListRequest) returns (BrainListResponse);
+    rpc ReadBrainArtifact(BrainReadRequest) returns (BrainReadResponse);
+
+    // ─── KI (Knowledge Items) ───
+    rpc ListKI(EmptyRequest) returns (KIListResponse);
+    rpc GetKI(StringValueRequest) returns (KIDetailResponse);
+    rpc DeleteKI(StringValueRequest) returns (CommandResponse);
+    rpc ListKIArtifacts(StringValueRequest) returns (BrainListResponse);
+    rpc ReadKIArtifact(BrainReadRequest) returns (BrainReadResponse);
+
+    // ─── Skills CRUD ───
+    rpc RefreshSkills(EmptyRequest) returns (CommandResponse);
+    rpc DeleteSkill(StringValueRequest) returns (CommandResponse);
+    rpc ReadSkillContent(StringValueRequest) returns (BrainReadResponse);
+
+    // ─── Provider Management ───
+    rpc AddProvider(AddProviderRequest) returns (CommandResponse);
+    rpc RemoveProvider(StringValueRequest) returns (CommandResponse);
+
+    // ─── Cron Logs ───
+    rpc ListCronLogs(StringValueRequest) returns (CronLogsResponse);
+    rpc ReadCronLog(CronLogReadRequest) returns (BrainReadResponse);
+}
+
+// ═══════════════════════════════════════════════════════
+// Common Messages
+// ═══════════════════════════════════════════════════════
+
+message EmptyRequest {}
+message StringValueRequest { string value = 1; }
+message StringListResponse { repeated string values = 1; }
+message SessionRequest { string session_id = 1; }
+message UserIDRequest  { int64 user_id = 1; }
+message CommandResponse { bool ok = 1; string message = 2; }
+
+// ═══════════════════════════════════════════════════════
+// RunController
+// ═══════════════════════════════════════════════════════
+
+message SendMessageRequest {
+    string channel = 1;
+    string session_id = 2;
+    string message = 3;
+    repeated string media_paths = 4;
+    string caption = 5;
+}
+
+message ApproveToolCallRequest {
+    string session_id = 1;
+    string call_id    = 2;
+    bool   approved   = 3;
+}
+
+// ═══════════════════════════════════════════════════════
+// SessionManager
+// ═══════════════════════════════════════════════════════
+
+message NewSessionRequest { string session_id = 1; int64 user_id = 2; }
+message SwitchModelRequest { string session_id = 1; string model = 2; }
+message SetStringRequest { string session_id = 1; string value = 2; }
+
+message StatusResponse {
+    string model       = 1;
+    string run_state   = 2;
+    string session_id     = 3;
+    int32  msg_count   = 4;
+    int32  token_count = 5;
+}
+
+message ModelInfo {
+    string id          = 1;
+    string alias       = 2;
+    string provider    = 3;
+    string description = 4;
+}
+
+message ListModelsResponse {
+    repeated ModelInfo models = 1;
+    string current_model     = 2;
+}
+
+// ═══════════════════════════════════════════════════════
+// SettingsManager
+// ═══════════════════════════════════════════════════════
+
+message SettingsResponse {
+    string think_level    = 1;
+    bool   verbose        = 2;
+    string reasoning      = 3;
+    string usage_mode     = 4;
+    string activation     = 5;
+    string send_policy    = 6;
+    string delegation     = 7;
+    string planning_mode  = 8;  // forge / rush / auto
+}
+
+message UpdateSettingsRequest {
+    string session_id     = 1;
+    string think_level    = 2;
+    string verbose        = 3;
+    string reasoning      = 4;
+    string usage_mode     = 5;
+    string activation     = 6;
+    string send_policy    = 7;
+    string planning_mode  = 8;  // forge / rush / auto
+}
+
+// ═══════════════════════════════════════════════════════
+// ContextManager
+// ═══════════════════════════════════════════════════════
+
+message GetHistoryResponse { repeated ChatMessage messages = 1; }
+message AppendHistoryRequest { string session_id = 1; string user_msg = 2; string assistant_msg = 3; }
+message CompactRequest { string session_id = 1; string instructions = 2; }
+message ContextStatsResponse { int32 message_count = 1; int32 token_count = 2; int32 max_tokens = 3; }
+
+// ═══════════════════════════════════════════════════════
+// SecurityPolicy
+// ═══════════════════════════════════════════════════════
+
+message SecurityResponse {
+    string          approval_mode    = 1;
+    repeated string trusted_tools    = 2;
+    repeated string dangerous_tools  = 3;
+    repeated string trusted_commands = 4;
+}
+
+// ═══════════════════════════════════════════════════════
+// ToolManager
+// ═══════════════════════════════════════════════════════
+
+message ToolInfoItem {
+    string name        = 1;
+    string description = 2;
+    string category    = 3;
+    bool   enabled     = 4;
+    string source      = 5;
+}
+message ListToolsInfoResponse { repeated ToolInfoItem tools = 1; }
+message ToolDetailResponse { ToolInfoItem info = 1; string parameters = 2; int32 usage_count = 3; }
+
+// ═══════════════════════════════════════════════════════
+// SkillManager
+// ═══════════════════════════════════════════════════════
+
+message SkillItem { string id = 1; string name = 2; bool enabled = 3; }
+message ListSkillsResponse { repeated SkillItem skills = 1; }
+message SkillInfoResponse { SkillItem skill = 1; }
+
+message SkillDetailResponse {
+    string id = 1; string name = 2; bool enabled = 3;
+    string description = 4; string author = 5; string version = 6;
+    string source = 7; repeated string tools = 8;
+    map<string, string> config = 9;
+}
+
+message UpdateSkillConfigRequest { string id = 1; map<string, string> config = 2; }
+
+// ═══════════════════════════════════════════════════════
+// SubagentTracker
+// ═══════════════════════════════════════════════════════
+
+message SubagentItem {
+    string run_id = 1; string label = 2; string status = 3;
+    string task = 4; int64 started_ms = 5; int64 duration_ms = 6; int32 steps = 7;
+}
+message ListSubagentsResponse { repeated SubagentItem subagents = 1; }
+message StopSubagentRequest { string session_id = 1; string run_id = 2; }
+message GetSubagentLogRequest { string session_id = 1; string run_id = 2; int32 limit = 3; }
+message LogEntryItem { int64 timestamp_ms = 1; string level = 2; string message = 3; }
+message LogEntriesResponse { repeated LogEntryItem entries = 1; }
+
+// ═══════════════════════════════════════════════════════
+// MCPManager
+// ═══════════════════════════════════════════════════════
+
+message MCPServerItem { string name = 1; string url = 2; string status = 3; int32 tool_count = 4; string error = 5; }
+message ListMCPServersResponse { repeated MCPServerItem servers = 1; }
+message AddMCPServerRequest { string name = 1; string url = 2; map<string, string> config = 3; }
+
+// ═══════════════════════════════════════════════════════
+// PromptTemplateManager
+// ═══════════════════════════════════════════════════════
+
+message PromptTemplateItem { string id = 1; string name = 2; string command = 3; string content = 4; repeated string tags = 5; }
+message ListPromptTemplatesResponse { repeated PromptTemplateItem templates = 1; }
+message PromptTemplateResponse { PromptTemplateItem template = 1; }
+message CreatePromptTemplateRequest { int64 user_id = 1; string name = 2; string command = 3; string content = 4; }
+message UpdatePromptTemplateRequest { string id = 1; string name = 2; string content = 3; }
+
+// ═══════════════════════════════════════════════════════
+// Scheduler
+// ═══════════════════════════════════════════════════════
+
+message CronJobItem {
+    string name = 1; string schedule = 2; string command = 3;
+    string job_type = 4; bool enabled = 5; int32 run_count = 6; int32 fail_count = 7;
+}
+message CronJobsResponse { repeated CronJobItem jobs = 1; }
+message CronAddRequest { string name = 1; string schedule = 2; string command = 3; string job_type = 4; string notify_session_id = 5; }
+
+// ═══════════════════════════════════════════════════════
+// SessionPersistence
+// ═══════════════════════════════════════════════════════
+
+message ListSessionsRequest { int64 user_id = 1; int32 limit = 2; int32 offset = 3; }
+
+message SessionSummaryItem {
+    string id = 1; string title = 2; string model = 3; int32 msg_count = 4;
+    string preview = 5; repeated string tags = 6; string folder_id = 7;
+    int64 created_at = 8; int64 updated_at = 9;
+}
+message ListSessionsResponse { repeated SessionSummaryItem sessions = 1; int32 total = 2; }
+message SearchSessionsRequest { int64 user_id = 1; string query = 2; int32 limit = 3; }
+message SessionDetailResponse { SessionSummaryItem summary = 1; repeated ChatMessage messages = 2; }
+message RenameSessionRequest { string session_id = 1; string title = 2; }
+message RestoreSessionRequest { string target_session_id = 1; string source_session_id = 2; }
+message ExportSessionRequest { string session_id = 1; string format = 2; }
+message ExportSessionResponse { bytes data = 1; }
+message TagSessionRequest { string session_id = 1; string tag = 2; }
+message FolderItem { string id = 1; string name = 2; }
+message ListFoldersResponse { repeated FolderItem folders = 1; }
+message MoveSessionRequest { string session_id = 1; string folder_id = 2; }
+
+// ═══════════════════════════════════════════════════════
+// DataManager: Files
+// ═══════════════════════════════════════════════════════
+
+message UploadFileRequest { int64 user_id = 1; string filename = 2; bytes content = 3; map<string, string> meta = 4; }
+message FileInfoItem { string id = 1; string name = 2; int64 size = 3; string mime_type = 4; map<string, string> meta = 5; int64 created_at = 6; }
+message FileInfoResponse { FileInfoItem file = 1; }
+message ListFilesResponse { repeated FileInfoItem files = 1; }
+message FileContentResponse { bytes content = 1; string mime_type = 2; }
+message SearchFilesRequest { int64 user_id = 1; string query = 2; }
+
+// ═══════════════════════════════════════════════════════
+// DataManager: Memory
+// ═══════════════════════════════════════════════════════
+
+message MemoryItem { string id = 1; string content = 2; int64 created_at = 3; int64 updated_at = 4; }
+message MemoryResponse { MemoryItem memory = 1; }
+message ListMemoriesResponse { repeated MemoryItem memories = 1; }
+message AddMemoryRequest { int64 user_id = 1; string content = 2; }
+message UpdateMemoryRequest { string id = 1; string content = 2; }
+message QueryMemoryRequest { int64 user_id = 1; string query = 2; int32 top_k = 3; }
+
+// ═══════════════════════════════════════════════════════
+// DataManager: Knowledge Base
+// ═══════════════════════════════════════════════════════
+
+message KBItem { string id = 1; string name = 2; string description = 3; int32 file_count = 4; int64 created_at = 5; }
+message KBResponse { KBItem kb = 1; }
+message ListKBResponse { repeated KBItem kbs = 1; }
+message CreateKBRequest { int64 user_id = 1; string name = 2; string description = 3; }
+message UpdateKBRequest { string id = 1; string name = 2; string description = 3; }
+message AddFileToKBRequest { string kb_id = 1; string file_id = 2; }
+message QueryKBRequest { string kb_id = 1; string query = 2; int32 top_k = 3; }
+message KBQueryResult { string content = 1; string source = 2; float score = 3; }
+message KBQueryResponse { repeated KBQueryResult results = 1; }
+
+// ═══════════════════════════════════════════════════════
+// Stats
+// ═══════════════════════════════════════════════════════
+
+message SessionStatsResponse { int32 total_tokens = 1; int32 input_tokens = 2; int32 output_tokens = 3; int32 tool_calls = 4; int32 turn_count = 5; }
+message GlobalStatsResponse { int32 total_sessions = 1; int32 total_tokens = 2; int32 total_tool_calls = 3; }
+
+// ═══════════════════════════════════════════════════════
+// ConfigManager
+// ═══════════════════════════════════════════════════════
+
+message ConfigResponse { string json_data = 1; }
+message ConfigValueResponse { string json_value = 1; }
+message SetConfigValueRequest { string path = 1; string json_value = 2; }
+
+// ═══════════════════════════════════════════════════════
+// SystemAdmin
+// ═══════════════════════════════════════════════════════
+
+message SystemInfoResponse {
+    string version = 1; string go_version = 2; int64 uptime_ms = 3;
+    string os = 4; string arch = 5; int32 models = 6; int32 tools = 7; int32 skills = 8;
+}
+message UpdateStatusResponse { string current_version = 1; string latest_version = 2; bool update_avail = 3; }
+message GetLogsRequest { string level = 1; int32 limit = 2; }
+
+// ═══════════════════════════════════════════════════════
+// Task Plan
+// ═══════════════════════════════════════════════════════
+
+message TasksRequest { string conversation_id = 1; }
+message TasksResponse {
+    message TaskItem { string id = 1; string title = 2; string status = 3; }
+    repeated TaskItem tasks = 1;
+}
+
+// ═══════════════════════════════════════════════════════
+// ToolService (Remote Daemon)
+// ═══════════════════════════════════════════════════════
+
+message ToolExecRequest { string tool_name = 1; string args_json = 2; string request_id = 3; }
+message ToolExecResponse { bool success = 1; string output = 2; string error = 3; string request_id = 4; }
+message ListToolsRequest {}
+message ListToolsResponse {
+    message ToolDef { string name = 1; string description = 2; string schema_json = 3; }
+    repeated ToolDef tools = 1;
+}
+
+service ToolService {
+    rpc ExecTool(ToolExecRequest) returns (ToolExecResponse);
+    rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ═══════════════════════════════════════════════════════
+// Brain Artifacts
+// ═══════════════════════════════════════════════════════
+
+message BrainListRequest { string session_id = 1; }
+message BrainArtifactItem { string name = 1; int64 size = 2; string mod_time = 3; }
+message BrainListResponse { repeated BrainArtifactItem artifacts = 1; }
+message BrainReadRequest { string session_id = 1; string name = 2; }
+message BrainReadResponse { string name = 1; string content = 2; }
+
+// ═══════════════════════════════════════════════════════
+// KI (Knowledge Items)
+// ═══════════════════════════════════════════════════════
+
+message KIItem { string id = 1; string summary = 2; string created_at = 3; string updated_at = 4; repeated string artifact_names = 5; }
+message KIListResponse { repeated KIItem items = 1; }
+message KIDetailResponse { string json_data = 1; }
+
+// ═══════════════════════════════════════════════════════
+// Provider Management
+// ═══════════════════════════════════════════════════════
+
+message AddProviderRequest {
+    string name = 1;
+    string type = 2;
+    string base_url = 3;
+    string api_key = 4;
+    repeated string models = 5;
+}
+
+// ═══════════════════════════════════════════════════════
+// Cron Logs
+// ═══════════════════════════════════════════════════════
+
+message CronLogItem { string name = 1; string time = 2; int64 size = 3; }
+message CronLogsResponse { repeated CronLogItem logs = 1; }
+message CronLogReadRequest { string job_name = 1; string log_file = 2; }
