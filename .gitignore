@@ -20,10 +20,10 @@ cli/node_modules/
 # ── Logs ──
 *.log
 
-# ── Runtime data (user-specific) ──
-.ngoagent/
-workspace/
-uploads/
+# ── Runtime data (user-specific, root-level only) ──
+/.ngoagent/
+/workspace/
+/uploads/
 
 # ── Config (contains API keys) ──
 config.yaml
