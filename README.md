@@ -145,27 +145,15 @@ server:
 
 ### 前后端 Token 链路
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ 首次启动                                                        │
-│  后端: crypto/rand → SHA-256 → config.yaml server.auth_token    │
-│  终端: 打印 Token 供用户复制                                      │
-└────────────────────────┬────────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────────┐
-│ 前端连接 (ConnectPage)                                          │
-│  用户输入 server_url + token                                     │
-│  → GET /v1/health (验证连通)                                     │
-│  → 存储到 localStorage: SERVER_URL, AUTH_TOKEN                   │
-└────────────────────────┬────────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────────┐
-│ 后续所有请求                                                     │
-│  authFetch() 自动注入 Authorization: Bearer <token>              │
-│  → 后端 authMiddleware 校验                                      │
-│  → 401 = token 无效/过期                                         │
-│  页面刷新 → localStorage 自动恢复，无需重新输入                     │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A["🔐 首次启动<br/>后端: crypto/rand → SHA-256<br/>→ config.yaml server.auth_token<br/>终端打印 Token 供用户复制"] --> B
+    B["🌐 前端连接 (ConnectPage)<br/>用户输入 server_url + token<br/>→ GET /v1/health 验证连通<br/>→ 存储 localStorage: SERVER_URL, AUTH_TOKEN"] --> C
+    C["📡 后续所有请求<br/>authFetch() 自动注入 Authorization: Bearer token<br/>→ 后端 authMiddleware 校验<br/>→ 401 = token 无效/过期<br/>页面刷新 → localStorage 自动恢复"]
+
+    style A fill:#1a1a2e,stroke:#e94560,color:#fff
+    style B fill:#16213e,stroke:#0f3460,color:#fff
+    style C fill:#0f3460,stroke:#533483,color:#fff
 ```
 
 ```bash
