@@ -1926,35 +1926,60 @@ func (b *Builder) Build() (*App, error) {
 
 ## 请求生命周期
 
-```
-User/Heartbeat     Server/Timer       Engine            Security         Tool          Stores
-  │                    │                 │                  │               │              │
-  │── msg ───────────►│                 │                  │               │              │
-  │   OR               │                 │                  │               │              │
-  │  ticker ─────────►│                 │                  │               │              │
-  │                    │── Chat(mode) ──►│                  │               │              │
-  │                    │                 │── Discover() ───────────────────────── read ──►│
-  │                    │                 │   user_rules.md                  │  context.md │
-  │                    │                 │   context.md                     │  KI/Brain   │
-  │                    │                 │   KI + Brain                     │              │
-  │                    │                 │── Assemble(15s) ─►               │              │
-  │                    │                 │── LLM ──────────►│               │              │
-  │◄── delta ─────────│◄── stream ──────│                  │               │              │
-  │                    │                 │── executeTools()  │               │              │
-  │                    │                 │                  │── Before ────►│              │
-  │                    │                 │                  │  (mode路由)   │              │
-  │◄── [approval] ────│◄────────────────│◄── ActionAsk ───│               │              │
-  │── [approve] ─────►│────────────────►│── approved ────►│               │              │
-  │                    │                 │                  │── Execute() ─►│              │
-  │                    │                 │                  │               │              │
-  │                    │                 │                  │  ┌─── update_project_ctx ──►│
-  │                    │                 │                  │  │     → WorkspaceStore      │
-  │                    │                 │                  │  └─── save_memory ──────────►│
-  │                    │                 │                  │        → KI Store            │
-  │                    │                 │                  │               │              │
-  │                    │                 │── PostRunHook ──►│               │── snapshot ─►│
-  │                    │                 │   Brain snapshot │               │── KI 蒸馏 ──►│
-  │◄── done/notify ───│◄── complete ────│                  │               │              │
+```mermaid
+sequenceDiagram
+    participant U as User / Heartbeat
+    participant S as Server / Timer
+    participant E as Engine
+    participant Sec as Security
+    participant T as Tool
+    participant St as Stores
+
+    U->>S: msg / ticker
+    S->>E: Chat(mode)
+
+    rect rgba(15, 52, 96, 0.3)
+        Note over E,St: 上下文准备
+        E->>St: Discover() — read user_rules.md, context.md, KI, Brain
+        St-->>E: 配置 + 知识
+        E->>E: Assemble(15 sections)
+    end
+
+    E->>E: LLM Generate
+    E-->>S: stream (Delta)
+    S-->>U: delta
+
+    rect rgba(233, 69, 96, 0.2)
+        Note over E,T: 工具执行
+        E->>Sec: executeTools()
+        Sec->>T: BeforeToolCall (mode 路由)
+
+        alt ActionAsk
+            Sec-->>E: ActionAsk
+            E-->>S: [approval]
+            S-->>U: [approval request]
+            U->>S: [approve]
+            S->>E: approved
+            E->>Sec: approved
+        end
+
+        Sec->>T: Execute()
+    end
+
+    rect rgba(83, 52, 131, 0.2)
+        Note over T,St: 知识写入
+        T->>St: update_project_context → WorkspaceStore
+        T->>St: save_knowledge → KI Store
+    end
+
+    rect rgba(15, 52, 96, 0.2)
+        Note over E,St: PostRun
+        E->>St: Brain snapshot
+        E->>St: KI 蒸馏 (async)
+    end
+
+    E-->>S: complete
+    S-->>U: done / notify
 ```
 
 ---
