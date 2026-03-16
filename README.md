@@ -11,6 +11,10 @@
 
 > ~30K LOC · 21+ 内置工具 · React Web UI · HTTP SSE（断线重连） · LoopPool 多会话并发
 
+<p align="center">
+  <img src="assets/demo.gif" alt="NGOAgent Demo" width="720" />
+</p>
+
 ---
 
 ## 核心特性
