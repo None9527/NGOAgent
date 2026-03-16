@@ -31,8 +31,11 @@
   flex-direction: column;
   position: relative;
   min-width: 0;
-  scroll-behavior: smooth;
+  /* NOTE: Do NOT add scroll-behavior here — this element has overflow:visible,
+     placing scroll-behavior on it can interfere with the parent container's
+     instant scrollTop assignments during streaming. */
 }
+
 
 @media (max-width: 600px) {
   .chat-viewer-messages {

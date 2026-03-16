@@ -68,9 +68,19 @@ export default function App() {
   const inputRef = useRef<HTMLDivElement>(null)
   // P0 perf: Map<uuid, index> for O(1) message lookups during streaming
   const msgIndexRef = useRef<Map<string, number>>(new Map())
+  // Flag: set to true when loading history so the next messages commit triggers resetToBottom
+  const pendingScrollToEnd = useRef(false)
   
   // ── Sticky auto-scroll: all logic lives in the hook ──
-  const { scrollContainerRef, messagesEndRef, handleScroll, scrollToBottom } = useChatScroll()
+  const { scrollContainerRef, messagesEndRef, handleScroll, scrollToBottom, resetToBottom } = useChatScroll()
+
+  // Reactive scroll-to-end: fires after React commits state from loadHistory
+  useEffect(() => {
+    if (pendingScrollToEnd.current && messages.length > 0) {
+      pendingScrollToEnd.current = false
+      resetToBottom()
+    }
+  }, [messages, resetToBottom])
 
   // Helper: refresh session list from backend (throttled)
   const lastRefreshRef = useRef(0)
@@ -99,11 +109,13 @@ export default function App() {
         msgIndexRef.current = idx
         return msgs
       })
+      // Signal: next messages useEffect will snap to bottom after React commits
+      pendingScrollToEnd.current = true
     } catch (err) {
       console.error('Failed to load history', err)
       setMessages([])
     }
-  }, [])
+  }, [resetToBottom])
 
   // Initialize: load existing sessions + health after connection is established
   useEffect(() => {
