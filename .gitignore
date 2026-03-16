@@ -1,5 +1,5 @@
 # ── Build output ──
-ngoagent
+/ngoagent
 *.exe
 
 # ── Go ──
