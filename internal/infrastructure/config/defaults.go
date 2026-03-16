@@ -71,6 +71,7 @@ cron:
 
 server:
   http_port: 8080
+  auth_token: ""               # Auto-generated on first run / 首次启动自动生成
 
 embedding:
   provider: ""           # "dashscope" | "openai" | "" (disabled)
@@ -81,6 +82,12 @@ embedding:
   # similarity_threshold: 0.85
   # min_ki_for_embedding: 30   # KI < 30: full injection; >= 30: embedding retrieval
   # top_k: 5                   # retrieve top-K relevant KIs
+
+# MCP servers are configured in ~/.ngoagent/mcp.json (CC-compatible format).
+# Use mcp.json to add/manage MCP servers. See mcp.json for format reference.
+# Inline servers below are merged at lowest priority (mcp.json wins on name collision).
+mcp:
+  servers: []
 `
 
 // DefaultUserRules is the initial user_rules.md content.
@@ -91,4 +98,11 @@ const DefaultUserRules = `你是 NGOAgent，一个运行在用户本地的自主
 - 先查资料再问问题，带着答案来而不是带着疑问来
 - 不确定就说不确定，绝不编造 API、库或数据
 - 简洁直接——跳过客套，直接干活
+`
+
+// DefaultMCPJSON is the initial mcp.json content for bootstrap.
+// CC-compatible format: servers as a named map with command/args/env.
+const DefaultMCPJSON = `{
+  "servers": {}
+}
 `

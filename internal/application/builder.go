@@ -275,14 +275,16 @@ func Build() (*App, error) {
 
 	cfgMgr.Subscribe("mcp", func(old, new *config.Config) {
 		log.Println("[hot-reload] MCP config changed, reloading servers")
-		var configs []mcp.ServerConfig
+		var inline []mcp.ServerConfig
 		for _, s := range new.MCP.Servers {
-			configs = append(configs, mcp.ServerConfig{
+			inline = append(inline, mcp.ServerConfig{
 				Name:    s.Name,
 				Command: s.Command,
 				Args:    s.Args,
+				Env:     s.Env,
 			})
 		}
+		configs := mcp.LoadMCPConfigs(config.HomeDir(), inline)
 		mcpMgr.Reload(context.Background(), configs)
 	})
 
@@ -335,15 +337,17 @@ func Build() (*App, error) {
 	// Start skill file watcher
 	skillMgr.StartWatcher(stopCh)
 
-	// Start MCP servers
-	var mcpConfigs []mcp.ServerConfig
+	// Load MCP servers: merge mcp.json files with inline config.yaml entries
+	var inlineMCP []mcp.ServerConfig
 	for _, s := range cfg.MCP.Servers {
-		mcpConfigs = append(mcpConfigs, mcp.ServerConfig{
+		inlineMCP = append(inlineMCP, mcp.ServerConfig{
 			Name:    s.Name,
 			Command: s.Command,
 			Args:    s.Args,
+			Env:     s.Env,
 		})
 	}
+	mcpConfigs := mcp.LoadMCPConfigs(config.HomeDir(), inlineMCP)
 	if len(mcpConfigs) > 0 {
 		mcpMgr.StartAll(context.Background(), mcpConfigs)
 		// Auto-register MCP-discovered tools into agent registry
@@ -372,7 +376,7 @@ func Build() (*App, error) {
 		brainDir,
 		kiStore,
 	)
-	srv := server.NewServer(agentAPI, addr)
+	srv := server.NewServer(agentAPI, addr, cfg.Server.AuthToken)
 
 	// gRPC server — defaults to :19998
 	grpcAddr := ":19998"

@@ -1,3 +1,4 @@
+import { authFetch } from '../chat/api'
 import { useState, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -48,7 +49,7 @@ export function SkillMCPManager({ onNavigateDetail }: SkillMCPManagerProps) {
   const loadSkills = useCallback(async () => {
     setSkillsLoading(true)
     try {
-      const res = await fetch(`${API_BASE}/api/v1/skills/list`)
+      const res = await authFetch(`${API_BASE}/api/v1/skills/list`)
       if (!res.ok) return
       const data = await res.json()
       setSkills(data.skills || [])
@@ -60,8 +61,8 @@ export function SkillMCPManager({ onNavigateDetail }: SkillMCPManagerProps) {
     setMcpLoading(true)
     try {
       const [srvRes, toolsRes] = await Promise.all([
-        fetch(`${API_BASE}/api/v1/mcp/servers`),
-        fetch(`${API_BASE}/api/v1/mcp/tools`)
+        authFetch(`${API_BASE}/api/v1/mcp/servers`),
+        authFetch(`${API_BASE}/api/v1/mcp/tools`)
       ])
       if (srvRes.ok) {
         const d = await srvRes.json()
@@ -96,7 +97,7 @@ export function SkillMCPManager({ onNavigateDetail }: SkillMCPManagerProps) {
     setSelectedSkill(name)
     setContentLoading(true)
     try {
-      const res = await fetch(`${API_BASE}/api/v1/skills/read?name=${encodeURIComponent(name)}`)
+      const res = await authFetch(`${API_BASE}/api/v1/skills/read?name=${encodeURIComponent(name)}`)
       if (!res.ok) throw new Error()
       const data = await res.json()
       setSkillContent(data.content || '')
@@ -105,13 +106,13 @@ export function SkillMCPManager({ onNavigateDetail }: SkillMCPManagerProps) {
   }
 
   const refreshSkills = async () => {
-    await fetch(`${API_BASE}/api/v1/skills/refresh`, { method: 'POST' })
+    await authFetch(`${API_BASE}/api/v1/skills/refresh`, { method: 'POST' })
     loadSkills()
   }
 
   const deleteSkill = async (name: string) => {
     if (!confirm(`确认删除 Skill「${name}」？此操作不可恢复。`)) return
-    const res = await fetch(`${API_BASE}/api/v1/skills/delete`, {
+    const res = await authFetch(`${API_BASE}/api/v1/skills/delete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),

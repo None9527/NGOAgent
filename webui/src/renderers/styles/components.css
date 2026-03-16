@@ -471,6 +471,13 @@
   color: #e5e5e5;
 }
 
+@media (max-width: 600px) {
+  .composer-input {
+    padding: 12px 16px 6px 16px;
+    font-size: 14px;
+  }
+}
+
 .composer-input:empty::before,
 .composer-input[data-empty="true"]::before {
   content: attr(data-placeholder);
@@ -502,6 +509,16 @@
   padding: 4px 16px 14px 16px;
   color: #a3a3a3;
   border-top: none;
+}
+
+@media (max-width: 600px) {
+  .composer-actions {
+    padding: 4px 12px 10px 12px;
+    gap: 6px;
+  }
+  .composer-actions button {
+    transform: scale(0.95);
+  }
 }
 
 .composer-overlay {

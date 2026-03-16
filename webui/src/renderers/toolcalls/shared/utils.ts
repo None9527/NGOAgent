@@ -25,9 +25,14 @@ export const buildToolCallContent = (
 ): ToolCallContent[] => {
   const result: ToolCallContent[] = [];
   if (output) {
+    // P1 perf: truncate very large outputs to prevent DOM bloat
+    const MAX_OUTPUT = 50_000; // ~50KB, keeps React state lean
+    const text = output.length > MAX_OUTPUT
+      ? output.slice(0, MAX_OUTPUT) + `\n\n… [truncated ${(output.length / 1024).toFixed(0)}KB → ${(MAX_OUTPUT / 1024).toFixed(0)}KB]`
+      : output;
     result.push({
       type: 'content',
-      content: { type: 'text', text: output },
+      content: { type: 'text', text },
     });
   }
   if (error) {

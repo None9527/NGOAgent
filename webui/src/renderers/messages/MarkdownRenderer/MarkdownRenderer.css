@@ -8,6 +8,7 @@
 
 .markdown-content {
   line-height: 1.6;
+  font-size: 15px;
   color: var(--app-primary-foreground);
 }
 

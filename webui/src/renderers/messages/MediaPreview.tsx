@@ -25,13 +25,19 @@ export function detectMediaType(path: string): MediaType {
   return 'unknown';
 }
 
-/** Convert a local path to a proxy URL */
+/** Convert a local path to a proxy URL (with auth token for img/video tags) */
 export function toProxyUrl(path: string): string {
   // Strip file:// or file:/// prefix
   let cleaned = path.replace(/^file:\/\/\/?/, '/');
   // Ensure absolute
   if (!cleaned.startsWith('/')) cleaned = '/' + cleaned;
-  return `/v1/file?path=${encodeURIComponent(cleaned)}`;
+  // Use cached token to avoid localStorage hit per render
+  const token = _cachedToken ?? ((_cachedToken = localStorage.getItem('AUTH_TOKEN') || ''), _cachedToken);
+  return `/v1/file?path=${encodeURIComponent(cleaned)}&token=${encodeURIComponent(token)}`;
+}
+let _cachedToken: string | null = null;
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', () => { _cachedToken = null; });
 }
 
 interface MediaPreviewProps {

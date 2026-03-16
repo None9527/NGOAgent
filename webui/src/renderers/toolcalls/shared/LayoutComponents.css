@@ -10,12 +10,19 @@
 .toolcall-container {
   position: relative;
   --timeline-center-offset: 15px;
-  padding-left: 30px;
+  --toolcall-padding-left: 30px;
+  padding-left: var(--toolcall-padding-left);
   padding-top: 8px;
   padding-bottom: 8px;
   user-select: text;
   align-items: flex-start;
   border-radius: 6px;
+}
+
+@media (max-width: 600px) {
+  .toolcall-container {
+    --toolcall-padding-left: 20px;
+  }
 }
 
 /*
@@ -68,6 +75,20 @@
   font-size: 10px;
   line-height: 1.5;
   z-index: 1;
+}
+
+@media (max-width: 600px) {
+  .toolcall-container::after {
+    left: 8px;
+  }
+
+  .toolcall-container.toolcall-status-default::before,
+  .toolcall-container.toolcall-status-success::before,
+  .toolcall-container.toolcall-status-error::before,
+  .toolcall-container.toolcall-status-warning::before,
+  .toolcall-container.toolcall-status-loading::before {
+    left: 4px;
+  }
 }
 
 /* Status colors */

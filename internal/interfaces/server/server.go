@@ -97,17 +97,54 @@ type API interface {
 
 // Server is the HTTP/SSE server for NGOAgent.
 type Server struct {
-	api  API
-	addr string
-	mu   sync.Mutex
+	api        API
+	addr       string
+	authToken  string // Bearer token for API auth (empty = no auth)
+	mu         sync.Mutex
+	runTracker *service.RunTracker
 }
 
 // NewServer creates an HTTP server with the unified API.
-func NewServer(api API, addr string) *Server {
+func NewServer(api API, addr string, authToken string) *Server {
 	return &Server{
-		api:  api,
-		addr: addr,
+		api:        api,
+		addr:       addr,
+		authToken:  authToken,
+		runTracker: service.NewRunTracker(),
 	}
+}
+
+// authMiddleware validates Bearer token on all requests except exempted paths.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Exempt paths: health check (for connectivity detection)
+		if r.URL.Path == "/v1/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// CORS preflight always allowed
+		if r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		auth := r.Header.Get("Authorization")
+		token := ""
+		if auth != "" && strings.HasPrefix(auth, "Bearer ") {
+			token = auth[7:]
+		}
+		// Fallback: allow ?token= query param for /v1/file (img/media tags can't send headers)
+		if token == "" && r.URL.Path == "/v1/file" {
+			token = r.URL.Query().Get("token")
+		}
+		if token != s.authToken {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid or missing auth token"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Start begins listening for HTTP requests.
@@ -116,6 +153,8 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// ─── Core SSE / Chat ───
 	mux.HandleFunc("/v1/chat", s.handleChat)
+	mux.HandleFunc("/v1/chat/reconnect", s.handleReconnect)
+	mux.HandleFunc("/v1/chat/status", s.handleRunStatus)
 	mux.HandleFunc("/v1/approve", s.handleApprove)
 	mux.HandleFunc("/v1/stop", s.handleStop)
 
@@ -160,9 +199,13 @@ func (s *Server) Start(ctx context.Context) error {
 	// ─── REST API routes ───
 	s.registerAPIRoutes(mux)
 
+	// Auth middleware — always enforced (token auto-generated on first run)
+	handler := s.authMiddleware(mux)
+	log.Printf("Auth token enforced — all API requests require Bearer token")
+
 	srv := &http.Server{
 		Addr:              s.addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		BaseContext:       func(l net.Listener) context.Context { return ctx },
 	}
@@ -223,8 +266,96 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if sid := s.api.SessionID(req.SessionID); sid != "" {
-		w.Header().Set("X-Session-Id", sid)
+	// Resolve session
+	req.SessionID = s.api.SessionID(req.SessionID)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher.Flush()
+
+	// Create SSE writer with disconnect detection
+	var sseMu sync.Mutex
+	disconnected := false
+	sseWriter := func(payload []byte) bool {
+		sseMu.Lock()
+		defer sseMu.Unlock()
+		if disconnected {
+			return false
+		}
+		_, err := fmt.Fprintf(w, "data: %s\n\n", payload)
+		if err != nil {
+			disconnected = true
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	// BufferedDelta: survives SSE disconnection, supports reconnect
+	buf := service.NewBufferedDelta(sseWriter)
+	delta := buf.MakeDelta()
+
+	// Register in RunTracker so reconnect can find it
+	s.runTracker.Register(req.SessionID, buf)
+
+	// Detached context: agent loop MUST survive HTTP disconnect.
+	// Use server's base context (from Start()), not r.Context().
+	runCtx := context.Background()
+
+	// Run agent loop asynchronously — SSE connection may close before run completes
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := s.api.ChatStream(runCtx, req.SessionID, req.Message, delta); err != nil {
+			if err.Error() == "agent is busy" {
+				data, _ := json.Marshal(map[string]string{"type": "error", "message": "agent is busy"})
+				buf.MakeDelta().OnError(fmt.Errorf("%s", string(data)))
+			} else {
+				log.Printf("[handleChat] run error: %v", err)
+			}
+			buf.MarkDone()
+		}
+	}()
+
+	// Wait until either the run finishes or the client disconnects
+	select {
+	case <-done:
+		// Run completed while SSE still connected — send [DONE]
+		sseMu.Lock()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		sseMu.Unlock()
+	case <-r.Context().Done():
+		// Client disconnected — BufferedDelta auto-detects write failure
+		// and switches to buffer mode. Run continues in background.
+		log.Printf("[handleChat] SSE client disconnected, run continues in background (session=%s)", req.SessionID)
+		buf.Detach()
+	}
+}
+
+// handleReconnect resumes an SSE stream for an active run.
+// GET /v1/chat/reconnect?session_id=xxx&last_seq=0
+func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+
+	run, ok := s.runTracker.Get(sessionID)
+	if !ok {
+		// No active run — return 404 so frontend knows not to retry
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "no active run for session"})
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -232,85 +363,70 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	flusher.Flush()
 
-	var sseMu sync.Mutex
-	var sseCount int
-	writeSSE := func(payload []byte) {
-		sseMu.Lock()
-		sseCount++
-		log.Printf("[SSE#%d] %s", sseCount, string(payload))
-		fmt.Fprintf(w, "data: %s\n\n", payload)
-		flusher.Flush()
-		sseMu.Unlock()
+	// Parse last sequence ID for dedup
+	lastSeq := 0
+	if v := r.URL.Query().Get("last_seq"); v != "" {
+		fmt.Sscanf(v, "%d", &lastSeq)
 	}
 
-	// Protocol-specific Delta sink — only SSE serialization, no kernel logic
-	delta := &service.Delta{
-		OnTextFunc: func(text string) {
-			data, _ := json.Marshal(map[string]string{"type": "text_delta", "content": text})
-			writeSSE(data)
-		},
-		OnReasoningFunc: func(text string) {
-			data, _ := json.Marshal(map[string]string{"type": "thinking", "content": text})
-			writeSSE(data)
-		},
-		OnToolStartFunc: func(callID string, name string, args map[string]any) {
-			data, _ := json.Marshal(map[string]any{"type": "tool_start", "call_id": callID, "name": name, "args": args})
-			writeSSE(data)
-		},
-		OnToolResultFunc: func(callID, name, output string, err error) {
-			errStr := ""
-			if err != nil {
-				errStr = err.Error()
-			}
-			data, _ := json.Marshal(map[string]any{"type": "tool_result", "call_id": callID, "name": name, "output": output, "error": errStr})
-			writeSSE(data)
-		},
-		OnCompleteFunc: func() {
-			data, _ := json.Marshal(map[string]string{"type": "step_done"})
-			writeSSE(data)
-		},
-		OnErrorFunc: func(err error) {
-			data, _ := json.Marshal(map[string]string{"type": "error", "message": err.Error()})
-			writeSSE(data)
-		},
-		OnProgressFunc: func(taskName, status, summary, mode string) {
-			data, _ := json.Marshal(map[string]any{
-				"type": "progress", "task_name": taskName,
-				"status": status, "summary": summary, "mode": mode,
-			})
-			writeSSE(data)
-		},
-		OnPlanReviewFunc: func(message string, paths []string) {
-			data, _ := json.Marshal(map[string]any{
-				"type": "plan_review", "message": message, "paths": paths,
-			})
-			writeSSE(data)
-		},
-		OnApprovalRequestFunc: func(approvalID, toolName string, args map[string]any, reason string) {
-			data, _ := json.Marshal(map[string]any{
-				"type": "approval_request", "approval_id": approvalID,
-				"tool_name": toolName, "args": args, "reason": reason,
-			})
-			writeSSE(data)
-		},
-	}
-
-	// Unified API call — all kernel operations (LoopPool, acquire, run) handled by API layer
-	if err := s.api.ChatStream(r.Context(), req.SessionID, req.Message, delta); err != nil {
-		if err.Error() == "agent is busy" {
-			// Too late for HTTP status (headers already sent), send error as SSE event
-			data, _ := json.Marshal(map[string]string{"type": "error", "message": "agent is busy"})
-			writeSSE(data)
-		} else {
-			log.Printf("[handleChat] run error: %v", err)
+	// Create new SSE writer for reconnected client
+	var mu sync.Mutex
+	disconnected := false
+	writer := func(payload []byte) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if disconnected {
+			return false
 		}
+		_, err := fmt.Fprintf(w, "data: %s\n\n", payload)
+		if err != nil {
+			disconnected = true
+			return false
+		}
+		flusher.Flush()
+		return true
 	}
 
-	// Final [DONE] — only after entire run completes
-	sseMu.Lock()
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	flusher.Flush()
-	sseMu.Unlock()
+	// Attach — replays buffered events and then streams live
+	replayed := run.Buffer.Attach(writer, lastSeq)
+	log.Printf("[reconnect] Replayed %d events for session %s (from seq %d)", replayed, sessionID, lastSeq)
+
+	// If run already done, send [DONE] immediately after replay
+	if run.Buffer.IsDone() {
+		mu.Lock()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		mu.Unlock()
+		return
+	}
+
+	// Block until client disconnects (run completion sends step_done via BufferedDelta)
+	<-r.Context().Done()
+	run.Buffer.Detach()
+	log.Printf("[reconnect] Client disconnected again for session %s", sessionID)
+}
+
+// handleRunStatus returns whether a session has an active run.
+// GET /v1/chat/status?session_id=xxx
+func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	run, ok := s.runTracker.Get(sessionID)
+	if !ok {
+		json.NewEncoder(w).Encode(map[string]any{"active": false})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"active":   true,
+		"done":     run.Buffer.IsDone(),
+		"last_seq": run.Buffer.LastSeqID(),
+	})
 }
 
 // handleApprove processes approval/denial of pending tool calls.

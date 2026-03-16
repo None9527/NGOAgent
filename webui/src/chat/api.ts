@@ -5,18 +5,66 @@
 
 import type { HealthInfo, SessionInfo, SessionListResponse, HistoryMessage } from './types'
 
-const API_BASE = '' // Vite proxy handles /v1, /api → localhost:19997
+/**
+ * Returns the stored auth token from localStorage.
+ * Empty string means no authentication.
+ */
+export function getAuthToken(): string {
+  try {
+    const token = localStorage.getItem('AUTH_TOKEN')
+    if (token && token.trim()) return token.trim()
+  } catch { /* ignore */ }
+  return ''
+}
+
+/** Build auth headers: merges Authorization if token exists */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...extra }
+  const token = getAuthToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  return headers
+}
+
+/**
+ * Returns the current API base URL.
+ * In browser/PWA/APK mode: reads `SERVER_URL` from localStorage.
+ * Falls back to '' (relative URL, works with Vite dev proxy).
+ */
+export function getApiBase(): string {
+  try {
+    const stored = localStorage.getItem('SERVER_URL')
+    if (stored && stored.trim()) return stored.trim().replace(/\/$/, '')
+  } catch { /* ignore SSR or private mode */ }
+  return '' // relative — Vite proxy handles /v1, /api → localhost:19997
+}
+
+/**
+ * Drop-in replacement for fetch() that auto-injects Authorization header.
+ * Use this instead of raw fetch() in all components.
+ */
+export function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers)
+  const token = getAuthToken()
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+  return fetch(input, { ...init, headers })
+}
+
+const API_BASE = '' // Legacy export — prefer getApiBase()
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`)
+  const res = await fetch(`${getApiBase()}${path}`, {
+    headers: authHeaders(),
+  })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
 
 async function post<T>(path: string, body: unknown = {}): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${getApiBase()}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -41,3 +89,14 @@ export const api = {
 }
 
 export { API_BASE }
+
+/**
+ * Build a proxied file URL with token query param.
+ * Needed because <img>/<video> tags can't send Authorization headers.
+ */
+export function fileUrl(path: string): string {
+  const cleaned = path.replace(/^file:\/\//, '')
+  const token = getAuthToken()
+  const base = getApiBase()
+  return `${base}/v1/file?path=${encodeURIComponent(cleaned)}&token=${encodeURIComponent(token)}`
+}

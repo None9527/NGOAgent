@@ -4,53 +4,48 @@ export interface WelcomeScreenProps {
   onSuggestionClick: (text: string) => void;
 }
 
-const SUGGESTIONS = [
-  { title: 'Help me debug', text: 'Help me debug a React application error', icon: '🐛' },
-  { title: 'Analyze codebase', text: 'Analyze this project structure and explain its architecture', icon: '🏗️' },
-  { title: 'Write a test', text: 'Write a unit test for a utility function', icon: '🧪' },
-  { title: 'Refactor code', text: 'Help me refactor a complex React component', icon: '✨' },
-];
-
-export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onSuggestionClick }) => {
+export const WelcomeScreen: React.FC<WelcomeScreenProps> = () => {
   return (
-    <div className="flex-1 flex flex-col items-center justify-center p-4 relative overflow-hidden">
-      {/* Background gradient glow - softer and more ambient */}
+    <div className="flex-1 flex flex-col items-center justify-center p-4 relative overflow-hidden select-none">
+      {/* Background gradient glow */}
       <div className="absolute inset-0 bg-gradient-to-br from-white/[0.02] via-transparent to-transparent pointer-events-none" />
-      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[500px] h-[500px] bg-white/[0.01] rounded-full blur-[100px] pointer-events-none" />
-      
-      <div className="relative z-10 flex flex-col items-center">
-        <div className="w-16 h-16 mb-6 rounded-2xl bg-white/[0.03] backdrop-blur-2xl flex items-center justify-center text-white/80 text-3xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] border border-white/10 ring-1 ring-white/5 transition-transform duration-500 hover:scale-[1.05] hover:shadow-[0_16px_48px_rgba(255,255,255,0.05)] cursor-default">
-          ⌘
-        </div>
-        <h1 className="text-4xl font-bold tracking-tight text-white mb-3">
+      <div className="absolute top-1/3 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-white/[0.015] rounded-full blur-[120px] pointer-events-none" />
+
+      <div className="relative z-10 flex flex-col items-center max-w-xl">
+        {/* Brand Identity */}
+        <h1 className="text-6xl md:text-7xl font-black tracking-[-0.05em] text-white mb-6"
+            style={{ textShadow: '0 0 80px rgba(255,255,255,0.08)' }}>
           NGOAgent
         </h1>
-        <p className="text-lg text-gray-400 font-medium mb-12">
-          Your Intelligent Copilot
+
+        {/* Tagline */}
+        <p className="text-lg text-gray-400 font-medium mb-10 tracking-wide text-center leading-relaxed">
+          Autonomous AI Agent · 自主智能体
         </p>
-        
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl w-full">
-          {SUGGESTIONS.map((suggestion, idx) => (
-            <button
-              key={idx}
-              onClick={() => onSuggestionClick(suggestion.text)}
-              className="group flex flex-col text-left p-6 rounded-[24px] bg-white/[0.02] hover:bg-white/[0.04] border border-white/[0.04] hover:border-white/10 transition-all duration-500 hover:-translate-y-1 active:scale-[0.98] shadow-sm hover:shadow-[0_20px_40px_-15px_rgba(0,0,0,0.7),0_0_30px_rgba(255,255,255,0.03)] backdrop-blur-xl"
+
+        {/* Feature pills */}
+        <div className="flex flex-wrap justify-center gap-3 mb-10">
+          {[
+            '🧠 Multi-Model LLM',
+            '🔧 30+ Built-in Tools',
+            '🔌 MCP Protocol',
+            '🛡️ Security Guard',
+            '📡 SSE Reconnect',
+            '🧩 Skill 插件生态',
+          ].map((label) => (
+            <span
+              key={label}
+              className="px-4 py-1.5 rounded-full text-xs font-medium text-gray-400 bg-white/[0.04] border border-white/[0.06] backdrop-blur-sm"
             >
-              <div className="text-2xl mb-4 opacity-80 group-hover:opacity-100 transition-opacity duration-300">{suggestion.icon}</div>
-              <div className="font-semibold text-gray-200 text-sm mb-2 transition-colors">
-                {suggestion.title}
-              </div>
-              <div className="text-[13px] text-gray-500 leading-relaxed">
-                {suggestion.text}
-              </div>
-            </button>
+              {label}
+            </span>
           ))}
         </div>
-        
-        <div className="mt-12 flex items-center gap-3 text-xs text-gray-500 font-medium tracking-wide">
-          <span className="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 shadow-sm backdrop-blur-sm">⌘K</span>
-          <span>Open Command Palette</span>
-        </div>
+
+        {/* Description */}
+        <p className="text-sm text-gray-500 text-center leading-relaxed max-w-md">
+          DDD 架构 · 10 态状态机 Agent Loop · 多会话并发 · Brain 工件系统 · 知识库语义检索 · Cron 定时任务
+        </p>
       </div>
     </div>
   );

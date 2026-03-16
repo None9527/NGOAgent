@@ -1,3 +1,4 @@
+import { authFetch } from '../chat/api'
 import { useState, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -52,7 +53,7 @@ export function CronManager({ onNavigateDetail }: CronManagerProps) {
   const loadJobs = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch(`${API_BASE}/api/v1/cron/list`)
+      const res = await authFetch(`${API_BASE}/api/v1/cron/list`)
       if (!res.ok) return
       const data = await res.json()
       setJobs(data.jobs || [])
@@ -78,7 +79,7 @@ export function CronManager({ onNavigateDetail }: CronManagerProps) {
     setLogContent(null)
     setLogFile(null)
     try {
-      const res = await fetch(`${API_BASE}/api/v1/cron/logs?name=${encodeURIComponent(jobName)}`)
+      const res = await authFetch(`${API_BASE}/api/v1/cron/logs?name=${encodeURIComponent(jobName)}`)
       if (!res.ok) throw new Error('fail')
       const data = await res.json()
       setLogEntries(data.logs || [])
@@ -90,7 +91,7 @@ export function CronManager({ onNavigateDetail }: CronManagerProps) {
     setLogFile(file)
     setLogContentLoading(true)
     try {
-      const res = await fetch(`${API_BASE}/api/v1/cron/log/read?name=${encodeURIComponent(jobName)}&file=${encodeURIComponent(file)}`)
+      const res = await authFetch(`${API_BASE}/api/v1/cron/log/read?name=${encodeURIComponent(jobName)}&file=${encodeURIComponent(file)}`)
       if (!res.ok) throw new Error('fail')
       const data = await res.json()
       setLogContent(data.content || '')
@@ -102,7 +103,7 @@ export function CronManager({ onNavigateDetail }: CronManagerProps) {
     if (!newName || !newSchedule || !newPrompt) return
     setCreating(true)
     try {
-      const res = await fetch(`${API_BASE}/api/v1/cron/create`, {
+      const res = await authFetch(`${API_BASE}/api/v1/cron/create`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: newName, schedule: newSchedule, prompt: newPrompt })
       })
@@ -116,7 +117,7 @@ export function CronManager({ onNavigateDetail }: CronManagerProps) {
 
   const deleteJob = async (name: string) => {
     if (!confirm(`删除定时任务 "${name}" 及其所有日志？`)) return
-    await fetch(`${API_BASE}/api/v1/cron/delete`, {
+    await authFetch(`${API_BASE}/api/v1/cron/delete`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name })
     })
@@ -125,7 +126,7 @@ export function CronManager({ onNavigateDetail }: CronManagerProps) {
 
   const toggleJob = async (name: string, enabled: boolean) => {
     const endpoint = enabled ? 'disable' : 'enable'
-    await fetch(`${API_BASE}/api/v1/cron/${endpoint}`, {
+    await authFetch(`${API_BASE}/api/v1/cron/${endpoint}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name })
     })
@@ -133,7 +134,7 @@ export function CronManager({ onNavigateDetail }: CronManagerProps) {
   }
 
   const runNow = async (name: string) => {
-    await fetch(`${API_BASE}/api/v1/cron/run`, {
+    await authFetch(`${API_BASE}/api/v1/cron/run`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name })
     })

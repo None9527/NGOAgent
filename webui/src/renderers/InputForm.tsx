@@ -55,6 +55,8 @@ export interface FileItem {
   previewUrl?: string;
 }
 
+import { authFetch } from '../chat/api';
+
 /** Upload a file to the backend, returns FileItem on success */
 const uploadFileToServer = async (file: File): Promise<FileItem> => {
   const id = `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -78,7 +80,7 @@ const uploadFileToServer = async (file: File): Promise<FileItem> => {
   };
 
   try {
-    const resp = await fetch('/v1/upload', { method: 'POST', body: formData });
+    const resp = await authFetch('/v1/upload', { method: 'POST', body: formData });
     if (!resp.ok) throw new Error(`Upload failed: ${resp.statusText}`);
     const data = await resp.json();
     item.path = data.path;

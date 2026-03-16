@@ -202,10 +202,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onNewSession,
   onDeleteSession,
   onRenameSession,
-  onOpenHubTab,
-  onOpenSettings
+  onOpenHubTab: _onOpenHubTab, // reserved — tools section commented out
+  onOpenSettings: _onOpenSettings // reserved — moved to TopNavbar gear icon
 }: SidebarProps) => {
-  const [isToolsExpanded, setIsToolsExpanded] = useState(false)
+  // isToolsExpanded removed — tools section is commented out
 
   // cron sessions shown in dedicated management page — hidden here
   const visible = [...sessions.filter(s => s.channel !== 'cron')]
@@ -225,7 +225,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="fixed inset-0 bg-black/50 z-20 md:hidden" onClick={onToggle} />
       )}
 
-      <div className={`fixed md:relative flex flex-col h-full glass-panel border-l-0 border-t-0 border-b-0 w-[280px] shrink-0 z-30
+      <div className={`fixed md:relative flex flex-col h-full glass-panel border-l-0 border-t-0 border-b-0 w-[240px] md:w-[280px] shrink-0 z-30
           transition-transform duration-300 ease-in-out
           ${isOpen ? 'translate-x-0' : '-translate-x-full md:hidden'}`}>
 
@@ -278,8 +278,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           ))}
         </div>
 
-        {/* Global Tools Section */}
-        <div className="mt-4 px-2 space-y-0.5">
+        {/* 工具区 — reserved for future use */}
+        {/* <div className="mt-4 px-2 space-y-0.5">
           <button 
             onClick={() => setIsToolsExpanded(!isToolsExpanded)}
             className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-white/5 rounded-md transition-colors group cursor-pointer"
@@ -294,7 +294,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </button>
           
           <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isToolsExpanded ? 'max-h-[200px] opacity-100 mt-1' : 'max-h-0 opacity-0'}`}>
-            {/* Intelligence Hub Buttons */}
             <button onClick={() => onOpenHubTab('brain')} className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-400 hover:text-gray-200 hover:bg-white/5 rounded-lg transition-colors group">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-500 group-hover:text-blue-400 transition-colors">
                 <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/>
@@ -336,9 +335,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span className="flex-1 text-left">Skill/MCP (扩展)</span>
             </button>
           </div>
-        </div>
-        {/* Global Settings */}
-        <div className="p-3 mt-auto mb-2 border-t border-white/[0.04]">
+        </div> */}
+        {/* Global Settings — reserved for future user/account system */}
+        {/* <div className="p-3 mt-auto mb-2 border-t border-white/[0.04]">
           <button onClick={onOpenSettings}
             className="flex items-center gap-3 w-full p-2.5 rounded-lg hover:bg-white/5 transition-all text-sm group"
             style={{ color: '#a3a3a3' }}>
@@ -347,7 +346,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
             <div className="truncate font-medium group-hover:text-gray-200 transition-colors tracking-wide">设置 (Settings)</div>
           </button>
-        </div>
+        </div> */}
       </div>
     </>
   )

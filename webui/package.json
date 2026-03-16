@@ -10,6 +10,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@capacitor/android": "^8.2.0",
+    "@capacitor/cli": "^8.2.0",
+    "@capacitor/core": "^8.2.0",
     "@types/markdown-it": "^14.1.2",
     "markdown-it": "^14.1.1",
     "react": "^19.2.0",

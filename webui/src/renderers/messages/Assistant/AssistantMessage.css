@@ -11,10 +11,17 @@
 .assistant-message-container {
   position: relative;
   --timeline-center-offset: 13px;
-  padding-left: 30px;
+  --assistant-message-padding-left: 30px;
+  padding-left: var(--assistant-message-padding-left);
   padding-top: 8px;
   padding-bottom: 8px;
   border-radius: 6px;
+}
+
+@media (max-width: 600px) {
+  .assistant-message-container {
+    --assistant-message-padding-left: 20px;
+  }
 }
 
 /*
@@ -76,6 +83,20 @@
   bottom: 0;
   width: 1px;
   background-color: var(--app-primary-border-color, rgba(255, 255, 255, 0.15));
+}
+
+@media (max-width: 600px) {
+  .assistant-message-container::after {
+    left: 8px;
+  }
+  
+  .assistant-message-container.assistant-message-default::before,
+  .assistant-message-container.assistant-message-success::before,
+  .assistant-message-container.assistant-message-error::before,
+  .assistant-message-container.assistant-message-warning::before,
+  .assistant-message-container.assistant-message-loading::before {
+    left: 4px;
+  }
 }
 
 /* First item in sequence: connector starts from bullet center */

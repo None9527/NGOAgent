@@ -8,10 +8,16 @@
  */
 
 import type { FC } from 'react';
-import { useMemo, useState, useCallback } from 'react';
+import { memo, useMemo, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { CollapsibleFileContent } from './CollapsibleFileContent.js';
 import '../messages/MarkdownRenderer/MarkdownRenderer.css';
+
+// P1 perf: cached auth token
+let _cachedToken: string | null = null;
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', () => { _cachedToken = null; });
+}
 
 export interface FileContext {
   fileName: string;
@@ -47,7 +53,7 @@ export interface UserMessageProps {
   fileContext?: FileContext;
 }
 
-export const UserMessage: FC<UserMessageProps> = ({
+export const UserMessage: FC<UserMessageProps> = memo(({
   content,
   timestamp: _timestamp,
   onFileClick,
@@ -84,14 +90,15 @@ export const UserMessage: FC<UserMessageProps> = ({
         document.body
       )}
 
-      <div className="w-full flex justify-end mt-12 mb-8 relative">
-        <div className="flex flex-col items-end max-w-[85%] md:max-w-[75%]">
+      <div className="w-full flex justify-end mt-4 md:mt-12 mb-4 md:mb-8 relative">
+        <div className="flex flex-col items-end max-w-[90%] md:max-w-[75%]">
 
           {/* Attachments — SAME .media-img class as assistant messages */}
           {attachments.length > 0 && (
             <div className="markdown-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px', marginBottom: cleanContent ? '6px' : 0 }}>
               {attachments.map((att, i) => {
-                const proxyUrl = `/v1/file?path=${encodeURIComponent(att.path)}`;
+                const token = _cachedToken ?? ((_cachedToken = localStorage.getItem('AUTH_TOKEN') || ''), _cachedToken);
+                const proxyUrl = `/v1/file?path=${encodeURIComponent(att.path)}&token=${encodeURIComponent(token)}`;
                 if (att.isImage) {
                   return (
                     <img
@@ -120,7 +127,7 @@ export const UserMessage: FC<UserMessageProps> = ({
           {/* Text bubble */}
           {cleanContent && (
             <div
-              className="inline-block relative select-text leading-[1.6] font-normal bg-white/[0.04] backdrop-blur-md border border-white/[0.05] shadow-sm text-[15px]"
+              className="inline-block relative select-text leading-[1.6] font-normal bg-white/[0.04] backdrop-blur-md border border-white/[0.05] shadow-sm text-[17px]"
               style={{
                 borderRadius: attachments.some(a => a.isImage) ? '12px 12px 4px 12px' : '1.25rem 1.25rem 0.25rem 1.25rem',
                 padding: '12px 18px', color: '#ffffff', whiteSpace: 'pre-wrap',
@@ -133,7 +140,7 @@ export const UserMessage: FC<UserMessageProps> = ({
           {/* Fallback: no attachments, no parsed text */}
           {!cleanContent && attachments.length === 0 && (
             <div
-              className="inline-block relative whitespace-pre-wrap select-text leading-[1.6] font-normal bg-white/[0.04] backdrop-blur-md border border-white/[0.05] shadow-sm text-[15px]"
+              className="inline-block relative whitespace-pre-wrap select-text leading-[1.6] font-normal bg-white/[0.04] backdrop-blur-md border border-white/[0.05] shadow-sm text-[17px]"
               style={{ borderRadius: '1.25rem 1.25rem 0.25rem 1.25rem', padding: '12px 18px', color: '#ffffff' }}
             >
               <CollapsibleFileContent content={content} onFileClick={onFileClick} enableFileLinks={false} />
@@ -152,4 +159,6 @@ export const UserMessage: FC<UserMessageProps> = ({
       </div>
     </>
   );
-};
+});
+
+UserMessage.displayName = 'UserMessage';

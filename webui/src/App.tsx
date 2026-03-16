@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { ChatViewer } from './renderers/ChatViewer'
 import { InputForm } from './renderers/InputForm'
 import type { FileItem } from './renderers/InputForm'
-import { api } from './chat/api'
-import { chatStream } from './chat/streamHandler'
+import { api, getApiBase, authFetch } from './chat/api'
+import { chatStream, checkActiveRun, reconnectStream } from './chat/streamHandler'
 import { historyToMessages } from './chat/messageMapper'
 import type { ChatMessageData, HealthInfo, SessionListItem, ApprovalRequest } from './chat/types'
 import { useChatScroll } from './hooks/useChatScroll'
@@ -14,6 +14,7 @@ import { TopNavbar } from './components/TopNavbar'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { IntelligenceHub } from './components/IntelligenceHub/index'
 import { SettingsPage } from './components/SettingsPage'
+import { ConnectPage } from './components/ConnectPage'
 
 // Import styles
 import './renderers/styles/variables.css'
@@ -60,10 +61,13 @@ export default function App() {
     taskName: string; status: string; summary: string; mode: string
   } | null>(null)
   
-  const [error, setError] = useState<string | null>(null)
+  
+  const [connected, setConnected] = useState(false)
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([])
   const cancelRef = useRef<(() => void) | null>(null)
   const inputRef = useRef<HTMLDivElement>(null)
+  // P0 perf: Map<uuid, index> for O(1) message lookups during streaming
+  const msgIndexRef = useRef<Map<string, number>>(new Map())
   
   // ── Sticky auto-scroll: all logic lives in the hook ──
   const { scrollContainerRef, messagesEndRef, handleScroll, scrollToBottom } = useChatScroll()
@@ -87,15 +91,23 @@ export default function App() {
   const loadHistory = useCallback(async (sid: string) => {
     try {
       const data = await api.getHistory(sid)
-      setMessages(historyToMessages(data.messages, sid))
+      setMessages(() => {
+        const msgs = historyToMessages(data.messages, sid)
+        // Rebuild index
+        const idx = new Map<string, number>()
+        msgs.forEach((m, i) => idx.set(m.uuid, i))
+        msgIndexRef.current = idx
+        return msgs
+      })
     } catch (err) {
       console.error('Failed to load history', err)
       setMessages([])
     }
   }, [])
 
-  // Initialize: load existing sessions + health, reuse active session (don't create new)
+  // Initialize: load existing sessions + health after connection is established
   useEffect(() => {
+    if (!connected) return
     document.documentElement.classList.add('dark')
     ;(async () => {
       try {
@@ -110,14 +122,64 @@ export default function App() {
         const modelsData = await api.listModels()
         setAvailableModels(modelsData.models || [])
         // Sync mode toggles from config
-        const cfg = await fetch('/v1/config').then(r => r.json())
+        const cfg = await authFetch(`${getApiBase()}/v1/config`).then(r => r.json())
         setPlanMode(!!cfg?.agent?.planning_mode)
         setSecurityMode(cfg?.security?.mode || 'allow')
+
+        // Auto-reconnect: check if there's an active run for the current session
+        const activeSessionId = data.active
+        if (activeSessionId) {
+          const runStatus = await checkActiveRun(activeSessionId)
+          if (runStatus.active && !runStatus.done) {
+            console.log('[App] Active run detected, reconnecting SSE stream...')
+            setIsStreaming(true)
+            const handle = reconnectStream(activeSessionId, 0, {
+              onMessage: (msg) => setMessages(prev => [...prev, msg]),
+              onUpdate: (uuid, patch) => {
+                setMessages(prev => prev.map(m => {
+                  if (m.uuid !== uuid) return m
+                  if (patch.toolCall && m.toolCall) {
+                    return {
+                      ...m, ...patch,
+                      toolCall: {
+                        ...m.toolCall, ...patch.toolCall,
+                        title: patch.toolCall.title || m.toolCall.title,
+                        rawInput: patch.toolCall.rawInput || m.toolCall.rawInput,
+                        content: patch.toolCall.content && patch.toolCall.content.length > 0
+                          ? patch.toolCall.content : m.toolCall.content,
+                      },
+                    }
+                  }
+                  return { ...m, ...patch }
+                }))
+                if (patch.toolCall?.status === 'completed' && patch.toolCall?.kind) {
+                  const kind = patch.toolCall.kind as string
+                  if (['write', 'edit', 'updated_plan'].includes(kind)) {
+                    setBrainRefreshTrigger(prev => prev + 1)
+                  }
+                }
+              },
+              onToolCall: (msg) => setMessages(prev => [...prev, msg]),
+              onApproval: (req) => setPendingApprovals(prev => [...prev, req]),
+              onPlanReview: (message, paths) => setPlanReview({ message, paths }),
+              onStepDone: () => refreshSessions(),
+              onProgress: (taskName, status, summary, mode) => setTaskProgress({ taskName, status, summary, mode }),
+              onEnd: () => {
+                setIsStreaming(false)
+                setTaskProgress(null)
+                cancelRef.current = null
+                refreshSessions()
+              },
+              onError: (err) => { setIsStreaming(false); cancelRef.current = null; console.error('Reconnect error:', err) },
+            })
+            cancelRef.current = handle.cancel
+          }
+        }
       } catch (err: unknown) {
-        setError(`Cannot connect to NGOAgent at localhost:19997\n${err instanceof Error ? err.message : err}`)
+        console.error('Init failed after connect:', err)
       }
     })()
-  }, [])
+  }, [connected])
 
   const handleNewSession = async () => {
     try {
@@ -170,7 +232,7 @@ export default function App() {
       setHealth(h)
     } catch (err) {
       console.error('Failed to switch model', err)
-      setError(`Failed to switch model: ${err instanceof Error ? err.message : err}`)
+      console.error('Failed to switch model:', err)
     }
   }
 
@@ -228,30 +290,38 @@ export default function App() {
     scrollToBottom('instant') // User action: snap immediately, no animation
 
     const handle = chatStream(finalText, sid, {
-      onMessage: (msg) => setMessages(prev => [...prev, msg]),
+      onMessage: (msg) => {
+        setMessages(prev => {
+          msgIndexRef.current.set(msg.uuid, prev.length)
+          return [...prev, msg]
+        })
+      },
       onUpdate: (uuid, patch) => {
-        setMessages(prev => prev.map(m => {
-          if (m.uuid !== uuid) return m
-          // Deep merge toolCall: preserve title/rawInput from tool_start, add content/status from tool_result
+        setMessages(prev => {
+          const idx = msgIndexRef.current.get(uuid)
+          if (idx === undefined) return prev
+          const m = prev[idx]
+          if (!m) return prev
+          const next = [...prev]
+          // Deep merge toolCall
           if (patch.toolCall && m.toolCall) {
-            return {
+            next[idx] = {
               ...m, ...patch,
               toolCall: {
                 ...m.toolCall,
                 ...patch.toolCall,
-                // Keep original title if update sends empty
                 title: patch.toolCall.title || m.toolCall.title,
-                // Keep original rawInput
                 rawInput: patch.toolCall.rawInput || m.toolCall.rawInput,
-                // Merge content arrays
                 content: patch.toolCall.content && patch.toolCall.content.length > 0
                   ? patch.toolCall.content
                   : m.toolCall.content,
               },
             }
+          } else {
+            next[idx] = { ...m, ...patch }
           }
-          return { ...m, ...patch }
-        }))
+          return next
+        })
         
         // Reactive Intelligence Hub: Refresh Brain file list when a file/plan operation completes
         if (patch.toolCall?.status === 'completed' && patch.toolCall?.kind) {
@@ -262,7 +332,10 @@ export default function App() {
         }
       },
       onToolCall: (msg) => {
-        setMessages(prev => [...prev, msg])
+        setMessages(prev => {
+          msgIndexRef.current.set(msg.uuid, prev.length)
+          return [...prev, msg]
+        })
         // Reactive Intelligence Hub: Auto-open Brain tab for file/plan operations
         if (msg.toolCall && ['write', 'edit', 'updated_plan'].includes(msg.toolCall.kind)) {
           setHubTab('brain')
@@ -315,22 +388,14 @@ export default function App() {
     setTaskProgress(null)
   }, [isStreaming])
 
-  if (error) {
-    return (
-      <div className="h-screen w-full flex items-center justify-center bg-[#212121] text-red-400">
-        <div className="bg-[#2f2f2f] p-8 rounded-xl shadow-lg border border-red-900/30 max-w-lg w-full">
-          <div className="text-4xl mb-4">⚡</div>
-          <h2 className="text-xl font-bold mb-2 text-white">Connection Failed</h2>
-          <pre className="bg-black/30 p-4 rounded text-sm overflow-auto mb-4 font-mono">{error}</pre>
-          <button onClick={() => window.location.reload()} className="w-full bg-red-600 text-white rounded-lg py-3 px-4 hover:bg-red-700 transition font-medium">Retry Connection</button>
-        </div>
-      </div>
-    )
+  // Gate: show ConnectPage until authenticated
+  if (!connected) {
+    return <ConnectPage onConnected={() => setConnected(true)} />
   }
 
   const handleTogglePlanMode = async () => {
     const next = !planMode
-    await fetch('/api/v1/config', {
+    await authFetch('/api/v1/config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: 'agent.planning_mode', value: next })
     })
@@ -339,7 +404,7 @@ export default function App() {
 
   const handleToggleSecurityMode = async () => {
     const next = securityMode === 'allow' ? 'ask' : 'allow'
-    await fetch('/api/v1/config', {
+    await authFetch('/api/v1/config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: 'security.mode', value: next })
     })
@@ -375,6 +440,7 @@ export default function App() {
           availableModels={availableModels}
           currentModel={health?.model || ''}
           onModelSelect={handleModelSwitch}
+          onOpenSettings={() => setIsSettingsOpen(true)}
         />
 
         {/* Banners absolutely centered over the read-column */}
@@ -534,9 +600,11 @@ export default function App() {
         )}
         {/* ── Scrollable Chat Area ── */}
         {/* The hook's MutationObserver + ResizeObserver watches this container */}
-        <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 w-full overflow-y-auto scroll-smooth relative z-0">
+        {/* NOTE: Do NOT add CSS scroll-smooth here — it overrides scrollTop assignments and causes */}
+        {/* scroll lag during streaming. The hook uses scrollTo({behavior:'smooth'}) only for explicit user scrolls. */}
+        <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 w-full overflow-y-auto relative z-0">
           {/* Reading Column Container */}
-          <div className="w-full max-w-4xl mx-auto flex flex-col min-h-full pt-20 px-4 relative">
+          <div className="w-full max-w-4xl mx-auto flex flex-col min-h-full pt-10 md:pt-20 px-1 md:px-4 relative">
             {messages.length === 0 ? (
               <div className="flex-1 flex items-center justify-center">
                 <WelcomeScreen onSuggestionClick={handleSuggestionClick} />
@@ -569,7 +637,7 @@ export default function App() {
             </div>
             )}
             {/* Bottom spacer: prevents floating composer from covering last message */}
-            <div className="h-[250px] w-full flex-shrink-0 pointer-events-none" aria-hidden="true" />
+            <div className="h-[200px] md:h-[250px] w-full flex-shrink-0 pointer-events-none" aria-hidden="true" />
             {/* Scroll anchor: hook's observers push scrollTop to reach here */}
             <div ref={messagesEndRef} className="h-px w-full" aria-hidden="true" />
           </div>
@@ -577,7 +645,7 @@ export default function App() {
         {/* Floating Composer Container (Anchored to main bounds, compensated for 6px custom scrollbar width) */}
         <div className="absolute bottom-0 left-0 w-full pointer-events-none z-10 pr-[6px]" 
              style={{ background: 'linear-gradient(to bottom, transparent, rgba(0,0,0,0.5) 40%, rgba(0,0,0,0.95) 100%)' }}>
-          <div className="w-full max-w-4xl mx-auto px-4 pb-8 pt-24 pointer-events-auto">
+          <div className="w-full max-w-4xl mx-auto px-1 md:px-4 pb-2 md:pb-8 pt-10 md:pt-24 pointer-events-auto">
             <InputForm
               inputText={inputText}
               onInputChange={setInputText}

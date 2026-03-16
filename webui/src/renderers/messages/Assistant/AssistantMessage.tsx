@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { memo } from 'react';
 import type { FC } from 'react';
 import { MessageContent } from '../MessageContent.js';
 import './AssistantMessage.css';
@@ -32,7 +33,7 @@ export interface AssistantMessageProps {
  * AssistantMessage component - renders AI responses with styling
  * Supports different states: default, success, error, warning, loading
  */
-export const AssistantMessage: FC<AssistantMessageProps> = ({
+export const AssistantMessage: FC<AssistantMessageProps> = memo(({
   content,
   timestamp: _timestamp,
   onFileClick,
@@ -72,7 +73,7 @@ export const AssistantMessage: FC<AssistantMessageProps> = ({
       style={{
         width: '100%',
         alignItems: 'flex-start',
-        paddingLeft: '30px',
+        paddingLeft: 'var(--assistant-message-padding-left, 30px)',
         userSelect: 'text',
         position: 'relative',
       }}
@@ -94,4 +95,6 @@ export const AssistantMessage: FC<AssistantMessageProps> = ({
       </div>
     </div>
   );
-};
+});
+
+AssistantMessage.displayName = 'AssistantMessage';

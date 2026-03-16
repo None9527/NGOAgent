@@ -1,3 +1,4 @@
+import { authFetch } from '../chat/api'
 import React, { useState, useEffect, useCallback } from 'react'
 
 const API = ''
@@ -35,7 +36,7 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
   const loadConfig = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch(`${API}/v1/config`)
+      const res = await authFetch(`${API}/v1/config`)
       if (res.ok) setConfig(await res.json())
     } catch (err) {
       console.error('Failed to load config', err)
@@ -58,7 +59,7 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
   const setVal = async (key: string, value: any) => {
     setSaveStatus(prev => ({ ...prev, [key]: 'saving' }))
     try {
-      const res = await fetch(`${API}/api/v1/config`, {
+      const res = await authFetch(`${API}/api/v1/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key, value })
@@ -249,8 +250,8 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
                   <div className="space-y-3 bg-[#121214] border border-[#27272a] rounded-xl p-4">
                     <ReadOnlyRow label="Database Path" val={storage.db_path} />
                     <ReadOnlyRow label="Brain Domain" val={storage.brain_dir} />
-                    <ReadOnlyRow label="API Bindings" val={`HTTP: ${server.http_port} | gRPC: ${server.grpc_port}`} />
-                    <ReadOnlyRow label="Runtime Mode" val={server.mode} />
+                    <ReadOnlyRow label="API Bindings" val={`HTTP: ${server.http_port}`} />
+                    <ReadOnlyRow label="Auth Token" val={server.auth_token ? `${server.auth_token.slice(0, 8)}${'*'.repeat(8)}` : '—'} />
                   </div>
                 </FieldGroup>
               </div>
@@ -400,7 +401,7 @@ function ProviderManager({ providers, onReload, API }: { providers: ProviderDef[
   
   const removeProvider = async (name: string) => {
     if (!confirm(`Remove provider "${name}"?`)) return
-    await fetch(`${API}/api/v1/config/provider/remove`, {
+    await authFetch(`${API}/api/v1/config/provider/remove`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name })
     })
@@ -453,7 +454,7 @@ function InlineProviderForm({ API, onSuccess, onCancel }: { API: string, onSucce
       ...form,
       models: form.models.split(',').map(m => m.trim()).filter(Boolean)
     }
-    const res = await fetch(`${API}/api/v1/config/provider/add`, {
+    const res = await authFetch(`${API}/api/v1/config/provider/add`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     })
@@ -484,7 +485,7 @@ function InlineProviderForm({ API, onSuccess, onCancel }: { API: string, onSucce
 function MCPManager({ servers, onReload, API }: { servers: any[], onReload: () => void, API: string }) {
   const removeMCP = async (name: string) => {
     if (!confirm(`Remove MCP Server "${name}"?`)) return
-    await fetch(`${API}/api/v1/config/mcp/remove`, {
+    await authFetch(`${API}/api/v1/config/mcp/remove`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name })
     })

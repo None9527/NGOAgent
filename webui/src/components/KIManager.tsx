@@ -1,3 +1,4 @@
+import { authFetch } from '../chat/api'
 import { useState, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -39,7 +40,7 @@ export function KIManager({ onNavigateDetail }: KIManagerProps) {
 
   const loadItems = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/v1/ki/list`)
+      const res = await authFetch(`${API_BASE}/api/v1/ki/list`)
       if (!res.ok) return
       const data = await res.json()
       setItems(data.items || [])
@@ -55,7 +56,7 @@ export function KIManager({ onNavigateDetail }: KIManagerProps) {
     onNavigateDetail?.(item.id)
     setArtifactContents([])
     try {
-      const res = await fetch(`${API_BASE}/api/v1/ki/artifacts?id=${encodeURIComponent(item.id)}`)
+      const res = await authFetch(`${API_BASE}/api/v1/ki/artifacts?id=${encodeURIComponent(item.id)}`)
       if (!res.ok) return
       const data = await res.json()
       const files: ArtifactFile[] = data.artifacts || []
@@ -67,7 +68,7 @@ export function KIManager({ onNavigateDetail }: KIManagerProps) {
 
       await Promise.all(files.map(async (f, i) => {
         try {
-          const r = await fetch(
+          const r = await authFetch(
             `${API_BASE}/api/v1/ki/artifact/read?id=${encodeURIComponent(item.id)}&name=${encodeURIComponent(f.name)}`
           )
           const d = await r.json()
@@ -89,7 +90,7 @@ export function KIManager({ onNavigateDetail }: KIManagerProps) {
 
   const deleteKI = async (id: string) => {
     if (!confirm('确定删除此知识条目？')) return
-    await fetch(`${API_BASE}/api/v1/ki/delete`, {
+    await authFetch(`${API_BASE}/api/v1/ki/delete`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id })
     })

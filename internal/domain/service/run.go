@@ -274,14 +274,13 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 	isPlanning := a.shouldInjectPlanning(lastMsg)
 
 	// Sync planning state to Guard for step-level enforcement
+	// Cache Brain.Read results — reused in Layer 3b below (same doPrepare invocation, no writes in between)
 	planExists := false
+	taskMdExists := false
 	if a.deps.Brain != nil {
 		if _, err := a.deps.Brain.Read("plan.md"); err == nil {
 			planExists = true
 		}
-	}
-	taskMdExists := false
-	if a.deps.Brain != nil {
 		if _, err := a.deps.Brain.Read("task.md"); err == nil {
 			taskMdExists = true
 		}
@@ -341,10 +340,9 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 	}
 
 	// === Layer 3b: Planning mode + no plan.md → force reminder ===
-	if isPlanning && a.deps.Brain != nil {
-		if _, err := a.deps.Brain.Read("plan.md"); err != nil {
-			a.InjectEphemeral(prompttext.EphPlanningNoPlanReminder)
-		}
+	// Uses cached planExists from above (no disk IO needed)
+	if isPlanning && !planExists {
+		a.InjectEphemeral(prompttext.EphPlanningNoPlanReminder)
 	}
 
 	// === Layer 3c: Plan modified but not reviewed by user ===
@@ -395,6 +393,16 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 			"SkillName": skillName,
 		})
 		a.InjectEphemeral(msg)
+	}
+
+	// === Layer 4: Dynamic KI preference re-injection (every 8 steps) ===
+	// As conversation grows, system prompt tail gets pushed to mid-attention zone.
+	// Re-inject preference KI as ephemeral to maintain tail-peak attention.
+	if a.deps.KIStore != nil && steps > 0 && steps%8 == 0 {
+		prefKI := a.deps.KIStore.GeneratePreferenceSummaries()
+		if prefKI != "" {
+			a.InjectEphemeral("<preference_reminder>\n⚠️ 提醒：以下用户强制偏好仍然生效，必须遵守。\n" + prefKI + "</preference_reminder>")
+		}
 	}
 }
 
@@ -854,6 +862,8 @@ func (a *AgentLoop) doCompact() {
 
 ## learned_facts
 发现的重要架构信息、约束条件、或需要记住的决策。
+
+CRITICAL: 如果对话中包含 <preference_knowledge> 或 <semantic_knowledge> 标签内的内容，必须在 learned_facts 中完整保留，不可省略或缩写。
 
 每个维度 2-3 句话，总计不超过 500 字。`},
 		{Role: "user", Content: content.String()},

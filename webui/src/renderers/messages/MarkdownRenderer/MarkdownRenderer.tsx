@@ -13,6 +13,24 @@ import MarkdownIt from 'markdown-it';
 import type { Options as MarkdownItOptions } from 'markdown-it';
 import './MarkdownRenderer.css';
 
+// P2 perf: module-level regex constants (avoid re-compilation per render)
+const PREPROCESS_IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?)$/i;
+const PREPROCESS_MEDIA_PATH = /(?:file:\/\/)?(\/?(?:\/[\w\-. ]+)+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))(?=[\s"',;)\]|]|$)/g;
+const BACKTICK_MEDIA_RE = /`((?:file:\/\/)?\/?[^`]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))`/gi;
+
+// P1 perf: cached auth token (avoid localStorage.getItem on every render)
+let _cachedToken: string | null = null;
+function getCachedToken(): string {
+  if (_cachedToken === null) {
+    _cachedToken = localStorage.getItem('AUTH_TOKEN') || '';
+  }
+  return _cachedToken;
+}
+// Refresh cache when storage changes (login/reconnect)
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', () => { _cachedToken = null; });
+}
+
 export interface MarkdownRendererProps {
   content: string;
   onFileClick?: (filePath: string) => void;
@@ -278,13 +296,11 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
    * Runs BEFORE md.render() — markdown-it handles all HTML generation natively.
    */
   const preprocessMediaPaths = (text: string): string => {
-    const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?)$/i;
-    const MEDIA_PATH = /(?:file:\/\/)?(\/?(?:\/[\w\-. ]+)+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))(?=[\s"',;)\]|]|$)/g;
-
     const toProxy = (p: string) => {
       let clean = p.replace(/^file:\/\/?/, '/');
       if (!clean.startsWith('/')) clean = '/' + clean;
-      return `/v1/file?path=${encodeURIComponent(clean)}`;
+      const token = getCachedToken();
+      return `/v1/file?path=${encodeURIComponent(clean)}&token=${encodeURIComponent(token)}`;
     };
 
     const seenPaths = new Set<string>();
@@ -295,11 +311,12 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       if (line.trim().startsWith('```')) { inCodeBlock = !inCodeBlock; return line; }
       if (inCodeBlock) return line;
       if (/!\[.*?\]\(.*?\)/.test(line)) return line; // already has markdown image
-      // Strip backticks wrapping media file paths so they become bare text
-      // (agent often writes `/path/image.png` which markdown-it renders as <code>)
-      line = line.replace(/`((?:file:\/\/)?\/[^`]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))`/gi, '$1');
+      // Strip backticks wrapping media file paths
+      BACKTICK_MEDIA_RE.lastIndex = 0;
+      line = line.replace(BACKTICK_MEDIA_RE, '$1');
 
-      return line.replace(MEDIA_PATH, (_match, filePath) => {
+      PREPROCESS_MEDIA_PATH.lastIndex = 0;
+      return line.replace(PREPROCESS_MEDIA_PATH, (_match, filePath) => {
         const fileName = filePath.split('/').pop() || filePath;
         const url = toProxy(filePath);
 
@@ -308,7 +325,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         seenPaths.add(filePath);
 
         // Images → markdown image syntax (markdown-it creates <img>)
-        if (IMAGE_EXTS.test(filePath)) return `![${fileName}](${url})`;
+        if (PREPROCESS_IMAGE_EXTS.test(filePath)) return `![${fileName}](${url})`;
         // Others → markdown link
         return `[${fileName}](${url})`;
       });
@@ -325,7 +342,8 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         if (rawPath.startsWith('/v1/file') || rawPath.startsWith('http')) return prefix + rawPath;
         let clean = rawPath.replace(/^file:\/\/?/, '/');
         if (!clean.startsWith('/')) clean = '/' + clean;
-        return `${prefix}/v1/file?path=${encodeURIComponent(clean)}`;
+        const token = getCachedToken();
+        return `${prefix}/v1/file?path=${encodeURIComponent(clean)}&token=${encodeURIComponent(token)}`;
       }
     );
   };

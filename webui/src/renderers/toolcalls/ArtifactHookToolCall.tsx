@@ -7,6 +7,8 @@ import type { BaseToolCallProps } from './shared/index.js';
 import { parsePlanEntries } from './UpdatedPlanToolCall.js';
 import { CheckboxDisplay } from './CheckboxDisplay.js';
 
+import { authFetch } from '../../chat/api';
+
 const API_BASE = '';
 
 /**
@@ -39,7 +41,7 @@ export const ArtifactHookToolCall: FC<BaseToolCallProps> = ({
 
     const fetchContent = async () => {
       try {
-        const res = await fetch(
+        const res = await authFetch(
           `${API_BASE}/api/v1/brain/read?session_id=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(filename)}`
         );
         if (res.ok) {

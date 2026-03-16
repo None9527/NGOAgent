@@ -1,3 +1,4 @@
+import { authFetch } from '../chat/api'
 import { useState, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -29,7 +30,7 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
   const loadArtifacts = useCallback(async () => {
     if (!sessionId) return
     try {
-      const res = await fetch(`${API_BASE}/api/v1/brain/list?session_id=${encodeURIComponent(sessionId)}`)
+      const res = await authFetch(`${API_BASE}/api/v1/brain/list?session_id=${encodeURIComponent(sessionId)}`)
       if (!res.ok) return
       const data = await res.json()
       setArtifacts(data.artifacts || [])
@@ -55,7 +56,7 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
   }, [refreshTrigger, sessionId, loadArtifacts])
 
   const loadContent = async (name: string): Promise<string> => {
-    const res = await fetch(
+    const res = await authFetch(
       `${API_BASE}/api/v1/brain/read?session_id=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`
     )
     if (!res.ok) throw new Error('Failed')
@@ -177,7 +178,7 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
     return (
       <div className="w-full h-full flex flex-col bg-transparent relative" style={{ animation: 'slideInRight 0.25s cubic-bezier(0.4, 0, 0.2, 1)' }}>
         {/* Detail Header */}
-        <div className="flex items-center gap-3 px-5 py-3 border-b border-white/[0.04] bg-white/[0.02]">
+        <div className="flex items-center gap-2 md:gap-3 px-3 md:px-5 py-2 md:py-3 border-b border-white/[0.04] bg-white/[0.02]">
           <button
             onClick={() => {
               setDetailFile(null)
@@ -213,7 +214,7 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
   return (
     <div className="w-full h-full flex flex-col bg-transparent relative" style={{ animation: 'fadeIn 0.2s ease-out' }}>
       {/* Tools / Actions Header */}
-      <div className="flex items-center justify-between px-5 py-2.5 bg-white/[0.02] border-b border-white/[0.04]">
+      <div className="flex items-center justify-between px-3 md:px-5 py-2 md:py-2.5 bg-white/[0.02] border-b border-white/[0.04]">
         <div className="flex items-center gap-2">
           {artifacts.length > 0 && (
             <span className="text-[10px] uppercase tracking-widest text-gray-500 font-semibold">{artifacts.length} Items</span>
@@ -255,7 +256,7 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
               return (
                 <div key={file.name} className="flex flex-col bg-transparent group">
                   <div
-                    className="flex items-center gap-3 px-5 py-3.5 cursor-pointer hover:bg-white/[0.03] transition-colors"
+                    className="flex items-center gap-2 md:gap-3 px-3 md:px-5 py-2.5 md:py-3.5 cursor-pointer hover:bg-white/[0.03] transition-colors"
                     onClick={(e) => toggleExpand(file.name, e)}
                   >
                     <div className="w-4 flex justify-center shrink-0">

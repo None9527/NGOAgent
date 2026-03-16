@@ -79,25 +79,29 @@ func (e *Engine) Assemble(deps Deps) (string, int) {
 	return e.prune(sections, deps.TokenBudget)
 }
 
-// buildSections creates all 15 sections.
+// buildSections creates the first-principles ordered sections.
+// Layout D: Head(Identity→CoreBehavior→Safety→PreferenceKI→UserRules) → Mid(ToolProtocol→Tooling→Skills→ProjectCtx) → Tail(ResponseFormat→SemanticKI→Runtime→Focus→Ephemeral)
 func (e *Engine) buildSections(deps Deps) []Section {
 	sections := []Section{
-		// ═══ Top: Required (never pruned) ═══
+		// ═══ Head Peak: Identity + Behavior + Constraints (HIGH attention) ═══
 		{Order: 1, Name: "Identity", Content: prompttext.Identity, Priority: 0},
-		{Order: 2, Name: "Guidelines", Content: prompttext.Guidelines, Priority: 0},
-		{Order: 3, Name: "ToolCalling", Content: prompttext.ToolCalling, Priority: 0},
-		{Order: 4, Name: "Safety", Content: prompttext.Safety, Priority: 0},
-		// ═══ Mid: Prunable in order ═══
-		{Order: 5, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
-		{Order: 6, Name: "Knowledge", Content: e.buildKnowledge(deps.PreferenceKI, deps.ConvSummary), Priority: 0},
-		{Order: 7, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
-		{Order: 8, Name: "Skills", Content: e.buildSkills(deps.SkillInfos), Priority: 3},
-		{Order: 9, Name: "UserRules", Content: e.buildUserRules(deps.UserRules), Priority: 1},
+		{Order: 2, Name: "CoreBehavior", Content: prompttext.CoreBehavior, Priority: 0},
+		{Order: 3, Name: "Safety", Content: prompttext.Safety, Priority: 0},
+		{Order: 4, Name: "PreferenceKI", Content: e.buildPreferenceKI(deps.PreferenceKI), Priority: 0},
+		{Order: 5, Name: "UserRules", Content: e.buildUserRules(deps.UserRules), Priority: 1},
+		// ═══ Mid Valley: Procedural reference (LOW attention, lookup-based) ═══
+		{Order: 6, Name: "ToolProtocol", Content: prompttext.ToolProtocol, Priority: 0},
+		{Order: 7, Name: "ToolCalling", Content: prompttext.ToolCalling, Priority: 0},
+		{Order: 8, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
+		{Order: 9, Name: "Skills", Content: e.buildSkills(deps.SkillInfos), Priority: 3},
 		{Order: 10, Name: "ProjectContext", Content: e.buildProjectContext(deps.ProjectContext), Priority: 2},
-		// ═══ Bottom: Required (U-shape) ═══
-		{Order: 13, Name: "Variants", Content: "", Priority: 3}, // Prompt variants (loaded from file)
-		{Order: 14, Name: "Focus", Content: e.buildFocus(deps.FocusFile), Priority: 2},
-		{Order: 15, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
+		{Order: 11, Name: "Variants", Content: "", Priority: 3},
+		// ═══ Tail Peak: Output format + Task Knowledge + Live Context (HIGH attention) ═══
+		{Order: 12, Name: "ResponseFormat", Content: prompttext.ResponseFormat, Priority: 0},
+		{Order: 13, Name: "SemanticKI", Content: e.buildSemanticKI(deps.ConvSummary), Priority: 0},
+		{Order: 14, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
+		{Order: 15, Name: "Focus", Content: e.buildFocus(deps.FocusFile), Priority: 2},
+		{Order: 16, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
 	}
 	return sections
 }
@@ -113,11 +117,14 @@ func (e *Engine) buildTooling(descs []ToolDesc) string {
 	if len(descs) == 0 {
 		return ""
 	}
+	// Minimal summary — full descriptions are in function calling schema.
+	// Only include critical usage notes that the schema can't express.
 	var b strings.Builder
-	b.WriteString("# Available Tools\n\n")
-	for _, td := range descs {
-		b.WriteString(fmt.Sprintf("## %s\n%s\n\n", td.Name, td.Description))
-	}
+	b.WriteString(fmt.Sprintf("You have %d tools available. Key usage notes:\n", len(descs)))
+	b.WriteString("- Prefer purpose-built tools over run_command (edit_file > sed, grep_search > grep)\n")
+	b.WriteString("- run_command: set background=true for long-running processes (servers, builds)\n")
+	b.WriteString("- run_command: working directory PERSISTS between calls\n")
+	b.WriteString("- task_plan: NEVER use write_file for plan.md/task.md/walkthrough.md\n")
 	return b.String()
 }
 
@@ -152,6 +159,31 @@ func (e *Engine) buildProjectContext(ctx string) string {
 	return "<project_context>\n" + ctx + "\n</project_context>"
 }
 
+func (e *Engine) buildPreferenceKI(preferenceKI string) string {
+	if preferenceKI == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("<preference_knowledge>\n")
+	b.WriteString("⚠️ CRITICAL: 以下是用户强制偏好，所有输出必须遵守。\n\n")
+	b.WriteString(preferenceKI)
+	b.WriteString("</preference_knowledge>")
+	return b.String()
+}
+
+func (e *Engine) buildSemanticKI(semanticKI string) string {
+	if semanticKI == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("<semantic_knowledge>\n")
+	b.WriteString("以下知识条目与当前任务相关，执行操作前请检查。\n\n")
+	b.WriteString(semanticKI)
+	b.WriteString("</semantic_knowledge>")
+	return b.String()
+}
+
+// buildKnowledge kept for backward compatibility (returns merged if both provided)
 func (e *Engine) buildKnowledge(preferenceKI, semanticKI string) string {
 	if preferenceKI == "" && semanticKI == "" {
 		return ""

@@ -34,6 +34,12 @@
   scroll-behavior: smooth;
 }
 
+@media (max-width: 600px) {
+  .chat-viewer-messages {
+    padding: 0px 2px;
+  }
+}
+
 /* Message item base styles */
 .chat-viewer-messages > * {
   position: relative;
@@ -107,6 +113,12 @@
 /* Better spacing between message groups */
 .chat-viewer-messages .user-message-container {
   margin-top: 16px;
+}
+
+@media (max-width: 600px) {
+  .chat-viewer-messages .user-message-container {
+    margin-top: 8px;
+  }
 }
 
 /* Ensure proper stacking context */

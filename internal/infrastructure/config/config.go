@@ -136,10 +136,11 @@ type EmbeddingConfig struct {
 
 // ServerConfig defines HTTP/gRPC server settings.
 type ServerConfig struct {
-	HTTPPort int    `yaml:"http_port"`
-	GRPCPort int    `yaml:"grpc_port"`
-	Mode     string `yaml:"mode"`     // debug / release
-	Timezone string `yaml:"timezone"` // "system" or IANA name like "Asia/Shanghai"
+	HTTPPort  int    `yaml:"http_port"`
+	GRPCPort  int    `yaml:"grpc_port"`
+	Mode      string `yaml:"mode"`       // debug / release
+	Timezone  string `yaml:"timezone"`   // "system" or IANA name like "Asia/Shanghai"
+	AuthToken string `yaml:"auth_token"` // Bearer token for API authentication (empty = no auth)
 }
 
 // LoadLocation returns the *time.Location for the configured timezone.
@@ -216,7 +217,8 @@ type MCPConfig struct {
 
 // MCPServerDef describes one MCP server to launch.
 type MCPServerDef struct {
-	Name    string   `yaml:"name"`
-	Command string   `yaml:"command"`
-	Args    []string `yaml:"args"`
+	Name    string            `yaml:"name"`
+	Command string            `yaml:"command"`
+	Args    []string          `yaml:"args"`
+	Env     map[string]string `yaml:"env,omitempty"` // extra environment variables injected into the subprocess
 }
