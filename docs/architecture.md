@@ -1,6 +1,6 @@
 # NGOAgent — 架构设计方案
 
-Go 语言实现的自主式 AI Agent 后端核心。
+Go 语言实现的自主式 AI Agent 后端核心 + React/TypeScript 前端 WebUI。
 
 ## 一、设计目标
 
@@ -19,7 +19,7 @@ Go 语言实现的自主式 AI Agent 后端核心。
 - ✅ Ephemeral Message 注入（task reminder, mode transition, edit verification）
 - ✅ PLANNING → EXECUTION → VERIFICATION 三模式状态机
 - ✅ KI 知识系统（全局跨会话知识蒸馏）
-- ✅ 23 核心工具（Bash, Read, Write, Edit, Glob, Grep, WebSearch, Task, Agent, Cron 等）
+- ✅ 21 核心工具（Bash, Read, Write, Edit, Glob, Grep, WebSearch, Task, Agent, Cron, Forge, Notify 等）
 - ✅ 3 层 Permission（Allow / Auto / Ask）
 - ✅ FileEditTool 的 9 种错误状态处理 + 模糊匹配降级
 - ✅ Prompt Assembly Pipeline
@@ -69,10 +69,12 @@ ngoagent/
 │       ├── server/              # HTTP Server (SSE)
 │       └── grpc/                # gRPC Server
 │
-├── webui/                       # React/TypeScript 前端
+├── webui/                       # React/TypeScript 前端 (14,700+ 行)
 ├── api/proto/                   # gRPC Protobuf 定义
 └── docs/                        # 设计文档
 ```
+
+> **代码规模**: Go 后端 ~32,500 行 / 89 文件，前端 ~14,700 行 / 80 文件。
 
 ## 四、核心接口设计（组合式，非 God interface）
 

@@ -11,7 +11,7 @@
 3. [Module 2: config](#module-2-config-internalinfrastructureconfig) — 统一配置 + 热更新
 4. [Module 3: llm](#module-3-llm-internalinfrastructurellm) — LLM Provider 路由 · 降级链
 5. [Module 4: prompt](#module-4-prompt-internalinfrastructureprompt) — 15-Section · prompttext 侧载
-6. [Module 5: tool](#module-5-tool-internalinfrastructuretool) — 21 工具 · 脚本扩展
+5. [Module 5: tool](#module-5-tool-internalinfrastructuretool) — 21 工具 · 脚本扩展
 7. [Module 6: sandbox](#module-6-sandbox-internalinfrastructuresandbox) — 进程隔离
 8. [Module 7: security](#module-7-security-internalinfrastructuresecurity) — 安全决策链
 9. [Module 8: persistence](#module-8-persistence-internalinfrastructurepersistence) — SQLite + GORM
@@ -240,7 +240,7 @@ func Bootstrap(logger *zap.Logger) error {
 }
 ```
 
-**~400 行 | 5 文件**: `manager.go`, `config.go`, `defaults.go`, `homedir.go`, `bootstrap.go`
+**~850 行 | 5 文件**: `manager.go`, `config.go`, `defaults.go`, `homedir.go`, `bootstrap.go`
 
 ---
 
@@ -637,7 +637,7 @@ sequenceDiagram
     end
 ```
 
-**~2,600 行 | 17 文件** (含 heartbeat.go, heartbeat_notifier.go)
+**~3,266 行 | 14 文件** (含 heartbeat.go, heartbeat_notifier.go)
 
 ---
 
@@ -936,7 +936,7 @@ func (e *PromptEngine) Assemble(ctx PromptContext) string {
 | Tight | 70-85% | 丢弃 Skills → Memory → Variant → Knowledge → ProjectContext |
 | Critical | > 85% | 只保留 Identity+Guidelines+Tooling+Runtime+Focus |
 
-**5 文件，825 行**: `engine.go` (253), `prompttext/prompttext.go` (342), `component.go` (123), `discovery.go` (79), `prompttext/template.go` (28)
+**5 文件，814 行**: `engine.go` (253), `prompttext/prompttext.go` (342), `component.go` (123), `discovery.go` (79), `prompttext/template.go` (28)
 
 ---
 
@@ -986,7 +986,7 @@ flowchart LR
     style Sec fill:#533483,color:#fff
 ```
 
-### 14 个内置工具
+### 21 个内置工具
 
 #### read_file
 `path` (required), `start_line`, `end_line` (optional)
@@ -1201,7 +1201,7 @@ type scriptTool struct {
 }
 ```
 
-**22 文件，2,875 行**: registry, file ops, search tools, command tools, web tools, task tools, brain/knowledge tools, notify, script, cron, mcp, agent tools
+**22 文件，3,528 行**: registry, file ops, search tools, command tools, web tools, task tools, brain/knowledge tools, notify, script, cron, mcp, agent tools
 
 ---
 
@@ -1222,7 +1222,7 @@ type ProcessManager interface {
 }
 ```
 
-**3 文件，672 行**: sandbox.go (318), shell_state.go (142), sandbox_state_test.go (212)
+**2 文件，460 行**: sandbox.go, shell_state.go
 
 ---
 
@@ -1323,7 +1323,7 @@ func (h *SecurityHook) RegisterApprovalFunc(channel string, fn ApprovalFunc)
 
 所有决策自动记录 `AuditEntry`，管理 API 可查询。
 
-**1 文件，427 行**: hook.go
+**1 文件，411 行**: hook.go
 
 ---
 
@@ -1468,7 +1468,7 @@ type CheckpointSummary struct {
 - Prompt → Brain: Assemble() 读 plan/task 注入 SectionFocus
 - **PostRunHook → Brain**: 读 checkpoint.LearnedFacts，提供给知识生命周期
 
-**2 文件，508 行**: store.go (422), store_test.go (86)
+**1 文件，422 行**: store.go
 
 ---
 
@@ -1548,7 +1548,7 @@ type Manager interface {
 }
 ```
 
-**1 文件，269 行**: manager.go
+**1 文件，282 行**: manager.go
 
 ---
 
@@ -1571,11 +1571,13 @@ type MCPServer struct {
 }
 ```
 
-流程: config 中声明 → 启动子进程 → JSON-RPC 握手 → tools/list → 包装为 `mcpTool` → 注册到 Registry
+流程: config.yaml / mcp.json 中声明 → 启动子进程 → JSON-RPC 握手 → tools/list → 包装为 `mcpTool` → 注册到 Registry
+
+配置来源: 支持 3 层配置合并（config.yaml inline → ~/.ngoagent/mcp.json → ./.mcp.json）
 
 生命周期: config 变更 → 停旧启新 | 进程崩溃 → 心跳重启 | 关闭 → SIGTERM
 
-**3 文件，305 行**: db.go (72), repository.go (139), history.go (94): `manager.go`, `server.go`, `bridge.go`
+**2 文件，936 行**: `manager.go`, `bridge.go`
 
 ---
 
@@ -1650,7 +1652,7 @@ Engine.HeartbeatRunner  → HeartbeatStore.*         心跳状态读写
 Config.Bootstrap()      → Store.Init()            首次进入项目
 ```
 
-**1 文件，203 行**: store.go
+**2 文件，432 行**: store.go, heartbeat_store.go
 
 ---
 
@@ -1781,7 +1783,7 @@ func (t *ForgeTool) Description() string { return prompttext.ToolForge }
 
 ### 文件结构
 
-**1 文件，263 行**: manager.go
+**1 文件，425 行**: manager.go
 
 ### 职责
 
@@ -1961,14 +1963,14 @@ User/Heartbeat     Server/Timer       Engine            Security         Tool   
 
 | 层级 | 模块 | 行数 | 文件数 | 职责 |
 |------|------|------|--------|------|
-| **Domain** | domain/service | 3,111 | 14 | AgentLoop 核心 · 状态机 · Channel 抽象 |
-| **Infrastructure** | infrastructure/tool | 2,875 | 22 | 21 个工具实现 |
-| | infrastructure/brain + knowledge + workspace + persistence + mcp | 2,085 | 10 | 持久化存储层 |
-| | infrastructure/security + sandbox + config | 1,886 | 9 | 安全·沙箱·配置 |
+| **Domain** | domain/service | 3,266 | 14 | AgentLoop 核心 · 状态机 · Channel 抽象 |
+| **Infrastructure** | infrastructure/tool | 3,528 | 22 | 21 个工具实现 |
+| | infrastructure/brain + knowledge + workspace + persistence + mcp | 2,802 | 12 | 持久化存储层 |
+| | infrastructure/security + sandbox + config | 1,722 | 8 | 安全·沙箱·配置 |
 | | infrastructure/llm | 1,024 | 8 | LLM 路由 · Provider 适配 |
-| | infrastructure/prompt | 825 | 5 | 提示词引擎 |
-| | infrastructure/forge | 655 | 6 | 锻造引擎 |
-| | infrastructure/cron + skill | 532 | 2 | 定时任务·技能管理 |
-| **Interfaces** | interfaces/server + grpc + application | 2,152 | 5 | HTTP/gRPC·Builder |
-| **Shared** | domain/entity + tool + interfaces/apitype + testing + pkg | 1,270 | 7 | 实体·协议·工具 |
-| **总计** | | **~29,284** | **89** | |
+| | infrastructure/prompt | 814 | 5 | 提示词引擎 |
+| | infrastructure/forge | 655 | 5 | 锻造引擎 |
+| | infrastructure/cron + skill | 707 | 2 | 定时任务·技能管理 |
+| **Interfaces** | interfaces/server + application | 17,622 | 8 | HTTP/gRPC·Builder·WebUI 嵌入 |
+| **Shared** | domain/entity + interfaces/apitype + testing + pkg | ~400 | 5 | 实体·协议·工具 |
+| **总计** | | **~32,551** | **89** | |
