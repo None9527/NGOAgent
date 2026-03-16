@@ -42,9 +42,8 @@ func streamChat(
 	}
 
 	var (
-		textBuf      strings.Builder
-		lastEditLen  int
-		toolMessages []string
+		textBuf     strings.Builder
+		lastEditLen int
 	)
 
 	flushText := func(final bool) {
@@ -75,35 +74,15 @@ func streamChat(
 			textBuf.WriteString(event.Text)
 			flushText(false)
 
-		case "thinking":
-			// silently discard thinking tokens
-
-		case "tool_call":
-			toolMsg := fmt.Sprintf("🔧 `%s`", event.ToolName)
-			toolMessages = append(toolMessages, toolMsg)
-			// Send separate tool notification
-			notification := tgbotapi.NewMessage(chatID, toolMsg)
-			notification.ParseMode = "Markdown"
-			_, _ = tg.Send(notification)
-
 		case "approval_request":
 			// Pause typing, send approval keyboard
 			typingStop()
 			sendApprovalKeyboard(tg, chatID, sessionID, event.CallId, event.ToolName, event.ToolInput)
-
-		case "step_done":
-			flushText(false)
-
-		case "done", "error":
-			break
 		}
 	}
 
 	// Final edit with complete text
 	finalText := textBuf.String()
-	if finalText == "" {
-		finalText = strings.Join(toolMessages, "\n")
-	}
 	if finalText == "" {
 		finalText = "✅ 完成"
 	}
