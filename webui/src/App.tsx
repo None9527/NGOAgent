@@ -62,7 +62,12 @@ export default function App() {
   } | null>(null)
   
   
-  const [connected, setConnected] = useState(false)
+  const [connected, setConnected] = useState(() => {
+    try {
+      const t = localStorage.getItem('AUTH_TOKEN')
+      return !!(t && t.trim())
+    } catch { return false }
+  })
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([])
   const cancelRef = useRef<(() => void) | null>(null)
   const inputRef = useRef<HTMLDivElement>(null)
@@ -123,6 +128,18 @@ export default function App() {
     document.documentElement.classList.add('dark')
     ;(async () => {
       try {
+        // Lazy token validation: verify saved token is still valid
+        const configRes = await fetch(`${getApiBase()}/v1/config`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('AUTH_TOKEN') || ''}` },
+          signal: AbortSignal.timeout(5000),
+        })
+        if (configRes.status === 401) {
+          // Token invalid — kick back to ConnectPage
+          localStorage.removeItem('AUTH_TOKEN')
+          setConnected(false)
+          return
+        }
+
         const h = await api.health()
         setHealth(h)
         const data = await api.listSessions()
@@ -134,7 +151,7 @@ export default function App() {
         const modelsData = await api.listModels()
         setAvailableModels(modelsData.models || [])
         // Sync mode toggles from config
-        const cfg = await authFetch(`${getApiBase()}/v1/config`).then(r => r.json())
+        const cfg = await configRes.json()
         setPlanMode(!!cfg?.agent?.planning_mode)
         setSecurityMode(cfg?.security?.mode || 'allow')
 
@@ -188,6 +205,8 @@ export default function App() {
           }
         }
       } catch (err: unknown) {
+        // Network error during init — don't kick to ConnectPage, just log
+        // (user might be offline temporarily, token is still saved)
         console.error('Init failed after connect:', err)
       }
     })()
