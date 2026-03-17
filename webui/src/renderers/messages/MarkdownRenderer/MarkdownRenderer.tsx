@@ -7,9 +7,9 @@
  */
 
 import type { FC } from 'react';
-import { useMemo, useCallback, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useMemo, useCallback } from 'react';
 import MarkdownIt from 'markdown-it';
+import { ImageGallery } from '../ImageGallery';
 import type { Options as MarkdownItOptions } from 'markdown-it';
 import './MarkdownRenderer.css';
 
@@ -349,41 +349,88 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
   };
 
   /**
-   * Render markdown content to HTML (memoized)
+   * Parse rendered HTML into segments: text chunks and image groups.
+   * Consecutive <img> tags (with optional wrapping <p>) are grouped into galleries.
    */
-  const renderedHtml = useMemo(() => {
+  type Segment = { type: 'html'; html: string } | { type: 'gallery'; images: { src: string; alt: string }[] };
+
+  const segments = useMemo((): Segment[] => {
     try {
       // Step 1: Pre-process raw text — convert media paths to markdown syntax
       const processed = preprocessMediaPaths(content);
-      // Step 2: Render markdown to HTML (images become <img> natively)
+      // Step 2: Render markdown to HTML
       let html = md.render(processed);
-      // Step 3: Proxy any remaining local <img src>
+      // Step 3: Proxy local <img src>
       html = rewriteImgSrc(html);
       // Step 4: Make file paths clickable
       if (enableFileLinks) {
         html = processFilePaths(html);
       }
-      return html;
+
+      // Step 5: Split into segments — find consecutive image-only paragraphs
+      // Pattern: <p><img src="..." alt="..."></p> (markdown-it wraps images in <p>)
+      const imgParagraphRe = /\s*<p>\s*<img\s+src="([^"]*)"(?:\s+alt="([^"]*)")?\s*\/?>\s*<\/p>\s*/gi;
+
+      const result: Segment[] = [];
+      let lastIndex = 0;
+      let pendingImages: { src: string; alt: string }[] = [];
+
+      // Find all image paragraphs and track their positions
+      const matches: { index: number; length: number; src: string; alt: string }[] = [];
+      let m: RegExpExecArray | null;
+      while ((m = imgParagraphRe.exec(html)) !== null) {
+        matches.push({ index: m.index, length: m[0].length, src: m[1], alt: m[2] || '' });
+      }
+
+      // Flush pending gallery
+      const flushGallery = () => {
+        if (pendingImages.length > 0) {
+          result.push({ type: 'gallery', images: [...pendingImages] });
+          pendingImages = [];
+        }
+      };
+
+
+      for (const match of matches) {
+        const before = html.slice(lastIndex, match.index);
+        const beforeTrimmed = before.trim();
+
+        if (beforeTrimmed) {
+          // Non-empty content between images → break the gallery
+          flushGallery();
+          result.push({ type: 'html', html: beforeTrimmed });
+        }
+
+        pendingImages.push({ src: match.src, alt: match.alt });
+        lastIndex = match.index + match.length;
+      }
+
+      // Remaining content after last image
+      const trailing = html.slice(lastIndex).trim();
+      if (trailing) {
+        flushGallery();
+        result.push({ type: 'html', html: trailing });
+      } else {
+        flushGallery();
+      }
+
+      // If no images found, return single HTML segment
+      if (result.length === 0) {
+        return [{ type: 'html', html }];
+      }
+
+      return result;
     } catch (error) {
       console.error('Error rendering markdown:', error);
-      return escapeHtml(content);
+      return [{ type: 'html', html: escapeHtml(content) }];
     }
   }, [content, enableFileLinks, md]);
 
-  // Event delegation: intercept clicks on generated file-path links AND media images
+  // Event delegation: intercept clicks on file-path links (images now handled by gallery)
   const handleContainerClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
       const target = e.target as HTMLElement | null;
       if (!target) return;
-
-      // Click on any image → open fullscreen preview
-      if (target.tagName === 'IMG') {
-        e.preventDefault();
-        e.stopPropagation();
-        const src = (target as HTMLImageElement).src;
-        if (src) setPreviewSrc(src);
-        return;
-      }
 
       if (!enableFileLinks) return;
 
@@ -424,35 +471,24 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     [enableFileLinks, onFileClick],
   );
 
-  const [previewSrc, setPreviewSrc] = useState<string | null>(null);
-
   return (
-    <>
-      {/* Fullscreen image preview overlay */}
-      {previewSrc && createPortal(
-        <div
-          onClick={() => setPreviewSrc(null)}
-          style={{
-            position: 'fixed', inset: 0, zIndex: 99999,
-            background: 'rgba(0,0,0,0.88)', backdropFilter: 'blur(12px)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'zoom-out',
-          }}
-        >
-          <img className="preview-img" src={previewSrc} alt="preview" style={{ maxWidth: '92vw', maxHeight: '92vh', objectFit: 'contain', borderRadius: '8px' }} />
-        </div>,
-        document.body
+    <div
+      className="markdown-content"
+      onClick={handleContainerClick}
+      style={{
+        wordWrap: 'break-word',
+        overflowWrap: 'break-word',
+        whiteSpace: 'normal',
+      }}
+    >
+      {segments.map((seg, i) =>
+        seg.type === 'gallery' ? (
+          <ImageGallery key={`gallery-${i}`} images={seg.images} />
+        ) : (
+          <div key={`html-${i}`} dangerouslySetInnerHTML={{ __html: seg.html }} />
+        )
       )}
-      <div
-        className="markdown-content"
-        onClick={handleContainerClick}
-        dangerouslySetInnerHTML={{ __html: renderedHtml }}
-        style={{
-          wordWrap: 'break-word',
-          overflowWrap: 'break-word',
-          whiteSpace: 'normal',
-        }}
-      />
-    </>
+    </div>
   );
 };
+

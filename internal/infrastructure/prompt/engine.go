@@ -86,22 +86,23 @@ func (e *Engine) buildSections(deps Deps) []Section {
 		// ═══ Head Peak: Identity + Behavior + Constraints (HIGH attention) ═══
 		{Order: 1, Name: "Identity", Content: prompttext.Identity, Priority: 0},
 		{Order: 2, Name: "CoreBehavior", Content: prompttext.CoreBehavior, Priority: 0},
-		{Order: 3, Name: "Safety", Content: prompttext.Safety, Priority: 0},
-		{Order: 4, Name: "PreferenceKI", Content: e.buildPreferenceKI(deps.PreferenceKI), Priority: 0},
-		{Order: 5, Name: "UserRules", Content: e.buildUserRules(deps.UserRules), Priority: 1},
+		{Order: 3, Name: "OutputCapabilities", Content: prompttext.OutputCapabilities, Priority: 1},
+		{Order: 4, Name: "Safety", Content: prompttext.Safety, Priority: 0},
+		{Order: 5, Name: "PreferenceKI", Content: e.buildPreferenceKI(deps.PreferenceKI), Priority: 0},
+		{Order: 6, Name: "UserRules", Content: e.buildUserRules(deps.UserRules), Priority: 1},
 		// ═══ Mid Valley: Procedural reference (LOW attention, lookup-based) ═══
-		{Order: 6, Name: "ToolProtocol", Content: prompttext.ToolProtocol, Priority: 0},
-		{Order: 7, Name: "ToolCalling", Content: prompttext.ToolCalling, Priority: 0},
-		{Order: 8, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
-		{Order: 9, Name: "Skills", Content: e.buildSkills(deps.SkillInfos), Priority: 3},
-		{Order: 10, Name: "ProjectContext", Content: e.buildProjectContext(deps.ProjectContext), Priority: 2},
-		{Order: 11, Name: "Variants", Content: "", Priority: 3},
+		{Order: 7, Name: "ToolProtocol", Content: prompttext.ToolProtocol, Priority: 0},
+		{Order: 8, Name: "ToolCalling", Content: prompttext.ToolCalling, Priority: 0},
+		{Order: 9, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
+		{Order: 10, Name: "Skills", Content: e.buildSkills(deps.SkillInfos), Priority: 3},
+		{Order: 11, Name: "ProjectContext", Content: e.buildProjectContext(deps.ProjectContext), Priority: 2},
+		{Order: 12, Name: "Variants", Content: "", Priority: 3},
 		// ═══ Tail Peak: Output format + Task Knowledge + Live Context (HIGH attention) ═══
-		{Order: 12, Name: "ResponseFormat", Content: prompttext.ResponseFormat, Priority: 0},
-		{Order: 13, Name: "SemanticKI", Content: e.buildSemanticKI(deps.ConvSummary), Priority: 0},
-		{Order: 14, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
-		{Order: 15, Name: "Focus", Content: e.buildFocus(deps.FocusFile), Priority: 2},
-		{Order: 16, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
+		{Order: 13, Name: "ResponseFormat", Content: prompttext.ResponseFormat, Priority: 0},
+		{Order: 14, Name: "SemanticKI", Content: e.buildSemanticKI(deps.ConvSummary), Priority: 0},
+		{Order: 15, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
+		{Order: 16, Name: "Focus", Content: e.buildFocus(deps.FocusFile), Priority: 2},
+		{Order: 17, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
 	}
 	return sections
 }

@@ -13,6 +13,19 @@ const Identity = `You are NGOAgent, an autonomous AI coding assistant running lo
 
 const IdentitySDK = `You are a NGOAgent instance, running within the Agent SDK.`
 
+// OutputCapabilities tells the agent what the frontend can render.
+// This ensures the agent outputs content in formats the frontend supports.
+const OutputCapabilities = `Your output is rendered in a rich frontend with these capabilities:
+- Standard Markdown: code blocks, tables, bold, italic, lists, headings
+- File paths: absolute paths (e.g. /home/user/file.go) auto-convert to clickable links
+- Media preview: output a media file's absolute path and it auto-renders inline:
+  * Images: png, jpg, gif, webp, svg, bmp, avif, tiff
+  * Video: mp4, webm, mov, avi, mkv
+  * Audio: mp3, wav, ogg, flac, aac
+  * PDF: opens in viewer
+- Multi-image gallery: when you output multiple image paths consecutively (one per line), they auto-combine into a grid gallery with lightbox browsing
+- No special syntax needed: just output the absolute file path on its own line. Do NOT wrap paths in backticks or markdown image syntax — the frontend handles conversion automatically.`
+
 // CoreBehavior goes at HEAD (primacy) — identity anchor + core behavioral rules
 const CoreBehavior = `Your strengths:
 - Searching for code, configurations, and patterns across large codebases
