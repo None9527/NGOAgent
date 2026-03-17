@@ -6,7 +6,7 @@ import { useRef, useCallback, useEffect } from 'react';
  * └──────────────────────────────────────────────────────────────┘
  *
  * Scroll Strategy:
- * 1. Track whether user is "at bottom" via onScroll (150px threshold).
+ * 1. Track whether user is "at bottom" via onScroll (2px threshold, ceil-safe).
  * 2. MutationObserver watches entire subtree for DOM changes.
  * 3. On mutation: if user was at bottom → snap to bottom via scrollTop.
  * 4. RAF uses cancel-and-reschedule — every mutation cancels the previous
@@ -15,6 +15,13 @@ import { useRef, useCallback, useEffect } from 'react';
  * 5. scrollToBottom() for explicit triggers (user sends message).
  * 6. resetToBottom() forces scroll + resets isAtBottomRef — MUST be called
  *    on session switch / history load so sticky mode is re-engaged.
+ *
+ * Windows DPI note:
+ *   On Windows with fractional DPI scaling (125%, 150%), scrollHeight is a
+ *   float but scrollTop is always an integer. This creates a sub-pixel gap
+ *   (typically 0.something px) that makes naive equality checks fail.
+ *   We use Math.ceil() on scrollHeight before comparing, and a 2px tolerance
+ *   instead of 0, to absorb sub-pixel rounding on all platforms/DPI settings.
  */
 export function useChatScroll() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -25,13 +32,26 @@ export function useChatScroll() {
   // RAF handle for cancel-and-reschedule pattern
   const rafIdRef = useRef<number | null>(null);
 
+  /**
+   * isAtBottom — cross-platform safe bottom detection.
+   *
+   * On Windows with DPI scaling, scrollHeight can be fractional (e.g. 1200.5)
+   * while scrollTop is always integer (1199). Using Math.ceil() normalises the
+   * scrollHeight to an integer before comparison, closing the sub-pixel gap.
+   * The 2px tolerance absorbs any remaining rounding discrepancies.
+   */
+  const checkIsAtBottom = useCallback((el: HTMLElement): boolean => {
+    const { scrollTop, clientHeight } = el;
+    const scrollHeight = Math.ceil(el.scrollHeight);
+    return scrollHeight - scrollTop - clientHeight <= 2;
+  }, []);
+
   // ── onScroll handler: update bottom-tracking ──
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    const { scrollTop, scrollHeight, clientHeight } = el;
-    isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 150;
-  }, []);
+    isAtBottomRef.current = checkIsAtBottom(el);
+  }, [checkIsAtBottom]);
 
   // ── Imperative scroll-to-bottom ──
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
@@ -73,8 +93,10 @@ export function useChatScroll() {
       }
       rafIdRef.current = requestAnimationFrame(() => {
         rafIdRef.current = null;
-        if (isAtBottomRef.current && scrollContainerRef.current) {
-          const el = scrollContainerRef.current;
+        const el = scrollContainerRef.current;
+        if (isAtBottomRef.current && el) {
+          // Use scrollHeight directly (not ceil) so the assignment always
+          // overshoots any fractional sub-pixel, reaching the true bottom.
           el.scrollTop = el.scrollHeight;
         }
       });
