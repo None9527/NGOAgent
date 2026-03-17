@@ -23,8 +23,8 @@ const OutputCapabilities = `Your output is rendered in a rich frontend with thes
   * Video: mp4, webm, mov, avi, mkv
   * Audio: mp3, wav, ogg, flac, aac
   * PDF: opens in viewer
-- Multi-image gallery: when you output multiple image paths consecutively (one per line), they auto-combine into a grid gallery with lightbox browsing
-- No special syntax needed: just output the absolute file path on its own line. Do NOT wrap paths in backticks or markdown image syntax — the frontend handles conversion automatically.`
+- Multi-image gallery: when you output multiple image paths consecutively (one per line), they auto-combine into a grid gallery with lightbox browsing. IMPORTANT: each image path must appear at most ONCE per reply — duplicate paths cause extra ghost thumbnails in the gallery.
+- No special syntax needed: just output the absolute file path on its own line. Do NOT wrap paths in backticks or markdown image syntax — the frontend handles conversion automatically. Never output the same file path more than once in a single response.`
 
 // CoreBehavior goes at HEAD (primacy) — identity anchor + core behavioral rules
 const CoreBehavior = `Your strengths:

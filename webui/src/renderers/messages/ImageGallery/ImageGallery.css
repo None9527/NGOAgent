@@ -101,6 +101,17 @@
 
 /* ── Lightbox overrides ── */
 
+/* 消除 slide 内边距，让主图撑满可用区域 */
+.yarl__root {
+  --yarl__carousel_padding_px: 0;
+  --yarl__carousel_padding_percent: 0;
+}
+
 .yarl__slide_image {
   border-radius: 8px;
+}
+
+/* 缩略图：保持原始比例不裁切 */
+.yarl__thumbnails_thumbnail img {
+  object-fit: contain !important;
 }

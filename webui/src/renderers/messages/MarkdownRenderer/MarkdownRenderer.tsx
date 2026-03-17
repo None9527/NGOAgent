@@ -7,11 +7,12 @@
  */
 
 import type { FC } from 'react';
-import { useMemo, useCallback, useState } from 'react';
+import { useMemo, useCallback, useState, useRef } from 'react';
 import MarkdownIt from 'markdown-it';
 import { ImageGallery } from '../ImageGallery';
 import Lightbox from 'yet-another-react-lightbox';
 import Zoom from 'yet-another-react-lightbox/plugins/zoom';
+import type { ZoomRef } from 'yet-another-react-lightbox';
 import Thumbnails from 'yet-another-react-lightbox/plugins/thumbnails';
 import Counter from 'yet-another-react-lightbox/plugins/counter';
 import 'yet-another-react-lightbox/styles.css';
@@ -459,6 +460,12 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
 
   // Unified lightbox state
   const [lightboxIndex, setLightboxIndex] = useState(-1);
+  const zoomRef = useRef<ZoomRef>(null);
+
+  // Apply initial zoom on every slide view (open + navigate)
+  const handleSlideView = useCallback(() => {
+    setTimeout(() => zoomRef.current?.changeZoom(1.5, true), 80);
+  }, []);
 
   const handleImageClick = useCallback((src: string) => {
     const index = allImages.findIndex(img => img.src === src);
@@ -530,13 +537,25 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         index={lightboxIndex}
         slides={allImages.map(img => ({ src: img.src, alt: img.alt }))}
         plugins={[Zoom, Thumbnails, Counter]}
-        zoom={{ maxZoomPixelRatio: 5 }}
+        zoom={{
+          ref: zoomRef,
+          maxZoomPixelRatio: 8,
+          doubleTapDelay: 300,
+          doubleClickDelay: 300,
+          doubleClickMaxStops: 2,
+          keyboardMoveDistance: 50,
+          wheelZoomDistanceFactor: 100,
+          pinchZoomDistanceFactor: 100,
+          scrollToZoom: true,
+        }}
         thumbnails={{ border: 0, borderRadius: 8, padding: 0, gap: 8 }}
         counter={{ container: { style: { top: 'unset', bottom: 0 } } }}
         styles={{
           container: { backgroundColor: 'rgba(0, 0, 0, 0.92)', backdropFilter: 'blur(16px)' },
         }}
         animation={{ fade: 200, swipe: 300 }}
+        carousel={{ finite: false }}
+        on={{ view: handleSlideView }}
       />
       <div
         className="markdown-content"
