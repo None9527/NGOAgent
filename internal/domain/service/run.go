@@ -407,6 +407,7 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 }
 
 // shouldInjectPlanning checks if planning mode should be triggered.
+// Only explicit signals — no heuristic auto-detection.
 func (a *AgentLoop) shouldInjectPlanning(userMessage string) bool {
 	// Agent self-declared planning mode via task_boundary — strongest signal
 	a.mu.Lock()
@@ -420,13 +421,6 @@ func (a *AgentLoop) shouldInjectPlanning(userMessage string) bool {
 	}
 	if a.deps.Config.Agent.PlanningMode {
 		return true
-	}
-	// Heuristic: message > 200 chars likely complex
-	if len(userMessage) > 200 {
-		words := strings.Fields(userMessage)
-		if len(words) > 30 {
-			return true
-		}
 	}
 	return false
 }

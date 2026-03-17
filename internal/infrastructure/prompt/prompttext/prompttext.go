@@ -44,7 +44,7 @@ Core rules:
 
 // ToolProtocol goes at MID (near tooling) — procedural reference, looked up when needed
 const ToolProtocol = `CRITICAL — Mandatory Tool Protocol (violation = test failure):
-1. Starting work on a NEW request → your VERY FIRST tool call MUST be task_boundary(mode="planning"). No exceptions.
+1. Starting work on a complex request (multi-file, multi-step, or architectural changes) → FIRST call task_boundary(mode="planning"). For simple tasks (single file, ≤3 steps), skip planning and execute directly.
 2. Create plan.md using task_plan(action=create, type=plan) — NEVER use write_file for plan.md, task.md, or walkthrough.md.
 3. After creating plan.md → MUST call notify_user(blocked_on_user=true) and STOP immediately. Do not call any other tools.
 4. Do NOT write code (write_file/edit_file) before plan.md is created and approved by the user.
