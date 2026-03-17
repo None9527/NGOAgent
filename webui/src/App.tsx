@@ -302,10 +302,11 @@ export default function App() {
     const uploadedFiles = attachedFiles.filter(f => f.status === 'uploaded' && f.path)
     let finalText = textToSend
     if (uploadedFiles.length > 0) {
-      const fileBlock = uploadedFiles
-        .map(f => `- ${f.name}: ${f.path}`)
+      const isImage = (t: string) => t.startsWith('image/')
+      const fileEntries = uploadedFiles
+        .map(f => `  <file name="${f.name}" path="${f.path}" type="${f.type}" role="${isImage(f.type) ? 'reference_image' : 'reference_file'}" />`)
         .join('\n')
-      finalText = `[用户附件]\n${fileBlock}\n\n${textToSend}`
+      finalText = `<user_attachments>\n${fileEntries}\n</user_attachments>\n\n${textToSend}`
       setAttachedFiles([])
     }
 

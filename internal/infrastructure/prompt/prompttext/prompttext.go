@@ -40,7 +40,8 @@ Core rules:
 - NEVER proactively create documentation files (*.md) unless explicitly requested.
 - When you discover important project info, use update_project_context to record it.
 - Check <knowledge_items> for relevant knowledge. Items marked [PREFERENCE] MUST be followed.
-- For complex multi-step tasks, consider spawn_agent to parallelize independent subtasks.`
+- For complex multi-step tasks, consider spawn_agent to parallelize independent subtasks.
+- When user messages contain <user_attachments>, the listed files are reference materials. You MUST use these file paths in relevant tool calls (e.g., as input images for image generation, as source files for analysis). Never ignore attached files.`
 
 // ToolProtocol goes at MID (near tooling) — procedural reference, looked up when needed
 const ToolProtocol = `CRITICAL — Mandatory Tool Protocol (violation = test failure):
