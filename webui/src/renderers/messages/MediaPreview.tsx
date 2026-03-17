@@ -31,6 +31,8 @@ export function toProxyUrl(path: string): string {
   let cleaned = path.replace(/^file:\/\/\/?/, '/');
   // Ensure absolute
   if (!cleaned.startsWith('/')) cleaned = '/' + cleaned;
+  // Collapse duplicate slashes (e.g. //home → /home)
+  cleaned = cleaned.replace(/\/+/g, '/');
   // Use cached token to avoid localStorage hit per render
   const token = _cachedToken ?? ((_cachedToken = localStorage.getItem('AUTH_TOKEN') || ''), _cachedToken);
   return `/v1/file?path=${encodeURIComponent(cleaned)}&token=${encodeURIComponent(token)}`;

@@ -299,6 +299,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     const toProxy = (p: string) => {
       let clean = p.replace(/^file:\/\/?/, '/');
       if (!clean.startsWith('/')) clean = '/' + clean;
+      clean = clean.replace(/\/+/g, '/'); // collapse duplicate slashes
       const token = getCachedToken();
       return `/v1/file?path=${encodeURIComponent(clean)}&token=${encodeURIComponent(token)}`;
     };
