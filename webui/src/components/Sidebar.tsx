@@ -178,13 +178,13 @@ const SessionItem: React.FC<SessionItemProps> = ({ session, isActive, onSelect, 
             {session.title || '无标题对话'}
           </button>
           {(hovered || isActive) && (
-            <div className="flex items-center gap-0.5 pr-1.5 shrink-0">
+            <div className={`flex items-center gap-0.5 pr-1.5 shrink-0 ${!isActive && !hovered ? 'hidden' : ''}`}>
               <button onClick={startEdit} title="重命名"
-                className="p-1.5 rounded transition-colors text-gray-500 hover:text-gray-200 hover:bg-white/10">
+                className="p-1.5 rounded transition-colors text-gray-500 hover:text-gray-200 hover:bg-white/10 active:bg-white/20">
                 <PencilIcon />
               </button>
               <button onClick={(e) => { e.stopPropagation(); onDelete() }} title="删除"
-                className="p-1.5 rounded transition-colors text-gray-500 hover:text-red-400 hover:bg-red-900/30">
+                className="p-1.5 rounded transition-colors text-gray-500 hover:text-red-400 hover:bg-red-900/30 active:bg-red-900/50">
                 <TrashIcon />
               </button>
             </div>

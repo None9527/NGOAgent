@@ -471,7 +471,7 @@
   color: #e5e5e5;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 639px) {
   .composer-input {
     padding: 12px 16px 6px 16px;
     font-size: 14px;
@@ -511,7 +511,7 @@
   border-top: none;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 639px) {
   .composer-actions {
     padding: 4px 12px 10px 12px;
     gap: 6px;

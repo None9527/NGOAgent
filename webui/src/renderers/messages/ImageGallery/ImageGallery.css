@@ -6,7 +6,7 @@
   border-radius: 12px;
   overflow: hidden;
   margin: 8px 0;
-  max-width: 560px;
+  max-width: min(560px, 100%);
 }
 
 /* Single image: full width */
@@ -114,4 +114,26 @@
 /* 缩略图：保持原始比例不裁切 */
 .yarl__thumbnails_thumbnail img {
   object-fit: contain !important;
+}
+
+/* ── Mobile ── */
+@media (max-width: 639px) {
+  .gallery-single .gallery-cell img {
+    max-height: 300px;
+  }
+  .gallery-duo .gallery-cell img {
+    height: 140px;
+  }
+  .gallery-trio .gallery-cell:first-child img {
+    height: 200px;
+  }
+  .gallery-trio .gallery-cell:not(:first-child) img {
+    height: 98px;
+  }
+  .gallery-quad .gallery-cell img {
+    height: 120px;
+  }
+  .gallery-overflow span {
+    font-size: 22px;
+  }
 }

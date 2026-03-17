@@ -18,7 +18,7 @@
   border-radius: 6px;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 639px) {
   .assistant-message-container {
     --assistant-message-padding-left: 20px;
   }
@@ -85,7 +85,7 @@
   background-color: var(--app-primary-border-color, rgba(255, 255, 255, 0.15));
 }
 
-@media (max-width: 600px) {
+@media (max-width: 639px) {
   .assistant-message-container::after {
     left: 8px;
   }

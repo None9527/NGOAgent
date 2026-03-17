@@ -37,7 +37,7 @@
 }
 
 
-@media (max-width: 600px) {
+@media (max-width: 639px) {
   .chat-viewer-messages {
     padding: 0px 2px;
   }
@@ -118,7 +118,7 @@
   margin-top: 16px;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 639px) {
   .chat-viewer-messages .user-message-container {
     margin-top: 8px;
   }
@@ -130,7 +130,7 @@
 }
 
 /* Responsive adjustments for ChatViewer */
-@media (max-width: 600px) {
+@media (max-width: 639px) {
   .chat-viewer-messages {
     padding: 12px;
   }

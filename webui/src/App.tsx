@@ -477,7 +477,7 @@ export default function App() {
 
         {/* Banners absolutely centered over the read-column */}
         {pendingApprovals.length > 0 && (
-          <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-full max-w-4xl px-4 pointer-events-none">
+          <div className="absolute top-14 sm:top-20 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-full max-w-4xl px-2 sm:px-4 pointer-events-none">
             <div className="flex flex-col gap-2 w-full pointer-events-auto" style={{ animation: 'slideDown 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}>
               {pendingApprovals.map((req, idx) => (
                 <div key={req.approvalId}
@@ -499,7 +499,7 @@ export default function App() {
                     )}
                   </div>
                 </div>
-                <div className="flex gap-2 justify-end">
+                <div className="flex gap-2 justify-end flex-wrap">
                   <button
                     onClick={async () => {
                       await api.approve(req.approvalId, false)
@@ -587,7 +587,7 @@ export default function App() {
                 </div>
               )}
 
-              <div className="flex gap-2 justify-end mt-2">
+              <div className="flex gap-2 justify-end flex-wrap mt-2">
                 <button
                   onClick={() => {
                     setPlanReview(null)

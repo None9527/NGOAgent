@@ -218,6 +218,9 @@
   width: 100%;
   border-collapse: collapse;
   margin: 1em 0;
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .markdown-content th,
@@ -285,7 +288,7 @@
 }
 
 .markdown-content .media-block img {
-  max-width: 480px;
+  max-width: min(480px, 100%);
   max-height: 24rem;
   height: auto;
   display: block;
@@ -399,4 +402,30 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ═══ Mobile adaptations ═══ */
+@media (max-width: 639px) {
+  .markdown-content {
+    font-size: 14px;
+  }
+  .markdown-content h1 { font-size: 1.4em; }
+  .markdown-content h2 { font-size: 1.25em; }
+  .markdown-content h3 { font-size: 1.1em; }
+  .markdown-content ul,
+  .markdown-content ol {
+    padding-left: 1.5em;
+  }
+  .markdown-content pre {
+    padding: 0.75em;
+    font-size: 0.85em;
+  }
+  .markdown-content th,
+  .markdown-content td {
+    padding: 0.35em 0.6em;
+    font-size: 0.9em;
+  }
+  .markdown-content .media-chip {
+    max-width: 150px;
+  }
 }
