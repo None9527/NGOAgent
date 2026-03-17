@@ -342,7 +342,9 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     return html.replace(
       /(<img\s[^>]*src=["'])(?:file:\/\/)?(\/?\/?[^"']+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif))(?=["'])/gi,
       (_m, prefix, rawPath) => {
-        const trimmed = rawPath.trim();
+        let trimmed = rawPath.trim();
+        // Decode &amp; if markdown-it escaped it
+        trimmed = trimmed.replace(/&amp;/g, '&');
         if (trimmed.startsWith('/v1/file') || trimmed.startsWith('http')) return prefix + trimmed;
         let clean = trimmed.replace(/^file:\/\/?/, '/');
         if (!clean.startsWith('/')) clean = '/' + clean;
@@ -386,7 +388,9 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         const imgRe = /<img\s+[^>]*src="([^"]*)"(?:\s+alt="([^"]*)")?[^>]*>/gi;
         let m;
         while ((m = imgRe.exec(inner)) !== null) {
-          images.push({ src: m[1], alt: m[2] || '' });
+          // Decode &amp; to & so token query parameter isn't corrupted
+          const unescapedSrc = m[1].replace(/&amp;/g, '&');
+          images.push({ src: unescapedSrc, alt: m[2] || '' });
         }
 
         if (images.length === 0) return match;
@@ -442,9 +446,10 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         const imgRe = /<img\s+[^>]*src="([^"]*)"(?:\s+alt="([^"]*)")?[^>]*>/gi;
         let m;
         while ((m = imgRe.exec(seg.html)) !== null) {
-          if (!seen.has(m[1])) {
-            urls.push({ src: m[1], alt: m[2] || '' });
-            seen.add(m[1]);
+          const unescapedSrc = m[1].replace(/&amp;/g, '&');
+          if (!seen.has(unescapedSrc)) {
+            urls.push({ src: unescapedSrc, alt: m[2] || '' });
+            seen.add(unescapedSrc);
           }
         }
       }
