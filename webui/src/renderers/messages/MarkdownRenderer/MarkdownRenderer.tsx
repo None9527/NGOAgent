@@ -9,7 +9,6 @@
 import type { FC } from 'react';
 import { useMemo, useCallback, useState } from 'react';
 import MarkdownIt from 'markdown-it';
-import { ImageGallery } from '../ImageGallery';
 import Lightbox from 'yet-another-react-lightbox';
 import Zoom from 'yet-another-react-lightbox/plugins/zoom';
 import Thumbnails from 'yet-another-react-lightbox/plugins/thumbnails';
@@ -27,17 +26,10 @@ const PREPROCESS_IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?)$/i;
 const PREPROCESS_MEDIA_PATH = /(?:file:\/\/)?(\/([\w\-. ]+\/)*[\w\-. ]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))(?=[\s"',;)\]|]|$)/g;
 const BACKTICK_MEDIA_RE = /`((?:file:\/\/)?\/[^`]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))`/gi;
 
-// P1 perf: cached auth token (avoid localStorage.getItem on every render)
-let _cachedToken: string | null = null;
-function getCachedToken(): string {
-  if (_cachedToken === null) {
-    _cachedToken = localStorage.getItem('AUTH_TOKEN') || '';
-  }
-  return _cachedToken;
-}
-// Refresh cache when storage changes (login/reconnect)
-if (typeof window !== 'undefined') {
-  window.addEventListener('storage', () => { _cachedToken = null; });
+// Token helper: always fresh from localStorage
+function getAuthToken(): string {
+  if (typeof window === 'undefined') return '';
+  return localStorage.getItem('AUTH_TOKEN') || '';
 }
 
 export interface MarkdownRendererProps {
@@ -306,10 +298,10 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
    */
   const preprocessMediaPaths = (text: string): string => {
     const toProxy = (p: string) => {
-      let clean = p.replace(/^file:\/\/?/, '/');
+      let clean = p.trim().replace(/^file:\/\/?/, '/');
       if (!clean.startsWith('/')) clean = '/' + clean;
       clean = clean.replace(/\/+/g, '/'); // collapse duplicate slashes
-      const token = getCachedToken();
+      const token = getAuthToken();
       return `/v1/file?path=${encodeURIComponent(clean)}&token=${encodeURIComponent(token)}`;
     };
 
@@ -318,7 +310,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     let inCodeBlock = false;
 
     return lines.map(line => {
-      if (line.trim().startsWith('```')) { inCodeBlock = !inCodeBlock; return line; }
+      if (line.trim().startsWith('')) { inCodeBlock = !inCodeBlock; return line; }
       if (inCodeBlock) return line;
       if (/!\[.*?\]\(.*?\)/.test(line)) return line; // already has markdown image
       // Strip backticks wrapping media file paths
@@ -349,22 +341,21 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     return html.replace(
       /(<img\s[^>]*src=["'])(?:file:\/\/)?(\/?\/?[^"']+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif))(?=["'])/gi,
       (_m, prefix, rawPath) => {
-        if (rawPath.startsWith('/v1/file') || rawPath.startsWith('http')) return prefix + rawPath;
-        let clean = rawPath.replace(/^file:\/\/?/, '/');
+        const trimmed = rawPath.trim();
+        if (trimmed.startsWith('/v1/file') || trimmed.startsWith('http')) return prefix + trimmed;
+        let clean = trimmed.replace(/^file:\/\/?/, '/');
         if (!clean.startsWith('/')) clean = '/' + clean;
-        const token = getCachedToken();
+        clean = clean.replace(/\/+/g, '/');
+        const token = getAuthToken();
         return `${prefix}/v1/file?path=${encodeURIComponent(clean)}&token=${encodeURIComponent(token)}`;
       }
     );
   };
 
   /**
-   * Parse rendered HTML into segments: text chunks and image groups.
-   * Scans for ALL images and groups consecutive ones (ignoring whitespace/BR) into galleries.
+   * Final processed HTML.
    */
-  type Segment = { type: 'html'; html: string } | { type: 'gallery'; images: { src: string; alt: string }[] };
-
-  const segments = useMemo((): Segment[] => {
+  const processedHtml = useMemo(() => {
     try {
       // Step 1: Pre-process raw text — convert media paths to markdown syntax
       const processed = preprocessMediaPaths(content);
@@ -376,100 +367,27 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       if (enableFileLinks) {
         html = processFilePaths(html);
       }
-
-      // Step 5: Split into segments — flexible image grouping
-      const imgTagRe = /<img\s+src="([^"]*)"(?:\s+alt="([^"]*)")?[^>]*>/gi;
-      const result: Segment[] = [];
-      let lastIndex = 0;
-      let m: RegExpExecArray | null;
-
-      const allMatches: { index: number; length: number; src: string; alt: string }[] = [];
-      while ((m = imgTagRe.exec(html)) !== null) {
-        allMatches.push({ index: m.index, length: m[0].length, src: m[1], alt: m[2] || '' });
-      }
-
-      const flushText = (end: number) => {
-        const text = html.slice(lastIndex, end).trim();
-        if (text && text !== '<p></p>') {
-          result.push({ type: 'html', html: text });
-        }
-        lastIndex = end;
-      };
-
-      let pendingGallery: { src: string; alt: string }[] = [];
-
-      for (let i = 0; i < allMatches.length; i++) {
-        const match = allMatches[i];
-        const nextMatch = allMatches[i + 1];
-
-        // Is there "meaningful" content between this image and the previous one?
-        const gap = html.slice(lastIndex, match.index);
-        const isContinuous = !/[^\s\n]|<br\s*\/?>/.test(gap.replace(/<\/?p>/g, ''));
-
-        if (!isContinuous && lastIndex < match.index) {
-          if (pendingGallery.length > 0) {
-            result.push({ type: 'gallery', images: pendingGallery });
-            pendingGallery = [];
-          }
-          flushText(match.index);
-        }
-
-        pendingGallery.push({ src: match.src, alt: match.alt });
-        lastIndex = match.index + match.length;
-
-        // If next one is not continuous, or no next one, flush gallery
-        if (nextMatch) {
-          const nextGap = html.slice(lastIndex, nextMatch.index);
-          const nextIsContinuous = !/[^\s\n]|<br\s*\/?>/.test(nextGap.replace(/<\/?p>/g, ''));
-          if (!nextIsContinuous) {
-            result.push({ type: 'gallery', images: pendingGallery });
-            pendingGallery = [];
-            // Advance lastIndex to nextMatch.index will be handled in next iteration's gap check
-          }
-        } else {
-          result.push({ type: 'gallery', images: pendingGallery });
-          pendingGallery = [];
-        }
-      }
-
-      const trailing = html.slice(lastIndex).trim();
-      if (trailing && trailing !== '<p></p>') {
-        result.push({ type: 'html', html: trailing });
-      }
-
-      return result.length > 0 ? result : [{ type: 'html', html }];
+      return html;
     } catch (error) {
       console.error('Error rendering markdown:', error);
-      return [{ type: 'html', html: escapeHtml(content) }];
+      return escapeHtml(content);
     }
   }, [content, enableFileLinks, md]);
 
-  // Extract ALL unique image URLs from segments for global lightbox
+  // Extract ALL unique image URLs from the rendered HTML for global lightbox
   const allImages = useMemo(() => {
     const urls: { src: string; alt: string }[] = [];
     const seen = new Set<string>();
-    segments.forEach(seg => {
-      if (seg.type === 'gallery') {
-        seg.images.forEach(img => {
-          if (!seen.has(img.src)) {
-            urls.push(img);
-            seen.add(img.src);
-          }
-        });
-      } else {
-        // Fallback: parse <img> from HTML chunks too
-        const imgRe = /<img\s+src="([^"]*)"/gi;
-        let m;
-        while ((m = imgRe.exec(seg.html)) !== null) {
-          if (!seen.has(m[1])) {
-            urls.push({ src: m[1], alt: '' });
-            seen.add(m[1]);
-          }
-        }
+    const imgRe = /<img\s+[^>]*src="([^"]*)"(?:\s+alt="([^"]*)")?[^>]*>/gi;
+    let m;
+    while ((m = imgRe.exec(processedHtml)) !== null) {
+      if (!seen.has(m[1])) {
+        urls.push({ src: m[1], alt: m[2] || '' });
+        seen.add(m[1]);
       }
-    });
+    }
     return urls;
-  }, [segments]);
+  }, [processedHtml]);
 
   // Unified lightbox state
   const [lightboxIndex, setLightboxIndex] = useState(-1);
@@ -479,7 +397,6 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     if (index >= 0) {
       setLightboxIndex(index);
     } else {
-      // Fallback for dynamically added images not in useMemo
       setLightboxIndex(0);
     }
   }, [allImages]);
@@ -489,7 +406,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       const target = e.target as HTMLElement | null;
       if (!target) return;
 
-      // Click on any <img> (standalone or inside gallery)
+      // Click on any <img> inside this component's DOM tree
       if (target.tagName === 'IMG') {
         e.preventDefault();
         e.stopPropagation();
@@ -533,7 +450,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         // ignore
       }
     },
-    [enableFileLinks, onFileClick],
+    [enableFileLinks, handleImageClick, onFileClick],
   );
 
   return (
@@ -556,20 +473,13 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       <div
         className="markdown-content"
         onClick={handleContainerClick}
+        dangerouslySetInnerHTML={{ __html: processedHtml }}
         style={{
           wordWrap: 'break-word',
           overflowWrap: 'break-word',
           whiteSpace: 'normal',
         }}
-      >
-        {segments.map((seg, i) =>
-          seg.type === 'gallery' ? (
-            <ImageGallery key={`gallery-${i}`} images={seg.images} onImageClick={handleImageClick} />
-          ) : (
-            <div key={`html-${i}`} dangerouslySetInnerHTML={{ __html: seg.html }} />
-          )
-        )}
-      </div>
+      />
     </>
   );
 };
