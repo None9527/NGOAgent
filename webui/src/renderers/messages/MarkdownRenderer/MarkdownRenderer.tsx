@@ -9,6 +9,7 @@
 import type { FC } from 'react';
 import { useMemo, useCallback, useState } from 'react';
 import MarkdownIt from 'markdown-it';
+import { ImageGallery } from '../ImageGallery';
 import Lightbox from 'yet-another-react-lightbox';
 import Zoom from 'yet-another-react-lightbox/plugins/zoom';
 import Thumbnails from 'yet-another-react-lightbox/plugins/thumbnails';
@@ -310,7 +311,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     let inCodeBlock = false;
 
     return lines.map(line => {
-      if (line.trim().startsWith('')) { inCodeBlock = !inCodeBlock; return line; }
+      if (line.trim().startsWith('```')) { inCodeBlock = !inCodeBlock; return line; }
       if (inCodeBlock) return line;
       if (/!\[.*?\]\(.*?\)/.test(line)) return line; // already has markdown image
       // Strip backticks wrapping media file paths
@@ -353,9 +354,11 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
   };
 
   /**
-   * Final processed HTML.
+   * Final processed HTML parsed into safe segments (HTML or Gallery).
    */
-  const processedHtml = useMemo(() => {
+  type Segment = { type: 'html'; html: string } | { type: 'gallery'; images: { src: string; alt: string }[] };
+
+  const segments = useMemo((): Segment[] => {
     try {
       // Step 1: Pre-process raw text — convert media paths to markdown syntax
       const processed = preprocessMediaPaths(content);
@@ -367,27 +370,87 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       if (enableFileLinks) {
         html = processFilePaths(html);
       }
-      return html;
+
+      // Step 5: Safely extract fully-enclosed block containers that possess ONLY images
+      let galleryCounter = 0;
+      const galleries: Record<string, { src: string; alt: string }[]> = {};
+
+      const processContainer = (match: string, inner: string) => {
+        // Check if there's at least one image
+        if (!/<img/i.test(inner)) return match;
+        // Check if it's ONLY tags and whitespace (no text content) length > 0 means text exists
+        if (inner.replace(/<[^>]+>/g, '').trim().length > 0) return match;
+
+        // Extract all images
+        const images: { src: string; alt: string }[] = [];
+        const imgRe = /<img\s+[^>]*src="([^"]*)"(?:\s+alt="([^"]*)")?[^>]*>/gi;
+        let m;
+        while ((m = imgRe.exec(inner)) !== null) {
+          images.push({ src: m[1], alt: m[2] || '' });
+        }
+
+        if (images.length === 0) return match;
+
+        const token = `__GALLERY_${galleryCounter++}__`;
+        galleries[token] = images;
+        return token;
+      };
+
+      // Safely replace <p>, <ul>, <ol> blocks with tokens
+      html = html.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, processContainer);
+      html = html.replace(/<ul[^>]*>([\s\S]*?)<\/ul>/gi, processContainer);
+      html = html.replace(/<ol[^>]*>([\s\S]*?)<\/ol>/gi, processContainer);
+
+      // Split the HTML around the tokens
+      const result: Segment[] = [];
+      const tokenRe = /(__GALLERY_\d+__)/g;
+      let lastIndex = 0;
+      let matchExec;
+      while ((matchExec = tokenRe.exec(html)) !== null) {
+        if (matchExec.index > lastIndex) {
+          result.push({ type: 'html', html: html.slice(lastIndex, matchExec.index) });
+        }
+        const token = matchExec[0];
+        result.push({ type: 'gallery', images: galleries[token] });
+        lastIndex = matchExec.index + token.length;
+      }
+      
+      if (lastIndex < html.length) {
+        result.push({ type: 'html', html: html.slice(lastIndex) });
+      }
+
+      return result.length > 0 ? result : [{ type: 'html', html }];
     } catch (error) {
       console.error('Error rendering markdown:', error);
-      return escapeHtml(content);
+      return [{ type: 'html', html: escapeHtml(content) }];
     }
   }, [content, enableFileLinks, md]);
 
-  // Extract ALL unique image URLs from the rendered HTML for global lightbox
+  // Extract ALL unique image URLs from segments for global lightbox
   const allImages = useMemo(() => {
     const urls: { src: string; alt: string }[] = [];
     const seen = new Set<string>();
-    const imgRe = /<img\s+[^>]*src="([^"]*)"(?:\s+alt="([^"]*)")?[^>]*>/gi;
-    let m;
-    while ((m = imgRe.exec(processedHtml)) !== null) {
-      if (!seen.has(m[1])) {
-        urls.push({ src: m[1], alt: m[2] || '' });
-        seen.add(m[1]);
+    segments.forEach(seg => {
+      if (seg.type === 'gallery') {
+        seg.images.forEach(img => {
+          if (!seen.has(img.src)) {
+            urls.push(img);
+            seen.add(img.src);
+          }
+        });
+      } else {
+        const imgRe = /<img\s+[^>]*src="([^"]*)"(?:\s+alt="([^"]*)")?[^>]*>/gi;
+        let m;
+        while ((m = imgRe.exec(seg.html)) !== null) {
+          if (!seen.has(m[1])) {
+            urls.push({ src: m[1], alt: m[2] || '' });
+            seen.add(m[1]);
+          }
+        }
       }
-    }
+    });
     return urls;
-  }, [processedHtml]);
+  }, [segments]);
 
   // Unified lightbox state
   const [lightboxIndex, setLightboxIndex] = useState(-1);
@@ -473,13 +536,20 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       <div
         className="markdown-content"
         onClick={handleContainerClick}
-        dangerouslySetInnerHTML={{ __html: processedHtml }}
         style={{
           wordWrap: 'break-word',
           overflowWrap: 'break-word',
           whiteSpace: 'normal',
         }}
-      />
+      >
+        {segments.map((seg, i) =>
+          seg.type === 'gallery' ? (
+            <ImageGallery key={`gallery-${i}`} images={seg.images} onImageClick={handleImageClick} />
+          ) : (
+            <div key={`html-${i}`} dangerouslySetInnerHTML={{ __html: seg.html }} />
+          )
+        )}
+      </div>
     </>
   );
 };
