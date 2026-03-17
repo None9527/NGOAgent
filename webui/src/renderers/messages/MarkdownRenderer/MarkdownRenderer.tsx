@@ -15,8 +15,10 @@ import './MarkdownRenderer.css';
 
 // P2 perf: module-level regex constants (avoid re-compilation per render)
 const PREPROCESS_IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?)$/i;
-const PREPROCESS_MEDIA_PATH = /(?:file:\/\/)?(\/?(?:\/[\w\-. ]+)+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))(?=[\s"',;)\]|]|$)/g;
-const BACKTICK_MEDIA_RE = /`((?:file:\/\/)?\/?[^`]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))`/gi;
+// CRITICAL: Only match ABSOLUTE paths (starting with / or file://).
+// Must NOT match bare filenames like "logo.png" in bullet lists.
+const PREPROCESS_MEDIA_PATH = /(?:file:\/\/)?(\/([\w\-. ]+\/)*[\w\-. ]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))(?=[\s"',;)\]|]|$)/g;
+const BACKTICK_MEDIA_RE = /`((?:file:\/\/)?\/[^`]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))`/gi;
 
 // P1 perf: cached auth token (avoid localStorage.getItem on every render)
 let _cachedToken: string | null = null;
