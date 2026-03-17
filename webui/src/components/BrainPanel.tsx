@@ -285,7 +285,7 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
 
                     <button
                       onClick={(e) => { e.stopPropagation(); openDetail(file.name) }}
-                      className="opacity-0 group-hover:opacity-100 p-1.5 rounded-full hover:bg-blue-500/20 text-blue-400 transition-all hover:scale-110 shadow-sm"
+                      className="opacity-0 group-hover:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 p-1.5 rounded-full hover:bg-blue-500/20 active:bg-blue-500/30 text-blue-400 transition-all hover:scale-110 shadow-sm"
                       title="全开检视"
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 3H14M21 3V10M21 3L13 11M3 21H10M3 21V14M3 21L11 13"/></svg>
@@ -342,7 +342,7 @@ const mdStyles = (
     .brain-md-content pre { background: rgba(0,0,0,0.35); padding: 0.7em; border-radius: 6px; overflow-x: auto; margin: 0.5em 0; }
     .brain-md-content pre code { background: none; padding: 0; color: #d4d4d4; }
     .brain-md-content blockquote { border-left: 3px solid rgba(96,165,250,0.4); padding-left: 0.8em; margin: 0.5em 0; color: #a3a3a3; }
-    .brain-md-content table { border-collapse: collapse; width: 100%; margin: 0.5em 0; font-size: 0.85em; }
+    .brain-md-content table { border-collapse: collapse; width: 100%; margin: 0.5em 0; font-size: 0.85em; display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .brain-md-content th, .brain-md-content td { border: 1px solid rgba(255,255,255,0.1); padding: 0.35em 0.6em; text-align: left; }
     .brain-md-content th { background: rgba(255,255,255,0.06); font-weight: 600; color: #d4d4d4; }
     .brain-md-content a { color: #60a5fa; text-decoration: none; }

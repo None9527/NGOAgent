@@ -154,7 +154,7 @@ export function SkillMCPManager({ onNavigateDetail }: SkillMCPManagerProps) {
           </button>
         </div>
         
-        <div className="flex-1 overflow-y-auto px-5 py-5 custom-scrollbar">
+        <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-4 sm:py-5 custom-scrollbar">
           {contentLoading ? (
             <div className="text-center py-12 text-gray-500 text-sm">加载中…</div>
           ) : (
@@ -173,7 +173,7 @@ export function SkillMCPManager({ onNavigateDetail }: SkillMCPManagerProps) {
     <div className="w-full h-full flex flex-col bg-transparent relative" style={{ animation: 'fadeIn 0.2s ease-out' }}>
       <div className="shrink-0 bg-white/[0.02] border-b border-white/[0.04]">
         {/* Hub Top Tab Switcher */}
-        <div className="flex items-center justify-between px-5 py-2.5 border-b border-white/[0.02]">
+        <div className="flex items-center justify-between px-3 sm:px-5 py-2.5 border-b border-white/[0.02]">
           <div className="flex bg-black/40 p-1 rounded-lg ring-1 ring-white/[0.05]">
             <button onClick={() => setTab('skills')}
               className={`px-4 py-1.5 text-[11px] font-medium rounded-md transition-all duration-300 ${
@@ -235,7 +235,7 @@ export function SkillMCPManager({ onNavigateDetail }: SkillMCPManagerProps) {
 
                   <div className="flex items-center justify-between mt-auto w-full">
                     <span className="text-[9px] text-gray-600 font-mono tracking-wider truncate bg-black/20 px-1.5 py-0.5 rounded border border-white/[0.02] max-w-[200px]">{sk.path.replace(/.+\/skills\//, '')}</span>
-                    <div className="text-gray-500 group-hover:text-blue-400 transition-colors opacity-0 group-hover:opacity-100 shrink-0">
+                    <div className="text-gray-500 group-hover:text-blue-400 transition-colors shrink-0">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M9 18l6-6-6-6"/></svg>
                     </div>
                   </div>
@@ -321,7 +321,7 @@ const skillMdStyles = (
     .skill-md-content pre { background: rgba(0,0,0,0.35); padding: 0.8em; border-radius: 6px; overflow-x: auto; margin: 0.6em 0; }
     .skill-md-content pre code { background: none; padding: 0; color: #d4d4d4; font-size: 0.85em; }
     .skill-md-content blockquote { border-left: 3px solid rgba(96,165,250,0.4); padding-left: 0.8em; margin: 0.6em 0; color: #a3a3a3; }
-    .skill-md-content table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.85em; }
+    .skill-md-content table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.85em; display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .skill-md-content th, .skill-md-content td { border: 1px solid rgba(255,255,255,0.1); padding: 0.4em 0.6em; text-align: left; }
     .skill-md-content th { background: rgba(255,255,255,0.04); color: #a3a3a3; font-weight: 600; }
     .skill-md-content hr { border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 0.8em 0; }

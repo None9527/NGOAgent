@@ -122,7 +122,7 @@ export function KIManager({ onNavigateDetail }: KIManagerProps) {
           </button>
         </div>
         
-        <div className="flex-1 overflow-y-auto px-5 py-5 custom-scrollbar">
+        <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-4 custom-scrollbar">
           <div className="max-w-4xl mx-auto space-y-5">
 
             {/* Meta */}
@@ -164,7 +164,7 @@ export function KIManager({ onNavigateDetail }: KIManagerProps) {
                 </div>
 
                 {/* File content */}
-                <div className="px-5 py-4">
+                <div className="px-3 sm:px-5 py-3 sm:py-4">
                   {ac.loading ? (
                     <div className="text-gray-500 text-xs text-center py-4">加载中…</div>
                   ) : ac.name.endsWith('.md') ? (
@@ -275,7 +275,7 @@ const mdStyles = (
     .ki-md-content pre { background: rgba(0,0,0,0.35); padding: 0.8em; border-radius: 6px; overflow-x: auto; margin: 0.6em 0; }
     .ki-md-content pre code { background: none; padding: 0; color: #d4d4d4; }
     .ki-md-content blockquote { border-left: 3px solid rgba(96,165,250,0.4); padding-left: 1em; margin: 0.6em 0; color: #a3a3a3; }
-    .ki-md-content table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.9em; }
+    .ki-md-content table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.9em; display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .ki-md-content th, .ki-md-content td { border: 1px solid rgba(255,255,255,0.1); padding: 0.4em 0.6em; text-align: left; }
     .ki-md-content th { background: rgba(255,255,255,0.06); font-weight: 600; color: #d4d4d4; }
     .ki-md-content a { color: #60a5fa; text-decoration: none; }
