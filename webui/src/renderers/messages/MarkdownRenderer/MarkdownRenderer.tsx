@@ -7,9 +7,12 @@
  */
 
 import type { FC } from 'react';
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useState } from 'react';
 import MarkdownIt from 'markdown-it';
 import { ImageGallery } from '../ImageGallery';
+import Lightbox from 'yet-another-react-lightbox';
+import Zoom from 'yet-another-react-lightbox/plugins/zoom';
+import 'yet-another-react-lightbox/styles.css';
 import type { Options as MarkdownItOptions } from 'markdown-it';
 import './MarkdownRenderer.css';
 
@@ -429,11 +432,22 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     }
   }, [content, enableFileLinks, md]);
 
-  // Event delegation: intercept clicks on file-path links (images now handled by gallery)
+  // Event delegation: intercept clicks on file-path links AND images
+  const [singleImageSrc, setSingleImageSrc] = useState<string | null>(null);
+
   const handleContainerClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
       const target = e.target as HTMLElement | null;
       if (!target) return;
+
+      // Click on any <img> (non-gallery) → open standalone lightbox
+      if (target.tagName === 'IMG') {
+        e.preventDefault();
+        e.stopPropagation();
+        const src = (target as HTMLImageElement).src;
+        if (src) setSingleImageSrc(src);
+        return;
+      }
 
       if (!enableFileLinks) return;
 
@@ -475,23 +489,37 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
   );
 
   return (
-    <div
-      className="markdown-content"
-      onClick={handleContainerClick}
-      style={{
-        wordWrap: 'break-word',
-        overflowWrap: 'break-word',
-        whiteSpace: 'normal',
-      }}
-    >
-      {segments.map((seg, i) =>
-        seg.type === 'gallery' ? (
-          <ImageGallery key={`gallery-${i}`} images={seg.images} />
-        ) : (
-          <div key={`html-${i}`} dangerouslySetInnerHTML={{ __html: seg.html }} />
-        )
-      )}
-    </div>
+    <>
+      {/* Standalone lightbox for single images clicked in HTML segments */}
+      <Lightbox
+        open={!!singleImageSrc}
+        close={() => setSingleImageSrc(null)}
+        slides={singleImageSrc ? [{ src: singleImageSrc }] : []}
+        plugins={[Zoom]}
+        zoom={{ maxZoomPixelRatio: 5 }}
+        styles={{
+          container: { backgroundColor: 'rgba(0, 0, 0, 0.92)', backdropFilter: 'blur(16px)' },
+        }}
+        animation={{ fade: 200 }}
+      />
+      <div
+        className="markdown-content"
+        onClick={handleContainerClick}
+        style={{
+          wordWrap: 'break-word',
+          overflowWrap: 'break-word',
+          whiteSpace: 'normal',
+        }}
+      >
+        {segments.map((seg, i) =>
+          seg.type === 'gallery' ? (
+            <ImageGallery key={`gallery-${i}`} images={seg.images} />
+          ) : (
+            <div key={`html-${i}`} dangerouslySetInnerHTML={{ __html: seg.html }} />
+          )
+        )}
+      </div>
+    </>
   );
 };
 
