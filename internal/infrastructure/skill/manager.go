@@ -29,6 +29,8 @@ func NewManager(skillDirs ...string) *Manager {
 
 // Discover scans all skill directories for SKILL.md files.
 func (m *Manager) Discover() {
+	// Clear stale entries so removed skills don't linger in memory.
+	m.skills = make(map[string]*entity.Skill)
 	for _, dir := range m.skillDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
