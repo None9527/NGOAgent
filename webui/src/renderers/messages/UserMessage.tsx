@@ -35,15 +35,32 @@ interface ParsedAttachment {
 const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?)$/i;
 
 function parseAttachments(content: string): { attachments: ParsedAttachment[]; cleanContent: string } {
-  const re = /^\[用户附件\]\n((?:- .+\n?)+)\n*/;
-  const match = content.match(re);
-  if (!match) return { attachments: [], cleanContent: content };
   const attachments: ParsedAttachment[] = [];
-  for (const line of match[1].split('\n')) {
-    const m = line.match(/^- (.+?):\s*(.+)$/);
-    if (m) attachments.push({ name: m[1].trim(), path: m[2].trim(), isImage: IMAGE_EXTS.test(m[2].trim()) });
+
+  // New XML format: <user_attachments>...<file name="x" path="y" type="z" role="r" />...</user_attachments>
+  const xmlRe = /^<user_attachments>\s*([\s\S]*?)<\/user_attachments>\s*/;
+  const xmlMatch = content.match(xmlRe);
+  if (xmlMatch) {
+    const fileRe = /<file\s+[^>]*?name="([^"]*)"[^>]*?path="([^"]*)"[^>]*?type="([^"]*)"[^>]*?\/>/g;
+    let fm;
+    while ((fm = fileRe.exec(xmlMatch[1])) !== null) {
+      attachments.push({ name: fm[1], path: fm[2], isImage: fm[3].startsWith('image/') });
+    }
+    return { attachments, cleanContent: content.slice(xmlMatch[0].length).trim() };
   }
-  return { attachments, cleanContent: content.slice(match[0].length).trim() };
+
+  // Legacy format: [用户附件]\n- name: path\n...
+  const legacyRe = /^\[用户附件\]\n((?:- .+\n?)+)\n*/;
+  const legacyMatch = content.match(legacyRe);
+  if (legacyMatch) {
+    for (const line of legacyMatch[1].split('\n')) {
+      const m = line.match(/^- (.+?):\s*(.+)$/);
+      if (m) attachments.push({ name: m[1].trim(), path: m[2].trim(), isImage: IMAGE_EXTS.test(m[2].trim()) });
+    }
+    return { attachments, cleanContent: content.slice(legacyMatch[0].length).trim() };
+  }
+
+  return { attachments: [], cleanContent: content };
 }
 
 export interface UserMessageProps {
