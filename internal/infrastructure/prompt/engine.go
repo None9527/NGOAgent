@@ -80,7 +80,8 @@ func (e *Engine) Assemble(deps Deps) (string, int) {
 }
 
 // buildSections creates the first-principles ordered sections.
-// Layout D: Head(Identity→CoreBehavior→Safety→PreferenceKI→UserRules) → Mid(ToolProtocol→Tooling→Skills→ProjectCtx) → Tail(ResponseFormat→SemanticKI→Runtime→Focus→Ephemeral)
+// Layout: Head(Identity→CoreBehavior→Safety→PreferenceKI→UserRules) → Mid(Tooling→Skills→ToolProtocol→ToolCalling→ProjectCtx) → Tail(ResponseFormat→SemanticKI→Runtime→Focus→Ephemeral)
+// Mid follows natural dependency: WHAT I can do → HOW to work
 func (e *Engine) buildSections(deps Deps) []Section {
 	sections := []Section{
 		// ═══ Head Peak: Identity + Behavior + Constraints (HIGH attention) ═══
@@ -90,11 +91,11 @@ func (e *Engine) buildSections(deps Deps) []Section {
 		{Order: 4, Name: "Safety", Content: prompttext.Safety, Priority: 0},
 		{Order: 5, Name: "PreferenceKI", Content: e.buildPreferenceKI(deps.PreferenceKI), Priority: 0},
 		{Order: 6, Name: "UserRules", Content: e.buildUserRules(deps.UserRules), Priority: 1},
-		// ═══ Mid Valley: Procedural reference (LOW attention, lookup-based) ═══
-		{Order: 7, Name: "ToolProtocol", Content: prompttext.ToolProtocol, Priority: 0},
-		{Order: 8, Name: "ToolCalling", Content: prompttext.ToolCalling, Priority: 0},
-		{Order: 9, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
-		{Order: 10, Name: "Skills", Content: e.buildSkills(deps.SkillInfos), Priority: 3},
+		// ═══ Mid Valley: Capability inventory FIRST, then protocol (natural dependency) ═══
+		{Order: 7, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
+		{Order: 8, Name: "Skills", Content: e.buildSkills(deps.SkillInfos), Priority: 1},
+		{Order: 9, Name: "ToolProtocol", Content: prompttext.ToolProtocol, Priority: 0},
+		{Order: 10, Name: "ToolCalling", Content: prompttext.ToolCalling, Priority: 0},
 		{Order: 11, Name: "ProjectContext", Content: e.buildProjectContext(deps.ProjectContext), Priority: 2},
 		{Order: 12, Name: "Variants", Content: "", Priority: 3},
 		// ═══ Tail Peak: Output format + Task Knowledge + Live Context (HIGH attention) ═══

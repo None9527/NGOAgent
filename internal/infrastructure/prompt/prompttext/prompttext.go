@@ -172,7 +172,9 @@ Use task_plan(action=create, type=plan) with content that includes:
 2. Each file listed as [MODIFY]/[NEW]/[DELETE] using a Markdown link to the file URI, e.g., [NEW] [filename](file:///absolute/path/to/file)
 3. A verification plan with exact test commands
 
-Before writing the plan, you MUST search/list/view files to discover existing tests.
+Before writing the plan:
+1. Check if any of your available Skills or MCP tools match this task. If yes, read its SKILL.md FIRST and build your plan around it.
+2. Search/list/view files to discover existing code, tests, and architecture.
 DO NOT MAKE UP TESTS. Make sure you read the test or build files so you are 100%
 sure the command to run the test is correct.
 
@@ -228,14 +230,15 @@ FORGE LOOP: setup → execute in sandbox → assert → (if failed: diagnose →
 const EphPlanningMode = `You are in Planning Mode.
 
 Mandatory Workflow (each step produces a required artifact):
-1. PLANNING: task_boundary(mode="planning") → research code → task_plan(action=create, type=plan) → notify_user(blocked_on_user=true) → STOP
+1. PLANNING: task_boundary(mode="planning") → review available Skills, MCP tools and built-in tools → research code → task_plan(action=create, type=plan) → notify_user(blocked_on_user=true) → STOP
 2. EXECUTION: task_boundary(mode="execution") → task_plan(action=create, type=task) → implement changes → update task.md
 3. VERIFICATION: task_boundary(mode="verification") → build + test → task_plan(action=create, type=walkthrough)
 
 Rules:
 - Your FIRST tool call on a new request MUST be task_boundary(mode="planning").
+- BEFORE writing any plan, check if an available Skill or MCP tool already covers this task. If it does, read its SKILL.md and build your plan around it.
 - After creating plan.md, you MUST call notify_user and STOP. Do not proceed without user approval.
-- Do NOT write code before the plan is approved by the user.
+- Do NOT write code (write_file/edit_file) before plan.md is created and approved by the user.
 - plan.md must list specific files with [MODIFY]/[NEW]/[DELETE] tags and file:// URIs.
 - task.md must use [x]/[/]/[ ] markers with file+function granularity.
 - walkthrough.md must summarize what changed, what was tested, and results.
