@@ -12,7 +12,11 @@ import MarkdownIt from 'markdown-it';
 import { ImageGallery } from '../ImageGallery';
 import Lightbox from 'yet-another-react-lightbox';
 import Zoom from 'yet-another-react-lightbox/plugins/zoom';
+import Thumbnails from 'yet-another-react-lightbox/plugins/thumbnails';
+import Counter from 'yet-another-react-lightbox/plugins/counter';
 import 'yet-another-react-lightbox/styles.css';
+import 'yet-another-react-lightbox/plugins/thumbnails.css';
+import 'yet-another-react-lightbox/plugins/counter.css';
 import type { Options as MarkdownItOptions } from 'markdown-it';
 import './MarkdownRenderer.css';
 
@@ -356,7 +360,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
 
   /**
    * Parse rendered HTML into segments: text chunks and image groups.
-   * Consecutive <img> tags (with optional wrapping <p>) are grouped into galleries.
+   * Scans for ALL images and groups consecutive ones (ignoring whitespace/BR) into galleries.
    */
   type Segment = { type: 'html'; html: string } | { type: 'gallery'; images: { src: string; alt: string }[] };
 
@@ -373,79 +377,123 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         html = processFilePaths(html);
       }
 
-      // Step 5: Split into segments — find consecutive image-only paragraphs
-      // Pattern: <p><img src="..." alt="..."></p> (markdown-it wraps images in <p>)
-      const imgParagraphRe = /\s*<p>\s*<img\s+src="([^"]*)"(?:\s+alt="([^"]*)")?\s*\/?>\s*<\/p>\s*/gi;
-
+      // Step 5: Split into segments — flexible image grouping
+      const imgTagRe = /<img\s+src="([^"]*)"(?:\s+alt="([^"]*)")?[^>]*>/gi;
       const result: Segment[] = [];
       let lastIndex = 0;
-      let pendingImages: { src: string; alt: string }[] = [];
-
-      // Find all image paragraphs and track their positions
-      const matches: { index: number; length: number; src: string; alt: string }[] = [];
       let m: RegExpExecArray | null;
-      while ((m = imgParagraphRe.exec(html)) !== null) {
-        matches.push({ index: m.index, length: m[0].length, src: m[1], alt: m[2] || '' });
+
+      const allMatches: { index: number; length: number; src: string; alt: string }[] = [];
+      while ((m = imgTagRe.exec(html)) !== null) {
+        allMatches.push({ index: m.index, length: m[0].length, src: m[1], alt: m[2] || '' });
       }
 
-      // Flush pending gallery
-      const flushGallery = () => {
-        if (pendingImages.length > 0) {
-          result.push({ type: 'gallery', images: [...pendingImages] });
-          pendingImages = [];
+      const flushText = (end: number) => {
+        const text = html.slice(lastIndex, end).trim();
+        if (text && text !== '<p></p>') {
+          result.push({ type: 'html', html: text });
         }
+        lastIndex = end;
       };
 
+      let pendingGallery: { src: string; alt: string }[] = [];
 
-      for (const match of matches) {
-        const before = html.slice(lastIndex, match.index);
-        const beforeTrimmed = before.trim();
+      for (let i = 0; i < allMatches.length; i++) {
+        const match = allMatches[i];
+        const nextMatch = allMatches[i + 1];
 
-        if (beforeTrimmed) {
-          // Non-empty content between images → break the gallery
-          flushGallery();
-          result.push({ type: 'html', html: beforeTrimmed });
+        // Is there "meaningful" content between this image and the previous one?
+        const gap = html.slice(lastIndex, match.index);
+        const isContinuous = !/[^\s\n]|<br\s*\/?>/.test(gap.replace(/<\/?p>/g, ''));
+
+        if (!isContinuous && lastIndex < match.index) {
+          if (pendingGallery.length > 0) {
+            result.push({ type: 'gallery', images: pendingGallery });
+            pendingGallery = [];
+          }
+          flushText(match.index);
         }
 
-        pendingImages.push({ src: match.src, alt: match.alt });
+        pendingGallery.push({ src: match.src, alt: match.alt });
         lastIndex = match.index + match.length;
+
+        // If next one is not continuous, or no next one, flush gallery
+        if (nextMatch) {
+          const nextGap = html.slice(lastIndex, nextMatch.index);
+          const nextIsContinuous = !/[^\s\n]|<br\s*\/?>/.test(nextGap.replace(/<\/?p>/g, ''));
+          if (!nextIsContinuous) {
+            result.push({ type: 'gallery', images: pendingGallery });
+            pendingGallery = [];
+            // Advance lastIndex to nextMatch.index will be handled in next iteration's gap check
+          }
+        } else {
+          result.push({ type: 'gallery', images: pendingGallery });
+          pendingGallery = [];
+        }
       }
 
-      // Remaining content after last image
       const trailing = html.slice(lastIndex).trim();
-      if (trailing) {
-        flushGallery();
+      if (trailing && trailing !== '<p></p>') {
         result.push({ type: 'html', html: trailing });
-      } else {
-        flushGallery();
       }
 
-      // If no images found, return single HTML segment
-      if (result.length === 0) {
-        return [{ type: 'html', html }];
-      }
-
-      return result;
+      return result.length > 0 ? result : [{ type: 'html', html }];
     } catch (error) {
       console.error('Error rendering markdown:', error);
       return [{ type: 'html', html: escapeHtml(content) }];
     }
   }, [content, enableFileLinks, md]);
 
-  // Event delegation: intercept clicks on file-path links AND images
-  const [singleImageSrc, setSingleImageSrc] = useState<string | null>(null);
+  // Extract ALL unique image URLs from segments for global lightbox
+  const allImages = useMemo(() => {
+    const urls: { src: string; alt: string }[] = [];
+    const seen = new Set<string>();
+    segments.forEach(seg => {
+      if (seg.type === 'gallery') {
+        seg.images.forEach(img => {
+          if (!seen.has(img.src)) {
+            urls.push(img);
+            seen.add(img.src);
+          }
+        });
+      } else {
+        // Fallback: parse <img> from HTML chunks too
+        const imgRe = /<img\s+src="([^"]*)"/gi;
+        let m;
+        while ((m = imgRe.exec(seg.html)) !== null) {
+          if (!seen.has(m[1])) {
+            urls.push({ src: m[1], alt: '' });
+            seen.add(m[1]);
+          }
+        }
+      }
+    });
+    return urls;
+  }, [segments]);
+
+  // Unified lightbox state
+  const [lightboxIndex, setLightboxIndex] = useState(-1);
+
+  const handleImageClick = useCallback((src: string) => {
+    const index = allImages.findIndex(img => img.src === src);
+    if (index >= 0) {
+      setLightboxIndex(index);
+    } else {
+      // Fallback for dynamically added images not in useMemo
+      setLightboxIndex(0);
+    }
+  }, [allImages]);
 
   const handleContainerClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
       const target = e.target as HTMLElement | null;
       if (!target) return;
 
-      // Click on any <img> (non-gallery) → open standalone lightbox
+      // Click on any <img> (standalone or inside gallery)
       if (target.tagName === 'IMG') {
         e.preventDefault();
         e.stopPropagation();
-        const src = (target as HTMLImageElement).src;
-        if (src) setSingleImageSrc(src);
+        handleImageClick((target as HTMLImageElement).src);
         return;
       }
 
@@ -490,17 +538,20 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
 
   return (
     <>
-      {/* Standalone lightbox for single images clicked in HTML segments */}
+      {/* Unified lightbox for all images in the message */}
       <Lightbox
-        open={!!singleImageSrc}
-        close={() => setSingleImageSrc(null)}
-        slides={singleImageSrc ? [{ src: singleImageSrc }] : []}
-        plugins={[Zoom]}
+        open={lightboxIndex >= 0}
+        close={() => setLightboxIndex(-1)}
+        index={lightboxIndex}
+        slides={allImages.map(img => ({ src: img.src, alt: img.alt }))}
+        plugins={[Zoom, Thumbnails, Counter]}
         zoom={{ maxZoomPixelRatio: 5 }}
+        thumbnails={{ border: 0, borderRadius: 8, padding: 0, gap: 8 }}
+        counter={{ container: { style: { top: 'unset', bottom: 0 } } }}
         styles={{
           container: { backgroundColor: 'rgba(0, 0, 0, 0.92)', backdropFilter: 'blur(16px)' },
         }}
-        animation={{ fade: 200 }}
+        animation={{ fade: 200, swipe: 300 }}
       />
       <div
         className="markdown-content"
@@ -513,7 +564,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       >
         {segments.map((seg, i) =>
           seg.type === 'gallery' ? (
-            <ImageGallery key={`gallery-${i}`} images={seg.images} />
+            <ImageGallery key={`gallery-${i}`} images={seg.images} onImageClick={handleImageClick} />
           ) : (
             <div key={`html-${i}`} dangerouslySetInnerHTML={{ __html: seg.html }} />
           )
