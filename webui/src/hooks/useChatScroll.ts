@@ -1,238 +1,150 @@
-import { useRef, useCallback, useEffect, useState } from 'react';
+import { useRef, useCallback, useEffect } from 'react';
 
 /**
- * useChatScroll — single-observer, zero-waste sticky auto-scroll
+ * useChatScroll — bulletproof sticky auto-scroll (v3)
  *
- * Architecture:
- *   MutationObserver → dirty flag → single RAF → scroll if at-bottom
+ * Root causes of v2 failures:
+ *   1. isStreaming was React state → threshold switch has async delay
+ *      → first streaming mutations use non-streaming threshold (2px)
+ *      → auto-scroll disengages immediately
+ *   2. flush() was async (await scrollend) but called from RAF without await
+ *      → concurrent flush calls, race conditions
+ *   3. MutationObserver recreated on isStreaming change → brief blindspot
  *
- * Root cause of previous failures:
- *   flush() sets scrollTop = scrollHeight, which synchronously fires onScroll.
- *   Between the assignment and the onScroll read, React may have committed
- *   new DOM content, making scrollHeight larger. checkIsAtBottom then reads:
- *     newScrollHeight - oldScrollTop - clientHeight > 2px → false
- *   This permanently disables auto-scroll. The longer the content, the bigger
- *   the per-frame pixel growth, the wider the race window.
- *
- * Fix v1:
- *   `isFlushingRef` gates the onScroll handler. During programmatic scrollTop
- *   writes, onScroll is suppressed. Only genuine user scroll gestures can
- *   disengage auto-follow.
- *
- * Fix v2 (current):
- *   - Added streaming mode detection with enter/exit callbacks
- *   - Throttled MutationObserver during streaming (100ms vs 16ms)
- *   - RAF timestamp grace period to distinguish user vs programmatic scrolls
- *   - scrollend event support for smooth scrolling completion detection
- *   - Streaming mode uses 'instant' behavior to prevent animation queue buildup
+ * v3 fix:
+ *   - ALL state is refs (synchronous, zero delay)
+ *   - flush() is SYNC: scrollTop assignment during streaming, no animation
+ *   - MutationObserver created once, never torn down during streaming
+ *   - ~100 lines, zero complexity
  */
-
-// 节流函数：限制函数执行频率
-function throttle<T extends (...args: unknown[]) => void>(
-  fn: T,
-  limitMs: number
-): (...args: Parameters<T>) => void {
-  let lastRun = 0;
-  return (...args: Parameters<T>) => {
-    const now = Date.now();
-    if (now - lastRun >= limitMs) {
-      lastRun = now;
-      fn(...args);
-    }
-  };
-}
 
 export function useChatScroll() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
-  const dirtyRef = useRef(false);
   const rafIdRef = useRef<number | null>(null);
-  const isFlushingRef = useRef(false);
-
-  // 流式模式状态
-  const [isStreaming, setIsStreaming] = useState(false);
-  const streamingTimeoutRef = useRef<number | null>(null);
-
-  // RAF 时间戳替代布尔标志来避免竞争条件
+  const isStreamingRef = useRef(false);
   const lastFlushTimeRef = useRef(0);
-  const FLUSH_GRACE_PERIOD = 100; // ms
 
-  // ── 流式模式控制 ──
-  const enterStreamingMode = useCallback(() => {
-    setIsStreaming(true);
-    if (streamingTimeoutRef.current) {
-      window.clearTimeout(streamingTimeoutRef.current);
-    }
-  }, []);
+  const FLUSH_GRACE_MS = 80;
 
-  const exitStreamingMode = useCallback(() => {
-    if (streamingTimeoutRef.current) {
-      window.clearTimeout(streamingTimeoutRef.current);
-    }
-    streamingTimeoutRef.current = window.setTimeout(() => {
-      setIsStreaming(false);
-    }, 500);
-  }, []);
-
-  // ── 底部检测：流式模式下使用更大容差 ──
-  const checkIsAtBottom = useCallback((el: HTMLElement): boolean => {
-    const threshold = isStreaming ? 50 : 2; // 流式模式下使用更大容差
+  // ── Bottom detection ──
+  const checkIsAtBottom = (el: HTMLElement): boolean => {
+    // Streaming: 80px tolerance (content grows fast)
+    // Idle: 2px tolerance (pixel-perfect)
+    const threshold = isStreamingRef.current ? 80 : 2;
     return Math.ceil(el.scrollHeight) - el.scrollTop - el.clientHeight <= threshold;
-  }, [isStreaming]);
+  };
 
-  // ── 等待 scrollend 事件 ──
-  const waitForScrollEnd = useCallback((el: HTMLElement): Promise<void> => {
-    return new Promise((resolve) => {
-      // 优先使用原生 scrollend 事件
-      if ('onscrollend' in window) {
-        const handler = () => {
-          el.removeEventListener('scrollend', handler);
-          resolve();
-        };
-        el.addEventListener('scrollend', handler, { once: true });
-
-        // 超时兜底
-        setTimeout(() => {
-          el.removeEventListener('scrollend', handler);
-          resolve();
-        }, 300);
-      } else {
-        // 降级方案：等待一帧 + 检查 scrollTop 稳定
-        let lastScrollTop = el.scrollTop;
-        const checkStable = () => {
-          if (el.scrollTop === lastScrollTop) {
-            resolve();
-          } else {
-            lastScrollTop = el.scrollTop;
-            requestAnimationFrame(checkStable);
-          }
-        };
-        requestAnimationFrame(checkStable);
-      }
-    });
-  }, []);
-
-  // ── onScroll：使用 RAF 时间戳判断是否为程序触发 ──
+  // ── onScroll: only genuine user scrolls update at-bottom state ──
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
 
-    // 如果在 flush 的宽限期内，忽略此滚动事件
-    const timeSinceFlush = Date.now() - lastFlushTimeRef.current;
-    if (timeSinceFlush < FLUSH_GRACE_PERIOD) {
-      return;
-    }
+    // Ignore programmatic scrolls (within grace period of flush)
+    if (Date.now() - lastFlushTimeRef.current < FLUSH_GRACE_MS) return;
 
     isAtBottomRef.current = checkIsAtBottom(el);
-  }, [checkIsAtBottom]);
+  }, []);
 
-  // ── Flush：使用 RAF 时间戳和 scrollend ──
-  const flush = useCallback(async () => {
+  // ── flush: SYNC scroll, no await, no animation during streaming ──
+  const flush = useCallback(() => {
     rafIdRef.current = null;
-    dirtyRef.current = false;
-    const el = scrollContainerRef.current;
-    if (!el || !isAtBottomRef.current) return;
-
-    isFlushingRef.current = true;
-    lastFlushTimeRef.current = Date.now();
-
-    // 流式模式下使用 instant 避免动画堆积
-    const behavior = isStreaming ? 'instant' : 'auto';
-    el.scrollTo({ top: el.scrollHeight, behavior });
-
-    // 等待滚动完成
-    await waitForScrollEnd(el);
-
-    isFlushingRef.current = false;
-    lastFlushTimeRef.current = Date.now();
-  }, [isStreaming, waitForScrollEnd]);
-
-  // ── Schedule：流式模式下节流 ──
-  const scheduleScroll = useCallback(() => {
-    dirtyRef.current = true;
-
-    // 流式模式下限制为每 100ms 最多一次
-    const throttleMs = isStreaming ? 100 : 0;
-
-    if (rafIdRef.current === null) {
-      const schedule = () => {
-        rafIdRef.current = requestAnimationFrame(() => {
-          flush();
-        });
-      };
-
-      if (throttleMs > 0) {
-        setTimeout(schedule, throttleMs);
-      } else {
-        schedule();
-      }
-    }
-  }, [isStreaming, flush]);
-
-  // ── Imperative：用户发送消息 ──
-  const scrollToBottom = useCallback(async (behavior: ScrollBehavior = 'smooth') => {
     const el = scrollContainerRef.current;
     if (!el) return;
 
-    isFlushingRef.current = true;
-    lastFlushTimeRef.current = Date.now();
-
-    el.scrollTo({ top: el.scrollHeight, behavior });
-
-    // 只有 smooth 行为需要等待
-    if (behavior === 'smooth') {
-      await waitForScrollEnd(el);
+    // During streaming: if user hasn't explicitly scrolled up, always follow bottom
+    if (isStreamingRef.current) {
+      // Only disengage if user has scrolled significantly up (> 300px from bottom)
+      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distFromBottom > 300) return; // User intentionally scrolled up
+      // Otherwise force follow
+      lastFlushTimeRef.current = Date.now();
+      el.scrollTop = el.scrollHeight;
+      isAtBottomRef.current = true;
+      return;
     }
 
-    isFlushingRef.current = false;
+    // Non-streaming: respect isAtBottom
+    if (!isAtBottomRef.current) return;
     lastFlushTimeRef.current = Date.now();
-    isAtBottomRef.current = true;
-  }, [waitForScrollEnd]);
+    el.scrollTop = el.scrollHeight;
+  }, []);
 
-  // ── Force reset：会话切换 / 历史加载 ──
-  const resetToBottom = useCallback(async () => {
-    // 清理所有 pending 状态
+  // ── schedule: RAF-gated, max one pending ──
+  const scheduleFlush = useCallback(() => {
+    if (rafIdRef.current === null) {
+      rafIdRef.current = requestAnimationFrame(flush);
+    }
+  }, [flush]);
+
+  // ── Streaming mode: synchronous ref toggle ──
+  const enterStreamingMode = useCallback(() => {
+    isStreamingRef.current = true;
+    isAtBottomRef.current = true;
+
+    // Immediately scroll to bottom + force next 3 frames to keep following
+    const el = scrollContainerRef.current;
+    if (el) {
+      lastFlushTimeRef.current = Date.now();
+      el.scrollTop = el.scrollHeight;
+    }
+    // Multi-frame chase: DOM may update across several frames
+    let frames = 3;
+    const chase = () => {
+      if (frames-- > 0 && scrollContainerRef.current) {
+        lastFlushTimeRef.current = Date.now();
+        scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+        requestAnimationFrame(chase);
+      }
+    };
+    requestAnimationFrame(chase);
+  }, []);
+
+  const exitStreamingMode = useCallback(() => {
+    // Delay exit so final content renders still auto-scroll
+    setTimeout(() => {
+      isStreamingRef.current = false;
+    }, 500);
+  }, []);
+
+  // ── Imperative: user sends message (smooth scroll) ──
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    lastFlushTimeRef.current = Date.now();
+    el.scrollTo({ top: el.scrollHeight, behavior });
+    isAtBottomRef.current = true;
+  }, []);
+
+  // ── Force reset: session switch / history load ──
+  const resetToBottom = useCallback(() => {
     if (rafIdRef.current !== null) {
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
     }
-    if (streamingTimeoutRef.current) {
-      window.clearTimeout(streamingTimeoutRef.current);
-    }
-    dirtyRef.current = false;
-    setIsStreaming(false);
+    isStreamingRef.current = false;
 
     const el = scrollContainerRef.current;
     if (!el) return;
 
-    isFlushingRef.current = true;
     lastFlushTimeRef.current = Date.now();
-
     el.scrollTop = el.scrollHeight;
-
-    isFlushingRef.current = false;
-    lastFlushTimeRef.current = Date.now();
     isAtBottomRef.current = true;
   }, []);
 
-  // ── Core observer：使用节流的 mutation handler ──
+  // ── Core observer: created ONCE, never torn down during streaming ──
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
 
-    // 节流的 mutation handler
-    const throttledSchedule = throttle(scheduleScroll, isStreaming ? 100 : 16);
-
-    const mutObs = new MutationObserver(() => {
-      throttledSchedule();
-    });
+    const mutObs = new MutationObserver(scheduleFlush);
     mutObs.observe(container, {
       childList: true,
       subtree: true,
       characterData: true,
     });
 
-    const resizeObs = new ResizeObserver(throttledSchedule);
+    const resizeObs = new ResizeObserver(scheduleFlush);
     resizeObs.observe(container);
 
     return () => {
@@ -241,11 +153,8 @@ export function useChatScroll() {
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
       }
-      if (streamingTimeoutRef.current) {
-        window.clearTimeout(streamingTimeoutRef.current);
-      }
     };
-  }, [scheduleScroll, isStreaming]);
+  }, [scheduleFlush]);
 
   return {
     scrollContainerRef,
@@ -254,6 +163,6 @@ export function useChatScroll() {
     resetToBottom,
     enterStreamingMode,
     exitStreamingMode,
-    isStreaming,
+    isStreaming: isStreamingRef.current,
   };
 }

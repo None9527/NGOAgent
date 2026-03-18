@@ -380,8 +380,10 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       const processContainer = (match: string, inner: string) => {
         // Check if there's at least one image
         if (!/<img/i.test(inner)) return match;
-        // Check if it's ONLY tags and whitespace (no text content) length > 0 means text exists
-        if (inner.replace(/<[^>]+>/g, '').trim().length > 0) return match;
+        // Allow containers with only images and tags (original strict mode)
+        // OR containers where text is short caption (< 80 chars) alongside images
+        const textOnly = inner.replace(/<[^>]+>/g, '').trim();
+        if (textOnly.length > 80) return match; // Too much text — not a gallery candidate
 
         // Extract all images
         const images: { src: string; alt: string }[] = [];
@@ -423,7 +425,34 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         result.push({ type: 'html', html: html.slice(lastIndex) });
       }
 
-      return result.length > 0 ? result : [{ type: 'html', html }];
+      // Step 6: Merge nearby gallery segments separated by short text (captions)
+      // This handles LLM outputting images one-by-one with descriptions between them
+      const merged: Segment[] = [];
+      for (let i = 0; i < result.length; i++) {
+        const seg = result[i];
+        if (seg.type === 'gallery' && merged.length > 0) {
+          const prev = merged[merged.length - 1];
+          // Direct adjacent galleries — merge
+          if (prev.type === 'gallery') {
+            prev.images.push(...seg.images);
+            continue;
+          }
+          // Gallery separated by short HTML (caption text < 200 chars) with another gallery before it
+          if (prev.type === 'html' && merged.length >= 2) {
+            const prevPrev = merged[merged.length - 2];
+            const textLen = prev.html.replace(/<[^>]+>/g, '').trim().length;
+            if (prevPrev.type === 'gallery' && textLen < 200) {
+              // Absorb the caption text and merge galleries
+              prevPrev.images.push(...seg.images);
+              merged.pop(); // remove the caption html segment
+              continue;
+            }
+          }
+        }
+        merged.push(seg);
+      }
+
+      return merged.length > 0 ? merged : [{ type: 'html', html }];
     } catch (error) {
       console.error('Error rendering markdown:', error);
       return [{ type: 'html', html: escapeHtml(content) }];
