@@ -375,6 +375,7 @@ func Build() (*App, error) {
 		&historyAdapter{store: historyStore},
 		brainDir,
 		kiStore,
+		sbMgr,
 	)
 	srv := server.NewServer(agentAPI, addr, cfg.Server.AuthToken)
 

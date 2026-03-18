@@ -56,6 +56,18 @@ func (a *AgentLoop) RunWithoutAcquire(ctx context.Context, userMessage string) e
 }
 
 func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
+	// Create cancellable context — Stop() calls runCancel() to kill running sandbox processes.
+	runCtx, runCancel := context.WithCancel(ctx)
+	a.mu.Lock()
+	a.runCancel = runCancel
+	a.mu.Unlock()
+	defer func() {
+		runCancel()
+		a.mu.Lock()
+		a.runCancel = nil
+		a.mu.Unlock()
+	}()
+
 	// Guarantee history is persisted on ALL exit paths (API error, Stop, ctx cancel).
 	// persistHistory is idempotent — the extra call from StateDone is harmless.
 	defer a.persistHistory()
@@ -79,8 +91,8 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 
 	for {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-runCtx.Done():
+			return runCtx.Err()
 		case <-a.stopCh:
 			return fmt.Errorf("agent stopped")
 		default:
@@ -88,11 +100,11 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 
 		switch a.CurrentState() {
 		case StatePrepare:
-			a.doPrepare(ctx)
+			a.doPrepare(runCtx)
 			a.transition(StateGenerate)
 
 		case StateGenerate:
-			resp, err := a.doGenerate(ctx, opts)
+			resp, err := a.doGenerate(runCtx, opts)
 			if err != nil {
 				a.transition(StateError)
 				if llmErr, ok := err.(*llm.LLMError); ok {
@@ -145,7 +157,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			a.mu.Unlock()
 
 			for i, tc := range lastMsg.ToolCalls {
-				result, err := a.doToolExec(ctx, tc)
+				result, err := a.doToolExec(runCtx, tc)
 
 				// Denial sentinel: stop loop immediately
 				if errors.Is(err, ErrApprovalDenied) {
@@ -243,7 +255,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			a.deps.Delta.OnComplete()
 			// Hooks run async: must NOT block runInner return (which releases run lock).
 			// Hooks use snapshot data (RunInfo) so no race with next run.
-			go a.fireHooks(ctx, steps)
+			go a.fireHooks(runCtx, steps)
 			return nil
 
 		default:
@@ -253,7 +265,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 loopEnd:
 	a.persistHistory()
 	a.deps.Delta.OnComplete()
-	go a.fireHooks(ctx, steps)
+	go a.fireHooks(runCtx, steps)
 	return nil
 }
 

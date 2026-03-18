@@ -94,6 +94,7 @@ type AgentLoop struct {
 	mu             sync.Mutex
 	runMu          sync.Mutex // Backpressure: prevents concurrent Run() (Anti's BUSY state)
 	stopCh         chan struct{}
+	runCancel      context.CancelFunc // Cancels the running context on Stop()
 	options        RunOptions
 	guard          *BehaviorGuard
 	ephemerals     []string // Pending ephemeral messages for next LLM call
@@ -239,10 +240,15 @@ func (a *AgentLoop) CompactIfNeeded() {
 }
 
 // Stop signals the loop to terminate the current run.
+// Cancels the running context (kills sandbox processes) and closes stopCh.
 // The stopCh is recreated automatically when the next Run() begins.
 func (a *AgentLoop) Stop() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// Cancel running context first — propagates to sandbox.Run/RunBackground
+	if a.runCancel != nil {
+		a.runCancel()
+	}
 	select {
 	case <-a.stopCh:
 		// Already closed

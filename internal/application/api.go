@@ -20,6 +20,7 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/mcp"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
 	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
@@ -55,6 +56,7 @@ type AgentAPI struct {
 	histQuery  HistoryQuerier
 	brainDir   string // base brain directory for session-scoped artifact access
 	kiStore    *knowledge.Store
+	sandboxMgr *sandbox.Manager // for process cleanup on stop
 	startedAt  time.Time
 }
 
@@ -75,6 +77,7 @@ func NewAgentAPI(
 	histQuery HistoryQuerier,
 	brainDir string,
 	kiStore *knowledge.Store,
+	sbMgr *sandbox.Manager,
 ) *AgentAPI {
 	return &AgentAPI{
 		loop:       loop,
@@ -92,6 +95,7 @@ func NewAgentAPI(
 		histQuery:  histQuery,
 		brainDir:   brainDir,
 		kiStore:    kiStore,
+		sandboxMgr: sbMgr,
 		startedAt:  time.Now(),
 	}
 }
@@ -169,6 +173,10 @@ func (a *AgentAPI) StopRun(sessionID string) {
 		loop = a.loopPool.Get(sessionID)
 	}
 	loop.Stop()
+	// Safety net: kill all active sandbox processes to prevent orphans
+	if a.sandboxMgr != nil {
+		a.sandboxMgr.KillAll()
+	}
 }
 
 // Approve resolves a pending tool approval.

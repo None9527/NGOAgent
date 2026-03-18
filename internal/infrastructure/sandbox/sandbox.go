@@ -249,6 +249,14 @@ func (m *Manager) Kill(id string) error {
 	}
 }
 
+// KillAll terminates all active background processes.
+// Called on agent stop to prevent orphaned shell processes.
+func (m *Manager) KillAll() {
+	for _, id := range m.ListActive() {
+		m.Kill(id)
+	}
+}
+
 // SendInput writes data to a background process's stdin.
 func (m *Manager) SendInput(id, input string) error {
 	m.mu.RLock()
