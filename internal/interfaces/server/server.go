@@ -401,10 +401,21 @@ func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Block until client disconnects (run completion sends step_done via BufferedDelta)
-	<-r.Context().Done()
-	run.Buffer.Detach()
-	log.Printf("[reconnect] Client disconnected again for session %s", sessionID)
+	// Block until run completes OR client disconnects
+	select {
+	case <-run.Buffer.Done():
+		// Agent finished — send [DONE] to close SSE stream cleanly
+		run.Buffer.Detach()
+		mu.Lock()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		mu.Unlock()
+		log.Printf("[reconnect] Run completed, sent [DONE] for session %s", sessionID)
+	case <-r.Context().Done():
+		// Client disconnected before run finished
+		run.Buffer.Detach()
+		log.Printf("[reconnect] Client disconnected for session %s", sessionID)
+	}
 }
 
 // handleRunStatus returns whether a session has an active run.

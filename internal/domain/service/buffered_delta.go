@@ -32,6 +32,7 @@ type BufferedDelta struct {
 	writer   SSEWriter // nil = detached (buffering mode)
 	done     bool      // true after OnComplete/OnError
 	expireAt time.Time // auto-cleanup deadline after done
+	doneCh   chan struct{} // closed when done=true, for select-based waiters
 }
 
 // NewBufferedDelta creates a buffer, optionally with an initial live writer.
@@ -39,6 +40,7 @@ func NewBufferedDelta(writer SSEWriter) *BufferedDelta {
 	return &BufferedDelta{
 		writer: writer,
 		events: make([]BufferedEvent, 0, 128),
+		doneCh: make(chan struct{}),
 	}
 }
 
@@ -102,9 +104,20 @@ func (bd *BufferedDelta) Detach() {
 // MarkDone marks this run as complete and sets an expiry for cleanup.
 func (bd *BufferedDelta) MarkDone() {
 	bd.mu.Lock()
-	defer bd.mu.Unlock()
+	alreadyDone := bd.done
 	bd.done = true
 	bd.expireAt = time.Now().Add(30 * time.Minute)
+	bd.mu.Unlock()
+	// Close doneCh exactly once to unblock WaitDone() waiters
+	if !alreadyDone {
+		close(bd.doneCh)
+	}
+}
+
+// Done returns a channel that is closed when MarkDone is called.
+// Allows callers to select-wait for run completion.
+func (bd *BufferedDelta) Done() <-chan struct{} {
+	return bd.doneCh
 }
 
 // IsDone returns whether the run has completed.
