@@ -239,9 +239,10 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			}
 			a.state = StateIdle
 			a.persistHistory()
-			// fireHooks BEFORE OnComplete: ensures title_updated SSE event arrives before step_done
-			a.fireHooks(ctx, steps)
+			// OnComplete FIRST: release frontend (step_done event) before hooks
+			// Hooks (title distillation) can be slow; frontend must not wait.
 			a.deps.Delta.OnComplete()
+			a.fireHooks(ctx, steps)
 			return nil
 
 		default:
@@ -250,8 +251,8 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 	}
 loopEnd:
 	a.persistHistory()
-	a.fireHooks(ctx, steps)
 	a.deps.Delta.OnComplete()
+	a.fireHooks(ctx, steps)
 	return nil
 }
 

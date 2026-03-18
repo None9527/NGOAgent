@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
@@ -220,8 +221,10 @@ func (h *TitleDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		return
 	}
 
-	// Synchronous: blocks until title is generated so Delta can push before step_done
-	func() {
+	// Timeout guard: title distillation must not block run completion indefinitely
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[hook] panic in TitleDistillHook: %v", r)
@@ -233,11 +236,17 @@ func (h *TitleDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 			return
 		}
 		h.titler.SetTitle(info.SessionID, title)
-		// Push title via Delta SSE event (if delta is available in RunInfo)
 		if info.Delta != nil {
 			info.Delta.OnTitleUpdate(info.SessionID, title)
 		}
 		log.Printf("[hook] title distilled: session=%s title=%q", info.SessionID, title)
 	}()
+
+	// Wait up to 30s — if LLM is slow, let it finish in background
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		log.Printf("[hook] title distill timed out after 30s for session=%s", info.SessionID)
+	}
 }
 
