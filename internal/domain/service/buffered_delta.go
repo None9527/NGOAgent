@@ -157,6 +157,9 @@ func (bd *BufferedDelta) MakeDelta() *Delta {
 		OnApprovalRequestFunc: func(approvalID, toolName string, args map[string]any, reason string) {
 			bd.emit("approval_request", map[string]any{"type": "approval_request", "approval_id": approvalID, "tool_name": toolName, "args": args, "reason": reason})
 		},
+		OnTitleUpdateFunc: func(sessionID, title string) {
+			bd.emit("title_updated", map[string]string{"type": "title_updated", "session_id": sessionID, "title": title})
+		},
 		OnCompleteFunc: func() {
 			bd.emit("step_done", map[string]string{"type": "step_done"})
 			bd.MarkDone()

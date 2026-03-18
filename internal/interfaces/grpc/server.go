@@ -177,6 +177,9 @@ func (s *Server) Chat(req *pb.AgentChatRequest, stream pb.AgentService_ChatServe
 				ToolName: toolName, ToolInput: string(argsJSON), Text: reason,
 			})
 		},
+		OnTitleUpdateFunc: func(sessionID, title string) {
+			_ = stream.Send(&pb.AgentChatEvent{Type: "title_updated", Text: title})
+		},
 	}
 
 	// Unified API call — all kernel operations handled by API layer
@@ -702,6 +705,7 @@ func (s *Server) SendMessage(_ context.Context, req *pb.SendMessageRequest) (*pb
 		OnProgressFunc:  func(string, string, string, string) {},
 		OnPlanReviewFunc: func(string, []string) {},
 		OnApprovalRequestFunc: func(string, string, map[string]any, string) {},
+		OnTitleUpdateFunc: func(string, string) {},
 	}
 	if err := s.api.ChatStream(context.Background(), req.GetSessionId(), req.GetMessage(), delta); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil

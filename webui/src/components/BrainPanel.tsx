@@ -30,12 +30,15 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
   const loadArtifacts = useCallback(async () => {
     if (!sessionId) return
     try {
-      const res = await authFetch(`${API_BASE}/api/v1/brain/list?session_id=${encodeURIComponent(sessionId)}`)
+      const res = await authFetch(
+        `${API_BASE}/api/v1/brain/list?session_id=${encodeURIComponent(sessionId)}`,
+        { signal: AbortSignal.timeout(8000) },
+      )
       if (!res.ok) return
       const data = await res.json()
       setArtifacts(data.artifacts || [])
     } catch {
-      setArtifacts([])
+      // Timeout or network error — silently ignore to avoid UI freeze
     }
   }, [sessionId])
 
@@ -57,7 +60,8 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
 
   const loadContent = async (name: string): Promise<string> => {
     const res = await authFetch(
-      `${API_BASE}/api/v1/brain/read?session_id=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`
+      `${API_BASE}/api/v1/brain/read?session_id=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`,
+      { signal: AbortSignal.timeout(8000) },
     )
     if (!res.ok) throw new Error('Failed')
     const data = await res.json()

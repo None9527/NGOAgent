@@ -204,6 +204,15 @@ export function chatStream(
               break
             }
 
+            case 'title_updated': {
+              const sessionId = (event.session_id as string) || ''
+              const title = (event.title as string) || ''
+              if (sessionId && title) {
+                cb.onTitleUpdate?.(sessionId, title)
+              }
+              break
+            }
+
             case 'step_done': {
               currentAssistantId = null
               currentAssistantText = ''

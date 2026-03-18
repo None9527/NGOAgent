@@ -105,6 +105,7 @@ export interface StreamCallbacks {
   onApproval: (req: ApprovalRequest) => void
   onPlanReview?: (message: string, paths: string[]) => void
   onStepDone?: () => void
+  onTitleUpdate?: (sessionId: string, title: string) => void
   onProgress?: (taskName: string, status: string, summary: string, mode: string) => void
   onEnd: () => void
   onError: (err: Error) => void

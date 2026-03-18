@@ -128,7 +128,6 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			case "terminate":
 				a.transition(StateDone)
 				a.deps.Delta.OnText("\n\n[" + verdict.Message + "]")
-				a.deps.Delta.OnComplete()
 				continue
 			case "warn":
 				a.InjectEphemeral(verdict.Message)
@@ -136,7 +135,6 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 
 			if len(resp.ToolCalls) == 0 {
 				a.transition(StateDone)
-				a.deps.Delta.OnComplete()
 				continue
 			}
 			a.transition(StateToolExec)
@@ -168,7 +166,6 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 
 					a.deps.Delta.OnText("\n⛔ " + result + "\n")
 					a.transition(StateDone)
-					a.deps.Delta.OnComplete()
 					goto loopEnd
 				}
 
@@ -195,7 +192,6 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			a.mu.Unlock()
 			if shouldStop {
 				a.transition(StateDone)
-				a.deps.Delta.OnComplete()
 				continue
 			}
 
@@ -209,7 +205,6 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			if maxSteps > 0 && steps >= maxSteps {
 				a.transition(StateDone)
 				a.deps.Delta.OnText("\n\n[Max steps reached: safety limit]")
-				a.deps.Delta.OnComplete()
 				continue
 			}
 
@@ -244,7 +239,9 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			}
 			a.state = StateIdle
 			a.persistHistory()
+			// fireHooks BEFORE OnComplete: ensures title_updated SSE event arrives before step_done
 			a.fireHooks(ctx, steps)
+			a.deps.Delta.OnComplete()
 			return nil
 
 		default:
@@ -254,6 +251,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 loopEnd:
 	a.persistHistory()
 	a.fireHooks(ctx, steps)
+	a.deps.Delta.OnComplete()
 	return nil
 }
 
@@ -1038,6 +1036,7 @@ func (a *AgentLoop) fireHooks(ctx context.Context, steps int) {
 		Mode:         a.options.Mode,
 		FinalContent: finalContent,
 		History:      historySnapshot,
+		Delta:        a.deps.Delta,
 	})
 }
 

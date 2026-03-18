@@ -108,6 +108,7 @@ func (s *LogSink) OnToolResult(string, string, string, error)        {}
 func (s *LogSink) OnProgress(string, string, string, string) {}
 func (s *LogSink) OnPlanReview(string, []string)              {}
 func (s *LogSink) OnApprovalRequest(string, string, map[string]any, string) {}
+func (s *LogSink) OnTitleUpdate(string, string) {}
 func (s *LogSink) OnComplete() {}
 func (s *LogSink) OnError(err error) {
 	if err != nil {

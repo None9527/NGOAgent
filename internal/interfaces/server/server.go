@@ -391,8 +391,9 @@ func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	replayed := run.Buffer.Attach(writer, lastSeq)
 	log.Printf("[reconnect] Replayed %d events for session %s (from seq %d)", replayed, sessionID, lastSeq)
 
-	// If run already done, send [DONE] immediately after replay
+	// If run already done (or completed during replay), send [DONE] immediately
 	if run.Buffer.IsDone() {
+		run.Buffer.Detach()
 		mu.Lock()
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()

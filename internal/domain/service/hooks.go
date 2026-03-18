@@ -22,6 +22,7 @@ type RunInfo struct {
 	FinalContent string
 	Mode         string
 	History      []llm.Message // conversation history for distillation
+	Delta        DeltaSink     // SSE event sink for real-time push (e.g. title_updated)
 }
 
 // PostRunHookChain executes multiple hooks in order.
@@ -188,6 +189,7 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 // SessionTitler is the interface needed to persist a distilled title.
 type SessionTitler interface {
 	SetTitle(sessionID, title string)
+	Get(id string) (*SessionState, bool)
 }
 
 // TitleLLMCaller abstracts the LLM call for title distillation.
@@ -197,6 +199,7 @@ type TitleLLMCaller interface {
 
 // TitleDistillHook distills a short, descriptive session title via LLM
 // after the first user message, and persists it to the session manager.
+// Runs synchronously so the title SSE event arrives before step_done.
 type TitleDistillHook struct {
 	llm    TitleLLMCaller
 	titler SessionTitler
@@ -208,12 +211,17 @@ func NewTitleDistillHook(llm TitleLLMCaller, titler SessionTitler) *TitleDistill
 }
 
 func (h *TitleDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
-	// Only distill if session has a user message and we haven't titled it yet
-	// (The caller checks sess.Title == "" before triggering; here we just guard)
 	if info.UserMessage == "" || info.SessionID == "" {
 		return
 	}
-	go func() {
+
+	// Dedup guard: skip if session already has a title
+	if sess, ok := h.titler.Get(info.SessionID); ok && sess.Title != "" {
+		return
+	}
+
+	// Synchronous: blocks until title is generated so Delta can push before step_done
+	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[hook] panic in TitleDistillHook: %v", r)
@@ -225,6 +233,11 @@ func (h *TitleDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 			return
 		}
 		h.titler.SetTitle(info.SessionID, title)
+		// Push title via Delta SSE event (if delta is available in RunInfo)
+		if info.Delta != nil {
+			info.Delta.OnTitleUpdate(info.SessionID, title)
+		}
 		log.Printf("[hook] title distilled: session=%s title=%q", info.SessionID, title)
 	}()
 }
+

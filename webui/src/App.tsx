@@ -162,15 +162,18 @@ export default function App() {
         setPlanMode(!!cfg?.agent?.planning_mode)
         setSecurityMode(cfg?.security?.mode || 'allow')
 
-        // Auto-reconnect: check if there's an active run for the current session
+        // Auto-reconnect: load history first, then reconnect for incremental events
         const activeSessionId = data.active
         if (activeSessionId) {
+          // Always load DB history first — this gives us the full conversation
+          await loadHistory(activeSessionId)
+
           const runStatus = await checkActiveRun(activeSessionId)
           if (runStatus.active && !runStatus.done) {
-            console.log('[App] Active run detected, reconnecting SSE stream...')
+            console.log('[App] Active run detected, loading history + reconnecting SSE (lastSeq=%d)...', runStatus.lastSeq)
             setIsStreaming(true)
-            enterStreamingMode()  // 进入流式模式
-            const handle = reconnectStream(activeSessionId, 0, {
+            enterStreamingMode()
+            const handle = reconnectStream(activeSessionId, runStatus.lastSeq, {
               onMessage: (msg) => setMessages(prev => {
                 if (prev.some(m => m.uuid === msg.uuid)) return prev
                 return [...prev, msg]
@@ -212,14 +215,14 @@ export default function App() {
               onProgress: (taskName, status, summary, mode) => setTaskProgress({ taskName, status, summary, mode }),
               onEnd: () => {
                 setIsStreaming(false)
-                exitStreamingMode()  // 退出流式模式
+                exitStreamingMode()
                 setTaskProgress(null)
                 cancelRef.current = null
                 refreshSessions()
               },
               onError: (err) => { 
                 setIsStreaming(false)
-                exitStreamingMode()  // 退出流式模式
+                exitStreamingMode()
                 cancelRef.current = null
                 console.error('Reconnect error:', err) 
               },
@@ -249,6 +252,16 @@ export default function App() {
   }
 
   const handleSelectSession = async (id: string) => {
+    // Cancel any active stream before switching sessions
+    if (cancelRef.current) {
+      cancelRef.current()
+      cancelRef.current = null
+      setIsStreaming(false)
+      exitStreamingMode()
+      setTaskProgress(null)
+      setPendingApprovals([])
+      setPlanReview(null)
+    }
     setSessionId(id)
     await loadHistory(id)
     if (window.innerWidth < 768) setIsSidebarOpen(false)

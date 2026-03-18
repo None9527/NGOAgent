@@ -15,6 +15,7 @@ type Delta struct {
 	OnProgressFunc   func(taskName, status, summary, mode string)
 	OnPlanReviewFunc func(message string, paths []string)
 	OnApprovalRequestFunc func(approvalID, toolName string, args map[string]any, reason string)
+	OnTitleUpdateFunc func(sessionID, title string)
 	OnCompleteFunc   func()
 	OnErrorFunc      func(error)
 }
@@ -58,6 +59,12 @@ func (d *Delta) OnPlanReview(message string, paths []string) {
 func (d *Delta) OnApprovalRequest(approvalID, toolName string, args map[string]any, reason string) {
 	if d.OnApprovalRequestFunc != nil {
 		d.OnApprovalRequestFunc(approvalID, toolName, args, reason)
+	}
+}
+
+func (d *Delta) OnTitleUpdate(sessionID, title string) {
+	if d.OnTitleUpdateFunc != nil {
+		d.OnTitleUpdateFunc(sessionID, title)
 	}
 }
 
@@ -120,6 +127,7 @@ func (c *OutputCollector) OnToolResult(callID string, name string, output string
 func (c *OutputCollector) OnProgress(string, string, string, string)          {}
 func (c *OutputCollector) OnPlanReview(string, []string)                      {}
 func (c *OutputCollector) OnApprovalRequest(string, string, map[string]any, string) {}
+func (c *OutputCollector) OnTitleUpdate(string, string)                       {}
 func (c *OutputCollector) OnComplete()                                        {}
 func (c *OutputCollector) OnError(error)                                      {}
 

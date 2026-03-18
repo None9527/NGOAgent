@@ -34,6 +34,7 @@ type DeltaSink interface {
 	OnProgress(taskName, status, summary, mode string)
 	OnPlanReview(message string, paths []string)
 	OnApprovalRequest(approvalID, toolName string, args map[string]any, reason string)
+	OnTitleUpdate(sessionID, title string)
 	OnComplete()
 	OnError(err error)
 }
