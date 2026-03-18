@@ -1,7 +1,10 @@
 // Package llm provides LLM provider abstraction and multi-provider routing.
 package llm
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Provider is the interface for an LLM backend.
 type Provider interface {
@@ -26,11 +29,48 @@ type Request struct {
 
 // Message represents a conversation message.
 type Message struct {
-	Role       string     `json:"role"` // system / user / assistant / tool
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Reasoning  string     `json:"-"` // extracted thinking content (not sent to API)
+	Role         string        `json:"role"` // system / user / assistant / tool
+	Content      string        `json:"content,omitempty"`
+	ContentParts []ContentPart `json:"-"` // Multimodal: text + images (overrides Content when non-empty)
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID   string        `json:"tool_call_id,omitempty"`
+	Reasoning    string        `json:"-"` // extracted thinking content (not sent to API)
+}
+
+// ContentPart is a single part of a multimodal message (OpenAI Vision format).
+type ContentPart struct {
+	Type     string    `json:"type"`                // "text" or "image_url"
+	Text     string    `json:"text,omitempty"`      // for type="text"
+	ImageURL *ImageURL `json:"image_url,omitempty"` // for type="image_url"
+}
+
+// ImageURL holds the image data URL or HTTP URL.
+type ImageURL struct {
+	URL    string `json:"url"`              // "data:image/png;base64,..." or https://...
+	Detail string `json:"detail,omitempty"` // "auto", "low", "high"
+}
+
+// MarshalJSON custom-serializes Message for OpenAI Vision compatibility.
+// When ContentParts is non-empty, "content" becomes an array of parts.
+// Otherwise, "content" remains a plain string (backward compatible).
+func (m Message) MarshalJSON() ([]byte, error) {
+	type msgAlias struct {
+		Role       string     `json:"role"`
+		Content    any        `json:"content,omitempty"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
+	}
+	alias := msgAlias{
+		Role:       m.Role,
+		ToolCalls:  m.ToolCalls,
+		ToolCallID: m.ToolCallID,
+	}
+	if len(m.ContentParts) > 0 {
+		alias.Content = m.ContentParts // Serialize as array
+	} else {
+		alias.Content = m.Content // Serialize as string
+	}
+	return json.Marshal(alias)
 }
 
 // ToolDef defines a tool available to the model.

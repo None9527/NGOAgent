@@ -2,11 +2,15 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"mime"
 	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -63,7 +67,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 		a.stopCh = make(chan struct{})
 	default:
 	}
-	a.history = append(a.history, llm.Message{Role: "user", Content: userMessage})
+	a.history = append(a.history, a.buildUserMessage(userMessage))
 	a.state = StatePrepare
 	a.mu.Unlock()
 	a.guard.ResetTurn()
@@ -1040,3 +1044,93 @@ func (a *AgentLoop) fireHooks(ctx context.Context, steps int) {
 // Ensure ctxutil is used
 var _ = ctxutil.SessionIDFromContext
 
+// ═══════════════════════════════════════════════════════
+//  Multimodal: parse user attachments and build vision message
+// ═══════════════════════════════════════════════════════
+
+// attachmentRe extracts <user_attachments>...</user_attachments> blocks.
+var attachmentRe = regexp.MustCompile(`(?s)<user_attachments>\s*(.*?)\s*</user_attachments>`)
+
+// fileTagRe extracts individual <file ... /> tags.
+var fileTagRe = regexp.MustCompile(`<file\s+([^/]*?)\s*/>`)
+
+// attrRe extracts key="value" pairs from a tag.
+var attrRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
+
+// buildUserMessage parses the raw user text for <user_attachments> XML.
+// If image attachments are found, it builds a multimodal Message with ContentParts.
+// Otherwise returns a plain text Message.
+func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
+	match := attachmentRe.FindStringSubmatch(raw)
+	if match == nil {
+		// No attachments — plain text
+		return llm.Message{Role: "user", Content: raw}
+	}
+
+	// Extract text outside the attachment block
+	textOnly := strings.TrimSpace(attachmentRe.ReplaceAllString(raw, ""))
+
+	// Parse each <file .../> tag
+	var parts []llm.ContentPart
+	var nonImageFiles []string
+
+	fileTags := fileTagRe.FindAllStringSubmatch(match[1], -1)
+	for _, ft := range fileTags {
+		attrs := make(map[string]string)
+		for _, a := range attrRe.FindAllStringSubmatch(ft[1], -1) {
+			attrs[a[1]] = a[2]
+		}
+
+		filePath := attrs["path"]
+		fileRole := attrs["role"] // reference_image or reference_file
+
+		if fileRole == "reference_image" && filePath != "" {
+			// Read and base64-encode the image
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				log.Printf("[multimodal] failed to read image %s: %v", filePath, err)
+				nonImageFiles = append(nonImageFiles, filePath)
+				continue
+			}
+
+			// Detect MIME type from extension
+			ext := filepath.Ext(filePath)
+			mimeType := mime.TypeByExtension(ext)
+			if mimeType == "" {
+				mimeType = "image/png" // fallback
+			}
+
+			dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
+			parts = append(parts, llm.ContentPart{
+				Type: "image_url",
+				ImageURL: &llm.ImageURL{URL: dataURL},
+			})
+			log.Printf("[multimodal] attached image: %s (%s, %d bytes)", attrs["name"], mimeType, len(data))
+		} else {
+			// Non-image: keep path reference in text
+			nonImageFiles = append(nonImageFiles, filePath)
+		}
+	}
+
+	// No images found — return plain text with file references
+	if len(parts) == 0 {
+		return llm.Message{Role: "user", Content: raw}
+	}
+
+	// Build multimodal message: text part + image parts
+	// Prepend non-image file references to text if any
+	if len(nonImageFiles) > 0 {
+		textOnly = fmt.Sprintf("Attached files: %s\n\n%s", strings.Join(nonImageFiles, ", "), textOnly)
+	}
+
+	if textOnly != "" {
+		// Text part goes first
+		parts = append([]llm.ContentPart{{Type: "text", Text: textOnly}}, parts...)
+	}
+
+	return llm.Message{
+		Role:         "user",
+		Content:      textOnly, // Keep text in Content for history persistence / display
+		ContentParts: parts,    // Multimodal parts for LLM API
+	}
+}
