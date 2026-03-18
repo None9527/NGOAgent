@@ -239,10 +239,11 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			}
 			a.state = StateIdle
 			a.persistHistory()
-			// OnComplete FIRST: release frontend (step_done event) before hooks
-			// Hooks (title distillation) can be slow; frontend must not wait.
+			// OnComplete FIRST: release frontend (step_done event) immediately.
 			a.deps.Delta.OnComplete()
-			a.fireHooks(ctx, steps)
+			// Hooks run async: must NOT block runInner return (which releases run lock).
+			// Hooks use snapshot data (RunInfo) so no race with next run.
+			go a.fireHooks(ctx, steps)
 			return nil
 
 		default:
@@ -252,7 +253,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 loopEnd:
 	a.persistHistory()
 	a.deps.Delta.OnComplete()
-	a.fireHooks(ctx, steps)
+	go a.fireHooks(ctx, steps)
 	return nil
 }
 
