@@ -223,6 +223,7 @@ export default function App() {
               onError: (err) => { 
                 setIsStreaming(false)
                 exitStreamingMode()
+                setTaskProgress(null)
                 cancelRef.current = null
                 console.error('Reconnect error:', err) 
               },
@@ -448,6 +449,7 @@ export default function App() {
       onError: (err) => { 
         setIsStreaming(false)
         exitStreamingMode()
+        setTaskProgress(null)
         cancelRef.current = null
         console.error('Stream error:', err)
         // Show error to user as a visible message card

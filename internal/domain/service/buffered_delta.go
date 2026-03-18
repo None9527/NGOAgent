@@ -166,6 +166,7 @@ func (bd *BufferedDelta) MakeDelta() *Delta {
 		},
 		OnErrorFunc: func(err error) {
 			bd.emit("error", map[string]string{"type": "error", "message": err.Error()})
+			bd.MarkDone() // Mark done on error so RunTracker cleans up this run
 		},
 	}
 }
