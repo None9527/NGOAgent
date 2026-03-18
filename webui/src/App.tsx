@@ -77,7 +77,14 @@ export default function App() {
   const pendingScrollToEnd = useRef(false)
   
   // ── Sticky auto-scroll: all logic lives in the hook ──
-  const { scrollContainerRef, messagesEndRef, handleScroll, scrollToBottom, resetToBottom } = useChatScroll()
+  const { 
+    scrollContainerRef, 
+    handleScroll, 
+    scrollToBottom, 
+    resetToBottom,
+    enterStreamingMode,
+    exitStreamingMode,
+  } = useChatScroll()
 
   // Reactive scroll-to-end: fires after React commits state from loadHistory
   useEffect(() => {
@@ -162,6 +169,7 @@ export default function App() {
           if (runStatus.active && !runStatus.done) {
             console.log('[App] Active run detected, reconnecting SSE stream...')
             setIsStreaming(true)
+            enterStreamingMode()  // 进入流式模式
             const handle = reconnectStream(activeSessionId, 0, {
               onMessage: (msg) => setMessages(prev => [...prev, msg]),
               onUpdate: (uuid, patch) => {
@@ -195,11 +203,17 @@ export default function App() {
               onProgress: (taskName, status, summary, mode) => setTaskProgress({ taskName, status, summary, mode }),
               onEnd: () => {
                 setIsStreaming(false)
+                exitStreamingMode()  // 退出流式模式
                 setTaskProgress(null)
                 cancelRef.current = null
                 refreshSessions()
               },
-              onError: (err) => { setIsStreaming(false); cancelRef.current = null; console.error('Reconnect error:', err) },
+              onError: (err) => { 
+                setIsStreaming(false)
+                exitStreamingMode()  // 退出流式模式
+                cancelRef.current = null
+                console.error('Reconnect error:', err) 
+              },
             })
             cancelRef.current = handle.cancel
           }
@@ -319,6 +333,7 @@ export default function App() {
     }
     setMessages(prev => [...prev, userMsg])
     setIsStreaming(true)
+    enterStreamingMode()  // 进入流式模式，启用节流优化
     scrollToBottom('instant') // User action: snap immediately, no animation
 
     const handle = chatStream(finalText, sid, {
@@ -398,12 +413,18 @@ export default function App() {
         },
       onEnd: () => {
           setIsStreaming(false)
+          exitStreamingMode()  // 退出流式模式
           setTaskProgress(null)
           cancelRef.current = null
           refreshSessions()
           setTimeout(() => refreshSessions(), 3500)
         },
-      onError: (err) => { setIsStreaming(false); cancelRef.current = null; console.error('Stream error:', err) },
+      onError: (err) => { 
+        setIsStreaming(false)
+        exitStreamingMode()  // 退出流式模式
+        cancelRef.current = null
+        console.error('Stream error:', err) 
+      },
     })
     cancelRef.current = handle.cancel
   }, [inputText, isStreaming, sessionId, attachedFiles])
@@ -417,8 +438,9 @@ export default function App() {
     cancelRef.current?.()
     cancelRef.current = null
     setIsStreaming(false)
+    exitStreamingMode()  // 退出流式模式
     setTaskProgress(null)
-  }, [isStreaming])
+  }, [isStreaming, exitStreamingMode])
 
   // Gate: show ConnectPage until authenticated
   if (!connected) {
@@ -634,7 +656,7 @@ export default function App() {
         {/* The hook's MutationObserver + ResizeObserver watches this container */}
         {/* NOTE: Do NOT add CSS scroll-smooth here — it overrides scrollTop assignments and causes */}
         {/* scroll lag during streaming. The hook uses scrollTo({behavior:'smooth'}) only for explicit user scrolls. */}
-        <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 w-full overflow-y-auto relative z-0">
+        <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 min-h-0 w-full overflow-y-scroll relative z-0" style={{ WebkitOverflowScrolling: 'touch' }}>
           {/* Reading Column Container */}
           <div className="w-full max-w-4xl mx-auto flex flex-col min-h-full pt-10 md:pt-20 px-1 md:px-4 relative">
             {messages.length === 0 ? (
@@ -670,8 +692,6 @@ export default function App() {
             )}
             {/* Bottom spacer: prevents floating composer from covering last message */}
             <div className="h-[200px] md:h-[250px] w-full flex-shrink-0 pointer-events-none" aria-hidden="true" />
-            {/* Scroll anchor: hook's observers push scrollTop to reach here */}
-            <div ref={messagesEndRef} className="h-px w-full" aria-hidden="true" />
           </div>
         </div>
         {/* Floating Composer Container (Anchored to main bounds, compensated for 6px custom scrollbar width) */}

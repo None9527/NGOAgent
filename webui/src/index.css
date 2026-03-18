@@ -58,14 +58,34 @@ html, body {
   background: rgba(255,255,255,0.15);
 }
 
-/* ── Force-cap image size globally (override Tailwind Preflight) ── */
-img:not(.preview-img) {
-  max-width: 100% !important;
-  max-height: 380px !important;
-  object-fit: contain;
+/* ── Mobile scroll & touch global fixes ── */
+/* iOS: momentum scrolling on any scrollable element */
+.overflow-y-scroll,
+.overflow-y-auto {
+  -webkit-overflow-scrolling: touch;
 }
-/* Fullscreen preview image — no constraints */
-img.preview-img {
-  max-width: 92vw !important;
-  max-height: 92vh !important;
+
+/* Prevent iOS overscroll bounce on the root (body handled separately) */
+html {
+  overscroll-behavior: none;
+}
+body {
+  overscroll-behavior: none;
+  /* Prevent pull-to-refresh interfering with the app's own scroll */
+  overscroll-behavior-y: contain;
+}
+
+/* Android: ensure touch events are routed to pan-y scroll containers */
+.overflow-y-scroll {
+  touch-action: pan-y;
+}
+
+/* Prevent double-tap zoom on buttons/interactive elements on mobile */
+button, a, [role="button"] {
+  touch-action: manipulation;
+}
+
+/* Remove iOS tap highlight */
+* {
+  -webkit-tap-highlight-color: transparent;
 }

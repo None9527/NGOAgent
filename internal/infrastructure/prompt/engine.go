@@ -185,24 +185,6 @@ func (e *Engine) buildSemanticKI(semanticKI string) string {
 	return b.String()
 }
 
-// buildKnowledge kept for backward compatibility (returns merged if both provided)
-func (e *Engine) buildKnowledge(preferenceKI, semanticKI string) string {
-	if preferenceKI == "" && semanticKI == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("<knowledge_items>\n")
-	b.WriteString("⚠️ 以下知识条目与当前任务相关，请在执行操作前检查。\n")
-	b.WriteString("标记为 [PREFERENCE] 的条目是用户强制偏好，必须遵守。\n\n")
-	if preferenceKI != "" {
-		b.WriteString(preferenceKI)
-	}
-	if semanticKI != "" {
-		b.WriteString(semanticKI)
-	}
-	b.WriteString("</knowledge_items>")
-	return b.String()
-}
 
 func (e *Engine) buildFocus(path string) string {
 	if path == "" {
