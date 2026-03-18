@@ -26,7 +26,7 @@ type API interface {
 	// Chat — unified streaming entry point
 	ChatStream(ctx context.Context, sessionID, message string, delta *service.Delta) error
 	SessionID(sessionID string) string
-	StopRun()
+	StopRun(sessionID string)
 	Approve(approvalID string, approved bool) error
 
 	// Session
@@ -475,7 +475,11 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	s.api.StopRun()
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req) // best-effort parse, empty body is ok
+	s.api.StopRun(req.SessionID)
 	json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
 }
 

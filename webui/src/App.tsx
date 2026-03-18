@@ -468,15 +468,15 @@ export default function App() {
   // Stop — signal backend first, then abort SSE stream
   const handleStop = useCallback(async () => {
     if (!isStreaming) return
-    // Signal backend to abort agent loop first
-    try { await api.stop() } catch { /* ignore */ }
+    // Signal backend to abort the correct session's agent loop
+    try { await api.stop(sessionId) } catch { /* ignore */ }
     // Abort the SSE connection (triggers onError which also sets isStreaming=false)
     cancelRef.current?.()
     cancelRef.current = null
     setIsStreaming(false)
     exitStreamingMode()  // 退出流式模式
     setTaskProgress(null)
-  }, [isStreaming, exitStreamingMode])
+  }, [isStreaming, exitStreamingMode, sessionId])
 
   // Gate: show ConnectPage until authenticated
   if (!connected) {

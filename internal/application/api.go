@@ -161,9 +161,14 @@ func (a *AgentAPI) SessionID(sessionID string) string {
 	return a.loop.SessionID()
 }
 
-// StopRun signals the agent loop to stop.
-func (a *AgentAPI) StopRun() {
-	a.chatEngine.StopChat()
+// StopRun signals the correct agent loop to stop.
+// Uses sessionID to find the pool loop that is actually running.
+func (a *AgentAPI) StopRun(sessionID string) {
+	loop := a.loop
+	if sessionID != "" && a.loopPool != nil {
+		loop = a.loopPool.Get(sessionID)
+	}
+	loop.Stop()
 }
 
 // Approve resolves a pending tool approval.

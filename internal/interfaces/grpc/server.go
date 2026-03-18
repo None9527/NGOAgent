@@ -26,7 +26,7 @@ type API interface {
 	// Chat — unified streaming entry point
 	ChatStream(ctx context.Context, sessionID, message string, delta *service.Delta) error
 	SessionID(sessionID string) string
-	StopRun()
+	StopRun(sessionID string)
 	Approve(approvalID string, approved bool) error
 
 	// Session
@@ -199,8 +199,8 @@ func (s *Server) Chat(req *pb.AgentChatRequest, stream pb.AgentService_ChatServe
 // RunController
 // ═══════════════════════════════════════════
 
-func (s *Server) StopRun(_ context.Context, _ *pb.SessionRequest) (*pb.CommandResponse, error) {
-	s.api.StopRun()
+func (s *Server) StopRun(_ context.Context, req *pb.SessionRequest) (*pb.CommandResponse, error) {
+	s.api.StopRun(req.GetSessionId())
 	return &pb.CommandResponse{Ok: true, Message: "stopped"}, nil
 }
 

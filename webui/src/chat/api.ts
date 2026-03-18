@@ -76,7 +76,7 @@ export const api = {
   listModels: () => get<{ models: string[]; current: string }>('/v1/models'),
   switchModel: (modelName: string) => post<{ status: string }>('/v1/model/switch', { model: modelName }),
   newSession: (title = '') => post<SessionInfo>('/api/v1/session/new', { title }),
-  stop: () => post('/v1/stop'),
+  stop: (sessionId?: string) => post('/v1/stop', { session_id: sessionId || '' }),
   approve: (approvalId: string, approved: boolean) =>
     post('/v1/approve', { approval_id: approvalId, approved }),
   listSessions: () => get<SessionListResponse>('/api/v1/session/list'),
