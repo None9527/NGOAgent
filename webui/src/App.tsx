@@ -677,13 +677,10 @@ export default function App() {
 
               {/* Thinking indicator: visible after user sends, before first token */}
               {isStreaming && messages.length > 0 && messages[messages.length - 1].type === 'user' && (
-                <div className="flex items-center gap-2 px-2 py-3 animate-in fade-in">
-                  <div className="flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-[bounce_1.2s_ease-in-out_infinite]" />
-                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-[bounce_1.2s_ease-in-out_0.15s_infinite]" />
-                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-[bounce_1.2s_ease-in-out_0.3s_infinite]" />
-                  </div>
-                  <span className="text-xs text-gray-500">思考中…</span>
+                <div className="flex items-center gap-1.5 px-2 py-4">
+                  <span className="w-1.5 h-1.5 rounded-full bg-white/20 animate-pulse" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-white/20 animate-pulse [animation-delay:0.3s]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-white/20 animate-pulse [animation-delay:0.6s]" />
                 </div>
               )}
 

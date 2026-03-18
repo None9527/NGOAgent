@@ -200,7 +200,7 @@ export function chatStream(
             }
 
             case 'error': {
-              cb.onError(new Error((event.error as string) || 'Unknown error'))
+              cb.onError(new Error((event.message as string) || (event.error as string) || 'Unknown error'))
               break
             }
 
