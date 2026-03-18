@@ -60,6 +60,17 @@ func (hs *HistoryStore) LoadSession(sessionID string) ([]HistoryMessage, error) 
 	return msgs, err
 }
 
+// LoadSessionRecent retrieves the last `limit` messages for a session.
+// Used by the frontend API to avoid loading full history for display.
+func (hs *HistoryStore) LoadSessionRecent(sessionID string, limit int) ([]HistoryMessage, error) {
+	var msgs []HistoryMessage
+	// Sub-query: get IDs of last N messages, then load them in ASC order
+	err := hs.db.Where("session_id = ? AND id IN (SELECT id FROM history_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?)",
+		sessionID, sessionID, limit).
+		Order("created_at ASC").Find(&msgs).Error
+	return msgs, err
+}
+
 // DeleteSession removes all messages for a session.
 func (hs *HistoryStore) DeleteSession(sessionID string) error {
 	return hs.db.Where("session_id = ?", sessionID).Delete(&HistoryMessage{}).Error

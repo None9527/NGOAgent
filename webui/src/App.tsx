@@ -421,9 +421,17 @@ export default function App() {
         },
       onError: (err) => { 
         setIsStreaming(false)
-        exitStreamingMode()  // 退出流式模式
+        exitStreamingMode()
         cancelRef.current = null
-        console.error('Stream error:', err) 
+        console.error('Stream error:', err)
+        // Show error to user as a visible message card
+        const errText = err instanceof Error ? err.message : String(err)
+        setMessages(prev => [...prev, {
+          uuid: `err-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          type: 'assistant' as const,
+          message: { role: 'model', parts: [{ text: `⚠️ **Error:** ${errText}` }] },
+        }])
       },
     })
     cancelRef.current = handle.cancel
@@ -666,6 +674,18 @@ export default function App() {
             ) : (
             <div className="w-full flex flex-col relative">
               <ChatViewer messages={messages} theme="dark" sessionId={sessionId} />
+
+              {/* Thinking indicator: visible after user sends, before first token */}
+              {isStreaming && messages.length > 0 && messages[messages.length - 1].type === 'user' && (
+                <div className="flex items-center gap-2 px-2 py-3 animate-in fade-in">
+                  <div className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-[bounce_1.2s_ease-in-out_infinite]" />
+                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-[bounce_1.2s_ease-in-out_0.15s_infinite]" />
+                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-[bounce_1.2s_ease-in-out_0.3s_infinite]" />
+                  </div>
+                  <span className="text-xs text-gray-500">思考中…</span>
+                </div>
+              )}
 
               {/* Live Task Progress Card */}
               {taskProgress && (

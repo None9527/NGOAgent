@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"log"
 	"path/filepath"
 	"sync"
 
@@ -207,6 +208,33 @@ func (a *AgentLoop) ClearHistory() {
 // Compact triggers context compaction on the current history.
 func (a *AgentLoop) Compact() {
 	a.doCompact()
+}
+
+// CompactIfNeeded estimates history token count and auto-compacts if over budget.
+// Called on session resume to prevent full-history overload.
+// Budget = 70% of model context window (reserves 30% for system prompt + response).
+func (a *AgentLoop) CompactIfNeeded() {
+	a.mu.Lock()
+	tokenEst := 0
+	for _, m := range a.history {
+		tokenEst += len(m.Content) / 4
+		tokenEst += len(m.Reasoning) / 4
+	}
+	msgCount := len(a.history)
+	a.mu.Unlock()
+
+	// Skip if history is short (< 20 messages or < 4K tokens)
+	if msgCount < 20 || tokenEst < 4000 {
+		return
+	}
+
+	// Model context budget: default 128K, use 70%
+	budget := 128000 * 70 / 100 // ~89K tokens
+	if tokenEst > budget {
+		log.Printf("[compact] Auto-compacting on resume: %d tokens > %d budget (%d messages)",
+			tokenEst, budget, msgCount)
+		a.doCompact()
+	}
 }
 
 // Stop signals the loop to terminate the current run.

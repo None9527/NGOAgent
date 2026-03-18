@@ -133,6 +133,8 @@ func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message string, de
 				}
 			}
 			loop.SetHistory(msgs)
+			// Auto-compact on resume: prevent full-history overload
+			loop.CompactIfNeeded()
 			log.Printf("[session] Resumed %d messages for session %s (stream)", len(msgs), sessionID)
 		}
 	}

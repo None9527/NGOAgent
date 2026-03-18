@@ -48,6 +48,8 @@ func (ce *ChatEngine) Chat(ctx context.Context, sessionID, message string) error
 					}
 				}
 				ce.loop.SetHistory(msgs)
+				// Auto-compact on resume: prevent full-history overload
+				ce.loop.CompactIfNeeded()
 				log.Printf("[session] Resumed %d messages for session %s", len(msgs), sessionID)
 			}
 		}

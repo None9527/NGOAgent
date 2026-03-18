@@ -52,6 +52,9 @@ func (a *AgentLoop) RunWithoutAcquire(ctx context.Context, userMessage string) e
 }
 
 func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
+	// Guarantee history is persisted on ALL exit paths (API error, Stop, ctx cancel).
+	// persistHistory is idempotent — the extra call from StateDone is harmless.
+	defer a.persistHistory()
 
 	a.mu.Lock()
 	// Recreate stopCh if it was closed by a previous Stop()
