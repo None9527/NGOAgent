@@ -7,12 +7,11 @@
  */
 
 import type { FC } from 'react';
-import { useMemo, useCallback, useState, useRef } from 'react';
+import { useMemo, useCallback, useState } from 'react';
 import MarkdownIt from 'markdown-it';
 import { ImageGallery } from '../ImageGallery';
 import Lightbox from 'yet-another-react-lightbox';
-import Zoom from 'yet-another-react-lightbox/plugins/zoom';
-import type { ZoomRef } from 'yet-another-react-lightbox';
+
 import Thumbnails from 'yet-another-react-lightbox/plugins/thumbnails';
 import Counter from 'yet-another-react-lightbox/plugins/counter';
 import 'yet-another-react-lightbox/styles.css';
@@ -438,9 +437,10 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     segments.forEach(seg => {
       if (seg.type === 'gallery') {
         seg.images.forEach(img => {
-          if (!seen.has(img.src)) {
+          const normalizedSrc = decodeURIComponent(img.src).replace(/&amp;/g, '&');
+          if (!seen.has(normalizedSrc)) {
             urls.push(img);
-            seen.add(img.src);
+            seen.add(normalizedSrc);
           }
         });
       } else {
@@ -448,9 +448,10 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         let m;
         while ((m = imgRe.exec(seg.html)) !== null) {
           const unescapedSrc = m[1].replace(/&amp;/g, '&');
-          if (!seen.has(unescapedSrc)) {
+          const normalizedSrc = decodeURIComponent(unescapedSrc);
+          if (!seen.has(normalizedSrc)) {
             urls.push({ src: unescapedSrc, alt: m[2] || '' });
-            seen.add(unescapedSrc);
+            seen.add(normalizedSrc);
           }
         }
       }
@@ -460,12 +461,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
 
   // Unified lightbox state
   const [lightboxIndex, setLightboxIndex] = useState(-1);
-  const zoomRef = useRef<ZoomRef>(null);
-
-  // Apply initial zoom on every slide view (open + navigate)
-  const handleSlideView = useCallback(() => {
-    setTimeout(() => zoomRef.current?.changeZoom(1.5, true), 80);
-  }, []);
+  // (Removed auto-zoom — images now display at natural fit-to-viewport size)
 
   const handleImageClick = useCallback((src: string) => {
     const index = allImages.findIndex(img => img.src === src);
@@ -536,26 +532,14 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         close={() => setLightboxIndex(-1)}
         index={lightboxIndex}
         slides={allImages.map(img => ({ src: img.src, alt: img.alt }))}
-        plugins={[Zoom, Thumbnails, Counter]}
-        zoom={{
-          ref: zoomRef,
-          maxZoomPixelRatio: 8,
-          doubleTapDelay: 300,
-          doubleClickDelay: 300,
-          doubleClickMaxStops: 2,
-          keyboardMoveDistance: 50,
-          wheelZoomDistanceFactor: 100,
-          pinchZoomDistanceFactor: 100,
-          scrollToZoom: true,
-        }}
+        plugins={[Thumbnails, Counter]}
         thumbnails={{ border: 0, borderRadius: 8, padding: 0, gap: 8 }}
         counter={{ container: { style: { top: 'unset', bottom: 0 } } }}
         styles={{
           container: { backgroundColor: 'rgba(0, 0, 0, 0.92)', backdropFilter: 'blur(16px)' },
         }}
         animation={{ fade: 200, swipe: 300 }}
-        carousel={{ finite: false }}
-        on={{ view: handleSlideView }}
+        carousel={{ finite: true }}
       />
       <div
         className="markdown-content"
