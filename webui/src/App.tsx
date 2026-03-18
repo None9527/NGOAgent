@@ -171,7 +171,10 @@ export default function App() {
             setIsStreaming(true)
             enterStreamingMode()  // 进入流式模式
             const handle = reconnectStream(activeSessionId, 0, {
-              onMessage: (msg) => setMessages(prev => [...prev, msg]),
+              onMessage: (msg) => setMessages(prev => {
+                if (prev.some(m => m.uuid === msg.uuid)) return prev
+                return [...prev, msg]
+              }),
               onUpdate: (uuid, patch) => {
                 setMessages(prev => prev.map(m => {
                   if (m.uuid !== uuid) return m
@@ -196,10 +199,16 @@ export default function App() {
                   }
                 }
               },
-              onToolCall: (msg) => setMessages(prev => [...prev, msg]),
+              onToolCall: (msg) => setMessages(prev => {
+                if (prev.some(m => m.uuid === msg.uuid)) return prev
+                return [...prev, msg]
+              }),
               onApproval: (req) => setPendingApprovals(prev => [...prev, req]),
               onPlanReview: (message, paths) => setPlanReview({ message, paths }),
               onStepDone: () => refreshSessions(),
+              onTitleUpdate: (sid, title) => {
+                setSessions(prev => prev.map(s => s.id === sid ? { ...s, title } : s))
+              },
               onProgress: (taskName, status, summary, mode) => setTaskProgress({ taskName, status, summary, mode }),
               onEnd: () => {
                 setIsStreaming(false)
@@ -339,6 +348,7 @@ export default function App() {
     const handle = chatStream(finalText, sid, {
       onMessage: (msg) => {
         setMessages(prev => {
+          if (prev.some(m => m.uuid === msg.uuid)) return prev
           msgIndexRef.current.set(msg.uuid, prev.length)
           return [...prev, msg]
         })
@@ -380,6 +390,7 @@ export default function App() {
       },
       onToolCall: (msg) => {
         setMessages(prev => {
+          if (prev.some(m => m.uuid === msg.uuid)) return prev
           msgIndexRef.current.set(msg.uuid, prev.length)
           return [...prev, msg]
         })
@@ -406,18 +417,20 @@ export default function App() {
           setPlanReview({ message, paths })
         },
       onStepDone: () => {
-          refreshSessions() // Also refresh sidebar titles on each step
+          refreshSessions()
+        },
+      onTitleUpdate: (sid, title) => {
+          setSessions(prev => prev.map(s => s.id === sid ? { ...s, title } : s))
         },
       onProgress: (taskName, status, summary, mode) => {
           setTaskProgress({ taskName, status, summary, mode })
         },
       onEnd: () => {
           setIsStreaming(false)
-          exitStreamingMode()  // 退出流式模式
+          exitStreamingMode()
           setTaskProgress(null)
           cancelRef.current = null
           refreshSessions()
-          setTimeout(() => refreshSessions(), 3500)
         },
       onError: (err) => { 
         setIsStreaming(false)
