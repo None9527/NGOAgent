@@ -244,7 +244,6 @@ func (a *AgentLoop) CompactIfNeeded() {
 // The stopCh is recreated automatically when the next Run() begins.
 func (a *AgentLoop) Stop() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	// Cancel running context first — propagates to sandbox.Run/RunBackground
 	if a.runCancel != nil {
 		a.runCancel()
@@ -255,6 +254,13 @@ func (a *AgentLoop) Stop() {
 	default:
 		close(a.stopCh)
 	}
+	a.mu.Unlock()
+
+	// Wait for the agent loop to completely exit by acquiring and releasing the run lock.
+	// This prevents a race condition where the frontend immediately sends a new request
+	// while the stopping loop is still doing teardown (e.g., persisting history).
+	a.runMu.Lock()
+	a.runMu.Unlock()
 }
 
 // protoState snapshots the loop's boundary fields into a dtool.LoopState
