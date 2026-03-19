@@ -129,9 +129,10 @@ type EmbeddingConfig struct {
 	APIKey              string  `yaml:"api_key"`              // API key (supports ${ENV_VAR})
 	Model               string  `yaml:"model"`                // Model name, e.g. "text-embedding-v3"
 	Dimensions          int     `yaml:"dimensions"`           // Vector dimensions, e.g. 1024
-	SimilarityThreshold float64 `yaml:"similarity_threshold"` // Dedup threshold, default 0.85
+	SimilarityThreshold float64 `yaml:"similarity_threshold"` // Dedup threshold, default 0.75
 	MinKIForEmbedding   int     `yaml:"min_ki_for_embedding"` // KI count threshold to activate embedding retrieval; below this, full injection is used
 	TopK                int     `yaml:"top_k"`                // Number of KIs to retrieve via embedding search
+	KIBudgetChars       int     `yaml:"ki_budget_chars"`      // Character budget for L1 semantic KI injection (default 6000)
 }
 
 // ServerConfig defines HTTP/gRPC server settings.

@@ -19,6 +19,7 @@ func NewRetriever(store *Store, embedder Embedder, index *VectorIndex) *Retrieve
 }
 
 // Retrieve returns the top-K most semantically relevant KIs for a query.
+// Uses GetWithContent to ensure full overview.md content is available.
 func (r *Retriever) Retrieve(query string, topK int) ([]*Item, error) {
 	queryVec, err := r.embedder.Embed(query)
 	if err != nil {
@@ -29,7 +30,7 @@ func (r *Retriever) Retrieve(query string, topK int) ([]*Item, error) {
 
 	var items []*Item
 	for _, res := range results {
-		item, err := r.store.Get(res.ID)
+		item, err := r.store.GetWithContent(res.ID)
 		if err != nil {
 			continue
 		}
@@ -38,8 +39,9 @@ func (r *Retriever) Retrieve(query string, topK int) ([]*Item, error) {
 	return items, nil
 }
 
-// RetrieveForPrompt returns formatted KI summaries suitable for prompt injection,
-// limited by character budget.
+// RetrieveForPrompt returns full KI content for relevant items, within a character budget.
+// L1: Each matched KI gets title + summary + full content (capped per-item to prevent
+// one huge KI from consuming the entire budget).
 func (r *Retriever) RetrieveForPrompt(query string, topK int, budgetChars int) string {
 	items, err := r.Retrieve(query, topK)
 	if err != nil || len(items) == 0 {
@@ -49,12 +51,28 @@ func (r *Retriever) RetrieveForPrompt(query string, topK int, budgetChars int) s
 	var b strings.Builder
 	totalChars := 0
 	for _, item := range items {
-		entry := fmt.Sprintf("- **%s**: %s\n", item.Title, item.Summary)
-		if totalChars+len(entry) > budgetChars {
+		var entry strings.Builder
+		entry.WriteString(fmt.Sprintf("## %s\n", item.Title))
+		entry.WriteString(fmt.Sprintf("摘要: %s\n\n", item.Summary))
+		if item.Content != "" {
+			content := item.Content
+			// Per-item cap: prevent one huge KI from eating the entire budget
+			maxPerItem := budgetChars / 2
+			if len(content) > maxPerItem {
+				content = content[:maxPerItem] + "\n... (truncated, full content: " +
+					strings.Join(r.store.ListArtifacts(item.ID), ", ") + ")"
+			}
+			entry.WriteString(content)
+			entry.WriteString("\n")
+		}
+		entry.WriteString("\n")
+
+		entryStr := entry.String()
+		if totalChars+len(entryStr) > budgetChars {
 			break
 		}
-		b.WriteString(entry)
-		totalChars += len(entry)
+		b.WriteString(entryStr)
+		totalChars += len(entryStr)
 	}
 	return b.String()
 }
@@ -98,7 +116,7 @@ func (r *Retriever) FindDuplicate(text string, threshold float64) (string, float
 
 // EmbedAndIndexByID re-indexes a KI by ID (used after content update).
 func (r *Retriever) EmbedAndIndexByID(id string) error {
-	item, err := r.store.Get(id)
+	item, err := r.store.GetWithContent(id)
 	if err != nil {
 		return fmt.Errorf("get KI %s: %w", id, err)
 	}

@@ -65,7 +65,7 @@ func (s *Store) Save(item *Item) error {
 	return nil
 }
 
-// Get retrieves a KI by ID.
+// Get retrieves a KI by ID (metadata only, Content from metadata.json snapshot).
 func (s *Store) Get(id string) (*Item, error) {
 	path := filepath.Join(s.baseDir, id, "metadata.json")
 	data, err := os.ReadFile(path)
@@ -79,7 +79,22 @@ func (s *Store) Get(id string) (*Item, error) {
 	return &item, nil
 }
 
-// List returns summaries of all KIs.
+// GetWithContent retrieves a KI with fresh content from overview.md.
+// After UpdateMerge, overview.md may have more content than metadata.json.content.
+// This method reads the authoritative overview.md and fills item.Content.
+func (s *Store) GetWithContent(id string) (*Item, error) {
+	item, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	artPath := filepath.Join(s.baseDir, id, "artifacts", "overview.md")
+	if data, err := os.ReadFile(artPath); err == nil && len(data) > 0 {
+		item.Content = string(data)
+	}
+	return item, nil
+}
+
+// List returns summaries of all KIs (metadata only).
 func (s *Store) List() ([]*Item, error) {
 	entries, err := os.ReadDir(s.baseDir)
 	if err != nil {
@@ -125,9 +140,47 @@ func (s *Store) Search(query string) ([]*Item, error) {
 	return matches, nil
 }
 
-// GenerateSummaries returns a formatted string of all KI summaries for prompt injection.
-// Enhanced format: title + [PREFERENCE] marker + summary + tags + artifact paths.
-func (s *Store) GenerateSummaries() string {
+// ═══════════════════════════════════════════
+// Three-Tier KI Injection
+// ═══════════════════════════════════════════
+
+// GeneratePreferenceKI returns full content for preference-tagged KIs.
+// L0: These are enforceable rules — always injected with complete overview.md content.
+func (s *Store) GeneratePreferenceKI() string {
+	items, err := s.List()
+	if err != nil || len(items) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	first := true
+	for _, item := range items {
+		if !hasTag(item.Tags, "preference") {
+			continue
+		}
+		if !first {
+			b.WriteString("\n---\n\n")
+		}
+		first = false
+		// Read authoritative content from overview.md
+		full, err := s.GetWithContent(item.ID)
+		if err != nil {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("## %s\n\n", full.Title))
+		if full.Content != "" {
+			b.WriteString(full.Content)
+			b.WriteString("\n")
+		} else {
+			b.WriteString(full.Summary + "\n")
+		}
+	}
+	return b.String()
+}
+
+// GenerateKIIndex returns a discovery index of all KIs: title + summary + artifact paths.
+// L2: Minimal footprint — agent uses read_file on artifact paths when it needs details.
+func (s *Store) GenerateKIIndex() string {
 	items, err := s.List()
 	if err != nil || len(items) == 0 {
 		return ""
@@ -139,38 +192,29 @@ func (s *Store) GenerateSummaries() string {
 		if hasTag(item.Tags, "preference") {
 			prefix = " [PREFERENCE]"
 		}
-		b.WriteString(fmt.Sprintf("# %s%s\n", item.Title, prefix))
-		b.WriteString(fmt.Sprintf("摘要: %s\n", item.Summary))
-		if len(item.Tags) > 0 {
-			b.WriteString(fmt.Sprintf("标签: %s\n", strings.Join(item.Tags, ", ")))
-		}
+		b.WriteString(fmt.Sprintf("- **%s**%s: %s", item.Title, prefix, item.Summary))
 		artifacts := s.ListArtifacts(item.ID)
 		if len(artifacts) > 0 {
-			b.WriteString(fmt.Sprintf("文件: %s\n", strings.Join(artifacts, ", ")))
+			b.WriteString(fmt.Sprintf("  →  %s", strings.Join(artifacts, ", ")))
 		}
 		b.WriteString("\n")
 	}
 	return b.String()
 }
 
-// GeneratePreferenceSummaries returns only preference-tagged KIs formatted as enforceable rules.
+// GeneratePreferenceSummaries is kept as an alias for backward compatibility.
+// Deprecated: Use GeneratePreferenceKI instead.
 func (s *Store) GeneratePreferenceSummaries() string {
-	items, err := s.List()
-	if err != nil || len(items) == 0 {
-		return ""
-	}
-
-	var b strings.Builder
-	for _, item := range items {
-		if !hasTag(item.Tags, "preference") {
-			continue
-		}
-		b.WriteString(fmt.Sprintf("- %s\n", item.Summary))
-	}
-	return b.String()
+	return s.GeneratePreferenceKI()
 }
 
-// ListArtifacts returns relative paths of artifact files for a KI.
+// GenerateSummaries is kept as an alias for backward compatibility.
+// Deprecated: Use GenerateKIIndex instead.
+func (s *Store) GenerateSummaries() string {
+	return s.GenerateKIIndex()
+}
+
+// ListArtifacts returns absolute paths of artifact files for a KI.
 func (s *Store) ListArtifacts(id string) []string {
 	artDir := filepath.Join(s.baseDir, id, "artifacts")
 	entries, err := os.ReadDir(artDir)

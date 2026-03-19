@@ -414,13 +414,12 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 		a.InjectEphemeral(msg)
 	}
 
-	// === Layer 4: Dynamic KI preference re-injection (every 8 steps) ===
-	// As conversation grows, system prompt tail gets pushed to mid-attention zone.
-	// Re-inject preference KI as ephemeral to maintain tail-peak attention.
+	// === Layer 4: KI index re-injection (every 8 steps) ===
+	// As conversation grows, re-inject KI index as ephemeral reminder.
 	if a.deps.KIStore != nil && steps > 0 && steps%8 == 0 {
-		prefKI := a.deps.KIStore.GeneratePreferenceSummaries()
-		if prefKI != "" {
-			a.InjectEphemeral("<preference_reminder>\n⚠️ 提醒：以下用户强制偏好仍然生效，必须遵守。\n" + prefKI + "</preference_reminder>")
+		kiIndex := a.deps.KIStore.GenerateKIIndex()
+		if kiIndex != "" {
+			a.InjectEphemeral("<knowledge_reminder>\n你有以下知识可用，需要时用 read_file 查看完整内容：\n" + kiIndex + "</knowledge_reminder>")
 		}
 	}
 }
@@ -571,26 +570,10 @@ func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunO
 		deps.UserRules = rules
 	}
 
-	// Knowledge — hybrid injection strategy
+	// Knowledge — inject KI index (title + summary + artifact paths).
+	// Agent uses read_file to access full content when needed.
 	if a.deps.KIStore != nil {
-		// 1. Preference KIs: always injected (full dump of preference-tagged items)
-		deps.PreferenceKI = a.deps.KIStore.GeneratePreferenceSummaries()
-
-		// 2. Semantic KIs: retrieve top-K relevant items based on user message
-		if a.deps.KIRetriever != nil {
-			userMsg := a.lastUserMessage()
-			if userMsg != "" {
-				topK := 5
-				if a.deps.Config != nil && a.deps.Config.Embedding.TopK > 0 {
-					topK = a.deps.Config.Embedding.TopK
-				}
-				deps.ConvSummary = a.deps.KIRetriever.RetrieveForPrompt(userMsg, topK, 2000)
-			}
-		}
-		// Fallback: if no retriever, inject all KI summaries
-		if deps.ConvSummary == "" && a.deps.KIRetriever == nil {
-			deps.ConvSummary = a.deps.KIStore.GenerateSummaries()
-		}
+		deps.ConvSummary = a.deps.KIStore.GenerateKIIndex()
 	}
 
 	// Skills — summaries for prompt injection

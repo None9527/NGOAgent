@@ -94,9 +94,14 @@ func (t *TaskPlanTool) Execute(ctx context.Context, args map[string]any) (dtool.
 		return dtool.ToolResult{Output: data}, nil
 
 	case "complete":
+		// complete only makes sense for task.md (checklist with [ ] markers).
+		// walkthrough.md and plan.md are reports — no checkboxes to toggle.
+		if artifactType != "task" {
+			return dtool.ToolResult{Output: fmt.Sprintf("Error: action=complete is only valid for type=task, not %q. Use action=update to modify %s.", artifactType, filename)}, nil
+		}
 		data, err := store.Read(filename)
 		if err != nil {
-			return dtool.ToolResult{Output: fmt.Sprintf("Error: %v", err)}, nil
+			return dtool.ToolResult{Output: fmt.Sprintf("No %s found. Create it first with action=create.", filename)}, nil
 		}
 		// Replace only line-leading checklist items (not inside code blocks)
 		lines := strings.Split(data, "\n")

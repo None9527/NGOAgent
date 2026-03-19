@@ -32,8 +32,7 @@ type Deps struct {
 	UserRules      string
 	ProjectContext string
 	SkillInfos     []SkillInfo
-	ConvSummary    string   // Semantically-retrieved KI summaries
-	PreferenceKI   string   // Preference-tagged KI summaries (always injected)
+	ConvSummary    string   // KI index for prompt injection
 	ToolDescs      []ToolDesc
 	Ephemeral      []string
 	FocusFile      string
@@ -89,8 +88,7 @@ func (e *Engine) buildSections(deps Deps) []Section {
 		{Order: 2, Name: "CoreBehavior", Content: prompttext.CoreBehavior, Priority: 0},
 		{Order: 3, Name: "OutputCapabilities", Content: prompttext.OutputCapabilities, Priority: 1},
 		{Order: 4, Name: "Safety", Content: prompttext.Safety, Priority: 0},
-		{Order: 5, Name: "PreferenceKI", Content: e.buildPreferenceKI(deps.PreferenceKI), Priority: 0},
-		{Order: 6, Name: "UserRules", Content: e.buildUserRules(deps.UserRules), Priority: 1},
+		{Order: 5, Name: "UserRules", Content: e.buildUserRules(deps.UserRules), Priority: 1},
 		// ═══ Mid Valley: Capability inventory FIRST, then protocol (natural dependency) ═══
 		{Order: 7, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
 		{Order: 8, Name: "Skills", Content: e.buildSkills(deps.SkillInfos), Priority: 1},
@@ -100,7 +98,7 @@ func (e *Engine) buildSections(deps Deps) []Section {
 		{Order: 12, Name: "Variants", Content: "", Priority: 3},
 		// ═══ Tail Peak: Output format + Task Knowledge + Live Context (HIGH attention) ═══
 		{Order: 13, Name: "ResponseFormat", Content: prompttext.ResponseFormat, Priority: 0},
-		{Order: 14, Name: "SemanticKI", Content: e.buildSemanticKI(deps.ConvSummary), Priority: 0},
+		{Order: 14, Name: "KnowledgeIndex", Content: e.buildKnowledgeIndex(deps.ConvSummary), Priority: 0},
 		{Order: 15, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
 		{Order: 16, Name: "Focus", Content: e.buildFocus(deps.FocusFile), Priority: 2},
 		{Order: 17, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
@@ -161,27 +159,15 @@ func (e *Engine) buildProjectContext(ctx string) string {
 	return "<project_context>\n" + ctx + "\n</project_context>"
 }
 
-func (e *Engine) buildPreferenceKI(preferenceKI string) string {
-	if preferenceKI == "" {
+func (e *Engine) buildKnowledgeIndex(kiIndex string) string {
+	if kiIndex == "" {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("<preference_knowledge>\n")
-	b.WriteString("⚠️ CRITICAL: 以下是用户强制偏好，所有输出必须遵守。\n\n")
-	b.WriteString(preferenceKI)
-	b.WriteString("</preference_knowledge>")
-	return b.String()
-}
-
-func (e *Engine) buildSemanticKI(semanticKI string) string {
-	if semanticKI == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("<semantic_knowledge>\n")
-	b.WriteString("以下知识条目与当前任务相关，执行操作前请检查。\n\n")
-	b.WriteString(semanticKI)
-	b.WriteString("</semantic_knowledge>")
+	b.WriteString("<knowledge_items>\n")
+	b.WriteString("你的知识库，需要时用 read_file 查看 artifact 路径获取完整内容：\n\n")
+	b.WriteString(kiIndex)
+	b.WriteString("</knowledge_items>")
 	return b.String()
 }
 
@@ -256,6 +242,7 @@ func (e *Engine) prune(sections []Section, budget int) (string, int) {
 		}
 		content := s.Content
 		if pruneLevel >= 1 && len(content) > 2000 && s.Priority > 0 {
+			// Priority 0 sections (PreferenceKI, Identity, etc.) are NEVER truncated
 			content = content[:2000] + "\n... (truncated)"
 		}
 		b.WriteString(content)

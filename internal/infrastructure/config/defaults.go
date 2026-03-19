@@ -36,6 +36,7 @@ func DefaultConfig() *Config {
 			SimilarityThreshold: 0.75,
 			MinKIForEmbedding:   30,
 			TopK:                5,
+			KIBudgetChars:       6000,
 		},
 	}
 }
