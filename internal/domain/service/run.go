@@ -1070,6 +1070,7 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 	// Parse each <file .../> tag
 	var parts []llm.ContentPart
 	var nonImageFiles []string
+	var imageFiles []string // track image paths so Agent knows where they are
 
 	fileTags := fileTagRe.FindAllStringSubmatch(match[1], -1)
 	for _, ft := range fileTags {
@@ -1114,6 +1115,7 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 				Type:     "image_url",
 				ImageURL: &llm.ImageURL{URL: dataURL},
 			})
+			imageFiles = append(imageFiles, filePath)
 			log.Printf("[multimodal] attached image: %s (%s, %d bytes)", attrs["name"], mimeType, len(data))
 		} else {
 			// Non-image: keep path reference in text
@@ -1127,9 +1129,16 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 	}
 
 	// Build multimodal message: text part + image parts
-	// Prepend non-image file references to text if any
+	// Prepend file references (images + non-images) so Agent knows exact disk paths
+	var attachedPaths []string
+	if len(imageFiles) > 0 {
+		attachedPaths = append(attachedPaths, imageFiles...)
+	}
 	if len(nonImageFiles) > 0 {
-		textOnly = fmt.Sprintf("Attached files: %s\n\n%s", strings.Join(nonImageFiles, ", "), textOnly)
+		attachedPaths = append(attachedPaths, nonImageFiles...)
+	}
+	if len(attachedPaths) > 0 {
+		textOnly = fmt.Sprintf("[Attached files]\n%s\n\n%s", strings.Join(attachedPaths, "\n"), textOnly)
 	}
 
 	if textOnly != "" {
