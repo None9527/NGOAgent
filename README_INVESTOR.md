@@ -32,13 +32,16 @@ Run locally. Connect seamlessly to local models (Ollama, vLLM) or private VPC-de
 ### 2. 🧠 Agentic LoopPool™ & ReAct State Machine
 A highly deterministic 10-state ReAct decision engine ensures the agent thinks, plans, executes, and verifies with human-like persistence. The proprietary **LoopPool** technology allows massive, isolated multi-session concurrency without state pollution.
 
-### 3. 🔌 Infinite Extensibility: The Native Skill Ecosystem & Forge Sandbox
+### 3. 🐝 True Architecture-Level SubAgent Swarm Design
+Most "multi-agent" frameworks on the market are merely Prompt-engineering illusions acting out roles within a single, easily-polluted context window. NGOAgent introduces a **physically isolated Swarm architecture** backed by its heavy-duty Go concurrency engine. Powered by the native `spawn_agent` tool and the LoopPool, the primary Agent can instantly hatch dozens of real algorithmic sub-agents. A dual-track strategy emerges naturally: a lightweight "Planning Agent" models the topology in milliseconds, while multiple heavy-duty "Execution Agents" concurrently hammer out complex modules. Each sub-agent runs in its own isolated OS-level routine with a private 10-state machine, isolated memory zone, and strict timeout controls. This is genuine distributed AI warfare, completely immune to context bleeding.
+
+### 4. 🔌 Infinite Extensibility: The Native Skill Ecosystem & Forge Sandbox
 Rather than forcing dependency on bulky external protocols, NGOAgent ships with a lightweight, hot-loadable **Native Skill Ecosystem**. Enterprise developers can rapidly encapsulate any internal proprietary service—from legacy ERP mainframes to modern Kubernetes clusters—into an isolated "Skill" with minimal code. Crucially, all unverified capabilities are rigorously tested and contained within the proprietary **Forge Sandbox**, ensuring deterministic, safe execution before hitting production environments. This creates a frictionless app-store-like pipeline for generating massive, specialized AI automation flows explicitly tailored for the end user.
 
-### 4. 🔗 Unbreakable Telemetry (HTTP SSE)
+### 5. 🔗 Unbreakable Telemetry (HTTP SSE)
 Designed for the real world. NGOAgent features a heavily buffered SSE (Server-Sent Events) network layer. If a user closes their laptop or loses connection, the Agent continues working in the background. Upon reconnection, the precise state and output stream are instantly restored.
 
-### 5. 💂‍♂️ Bank-Grade Security Hooks
+### 6. 💂‍♂️ Bank-Grade Security Hooks
 AI shouldn't run wild. NGOAgent implements a precise `Allow / Auto / Ask` permission triad. Critical system operations automatically trigger interactive approvals to the Web/App UI, ensuring humans always maintain the ultimate "Kill Switch".
 
 ### 6. 🏗️ Rapid Enterprise Customization via DDD Architecture
