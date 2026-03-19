@@ -246,7 +246,13 @@ Rules:
 - task.md must use [x]/[/]/[ ] markers with file+function granularity.
 - walkthrough.md must summarize what changed, what was tested, and results.
 - If the task is simple (single file, ≤3 steps), skip planning and execute directly.
-- For tasks with 3+ independent components, consider spawning sub-agents for parallel execution.`
+- For tasks with 3+ independent components, consider spawning sub-agents for parallel execution.
+
+CRITICAL — How to handle user response after notify_user(blocked_on_user=true):
+- "approved" / "ok" / "yes" / "continue" / "lgtm" → proceed to EXECUTION
+- "rejected" / "no" / "cancel" / "stop" / "不要" / "取消" → the plan is CANCELLED. Respond briefly confirming cancellation and do NOT execute anything.
+- Any other feedback → update plan.md based on the feedback, call notify_user again for another review. Do NOT start executing.
+- NEVER interpret "rejected" or negative responses as "skip review and proceed". Rejection always means STOP.`
 
 const EphContextStatus = `Context window usage: {{.Percent}}% ({{.Used}}/{{.Total}} tokens).
 {{if ge .Percent 80}}WARNING: Context is running low. Be concise and focused.{{end}}`
