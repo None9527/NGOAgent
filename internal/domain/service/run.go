@@ -166,7 +166,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 						Content:    result,
 						ToolCallID: tc.ID,
 					})
-					
+
 					// Fill remaining unfinished tool calls to satisfy strict API schema rules
 					for j := i + 1; j < len(lastMsg.ToolCalls); j++ {
 						a.AppendMessage(llm.Message{
@@ -176,7 +176,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 						})
 					}
 
-					a.deps.Delta.OnText("\n⛔ " + result + "\n")
+					a.deps.Delta.OnText("\n" + result + "\n")
 					a.transition(StateDone)
 					goto loopEnd
 				}
@@ -845,23 +845,23 @@ func (a *AgentLoop) doCompact() {
 
 	// Four-dimensional checkpoint (mirrors Anti's CortexStepCheckpoint)
 	summaryMessages := []llm.Message{
-		{Role: "system", Content: `你是对话摘要器。从以下对话中提取四个维度的摘要：
+		{Role: "system", Content: `You are a conversation summarizer. Extract a summary across four dimensions from the conversation below:
 
 ## user_intent
-用户的核心目标和当前进展状态。
+The user's core goal and current progress status.
 
 ## session_summary
-本次会话执行了哪些操作，结果如何。
+What operations were performed in this session and their outcomes.
 
 ## code_changes
-修改了哪些文件，具体改了什么（函数名+改动要点）。
+Which files were modified, what specifically changed (function names + key change points).
 
 ## learned_facts
-发现的重要架构信息、约束条件、或需要记住的决策。
+Important architectural information, constraints, or decisions that need to be remembered.
 
-CRITICAL: 如果对话中包含 <preference_knowledge> 或 <semantic_knowledge> 标签内的内容，必须在 learned_facts 中完整保留，不可省略或缩写。
+CRITICAL: If the conversation contains content inside <preference_knowledge> or <semantic_knowledge> tags, it MUST be preserved in full in learned_facts — no omission or abbreviation allowed.
 
-每个维度 2-3 句话，总计不超过 500 字。`},
+2–3 sentences per dimension, 500 words total maximum.`},
 		{Role: "user", Content: content.String()},
 	}
 
@@ -932,7 +932,7 @@ func (a *AgentLoop) forceTruncate(keep int) {
 	if len(a.history) <= keep+1 {
 		return
 	}
-	
+
 	// Preserve first user message at index 0, append the last `keep` items
 	truncated := []llm.Message{a.history[0]}
 	truncated = append(truncated, a.history[len(a.history)-keep:]...)
@@ -1051,7 +1051,6 @@ var attachmentRe = regexp.MustCompile(`(?s)<user_attachments>\s*(.*?)\s*</user_a
 // NOTE: [^>]*? (not [^/]*?) because attribute values contain '/' in file paths.
 var fileTagRe = regexp.MustCompile(`<file\s+([^>]*?)\s*/>`)
 
-
 // attrRe extracts key="value" pairs from a tag.
 var attrRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
 
@@ -1112,7 +1111,7 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 
 			dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
 			parts = append(parts, llm.ContentPart{
-				Type: "image_url",
+				Type:     "image_url",
 				ImageURL: &llm.ImageURL{URL: dataURL},
 			})
 			log.Printf("[multimodal] attached image: %s (%s, %d bytes)", attrs["name"], mimeType, len(data))
