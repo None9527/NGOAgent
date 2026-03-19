@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/Go-1.24-00ADD8?style=for-the-badge&logo=go&logoColor=white" />
   <img src="https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=black" />
   <img src="https://img.shields.io/badge/Architecture-DDD-blueviolet?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/License-BSL%201.1-blue?style=for-the-badge" />
 </p>
 
 # NGOAgent
@@ -329,4 +329,4 @@ cd webui && npm run build
 
 ## License
 
-MIT
+[Business Source License 1.1](LICENSE)
