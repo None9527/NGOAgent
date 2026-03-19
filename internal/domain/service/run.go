@@ -1,11 +1,16 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
+	_ "image/gif"
+	_ "image/png"
 	"log"
 	"mime"
 	"os"
@@ -14,6 +19,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"golang.org/x/image/draw"
+	_ "golang.org/x/image/webp"
 
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
@@ -1110,6 +1118,11 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 				}
 			}
 
+			// Resize or compress image if it is too large
+			if mimeType != "image/svg+xml" && mimeType != "image/gif" {
+				data, mimeType = resizeImageIfLarge(data, mimeType, 1024)
+			}
+
 			dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
 			parts = append(parts, llm.ContentPart{
 				Type:     "image_url",
@@ -1151,4 +1164,49 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 		Content:      textOnly, // Keep text in Content for history persistence / display
 		ContentParts: parts,    // Multimodal parts for LLM API
 	}
+}
+
+// resizeImageIfLarge decodes the image data. If its dimensions are very large,
+// it rescales the image so its longest side is at most maxDim and returns the new JPEG bytes.
+// If decoding fails or resizing isn't needed, it returns the original data and MIME type.
+func resizeImageIfLarge(data []byte, mimeType string, maxDim int) ([]byte, string) {
+	img, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		log.Printf("[multimodal] failed to decode image for resizing (%s): %v", mimeType, err)
+		return data, mimeType
+	}
+
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= maxDim && h <= maxDim {
+		// Compress to JPEG if the file is still too large (> 2MB) and not a GIF.
+		if len(data) > 2*1024*1024 && format != "gif" {
+			var buf bytes.Buffer
+			if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err == nil {
+				return buf.Bytes(), "image/jpeg"
+			}
+		}
+		return data, mimeType
+	}
+
+	// Calculate new dimensions preserving aspect ratio
+	var newW, newH int
+	if w > h {
+		newW = maxDim
+		newH = (h * maxDim) / w
+	} else {
+		newH = maxDim
+		newW = (w * maxDim) / h
+	}
+
+	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
+	draw.BiLinear.Scale(dst, dst.Bounds(), img, bounds, draw.Over, nil)
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 85}); err != nil {
+		log.Printf("[multimodal] failed to encode resized image: %v", err)
+		return data, mimeType
+	}
+
+	return buf.Bytes(), "image/jpeg"
 }
