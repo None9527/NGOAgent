@@ -18,6 +18,7 @@ export function chatStream(
   cb: StreamCallbacks,
 ): { cancel: () => void } {
   const controller = new AbortController()
+  let aborted = false // Guard: suppress onError after manual cancel
   let currentAssistantId: string | null = null
   let currentAssistantText = ''
   let currentThinkingId: string | null = null
@@ -39,12 +40,14 @@ export function chatStream(
       })
 
       if (!res.ok) {
+        if (aborted) { cb.onEnd(); return }
         cb.onError(new Error(`HTTP ${res.status}`))
         return
       }
 
       const reader = res.body?.getReader()
       if (!reader) {
+        if (aborted) { cb.onEnd(); return }
         cb.onError(new Error('No stream'))
         return
       }
@@ -200,6 +203,8 @@ export function chatStream(
             }
 
             case 'error': {
+              // If manually cancelled, suppress error event from backend
+              if (aborted) { cb.onEnd(); return }
               cb.onError(new Error((event.message as string) || (event.error as string) || 'Unknown error'))
               break
             }
@@ -242,7 +247,8 @@ export function chatStream(
       }
       cb.onEnd()
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
+      // After manual cancel: any error is expected, treat as clean end
+      if (aborted || (err instanceof Error && err.name === 'AbortError')) {
         cb.onEnd()
         return
       }
@@ -250,7 +256,7 @@ export function chatStream(
     }
   })()
 
-  return { cancel: () => controller.abort() }
+  return { cancel: () => { aborted = true; controller.abort() } }
 }
 
 /**
@@ -282,6 +288,7 @@ export function reconnectStream(
   cb: StreamCallbacks,
 ): { cancel: () => void } {
   const controller = new AbortController()
+  let aborted = false // Guard: suppress onError after manual cancel
   let currentAssistantId: string | null = null
   let currentAssistantText = ''
   let currentThinkingId: string | null = null
@@ -299,12 +306,17 @@ export function reconnectStream(
 
       if (!res.ok) {
         if (res.status === 404) { cb.onEnd(); return }
+        if (aborted) { cb.onEnd(); return }
         cb.onError(new Error(`HTTP ${res.status}`))
         return
       }
 
       const reader = res.body?.getReader()
-      if (!reader) { cb.onError(new Error('No stream')); return }
+      if (!reader) {
+        if (aborted) { cb.onEnd(); return }
+        cb.onError(new Error('No stream'))
+        return
+      }
 
       const decoder = new TextDecoder()
       let buffer = ''
@@ -445,6 +457,8 @@ export function reconnectStream(
             }
 
             case 'error': {
+              // If manually cancelled, suppress error event from backend
+              if (aborted) { cb.onEnd(); return }
               cb.onError(new Error((event.message as string) || 'Unknown error'))
               break
             }
@@ -477,11 +491,12 @@ export function reconnectStream(
       }
       cb.onEnd()
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') { cb.onEnd(); return }
+      // After manual cancel: any error is expected, treat as clean end
+      if (aborted || (err instanceof Error && err.name === 'AbortError')) { cb.onEnd(); return }
       cb.onError(err instanceof Error ? err : new Error(String(err)))
     }
   })()
 
-  return { cancel: () => controller.abort() }
+  return { cancel: () => { aborted = true; controller.abort() } }
 }
 

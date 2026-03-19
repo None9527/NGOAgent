@@ -41,7 +41,9 @@ Core rules:
 - When you discover important project info, use update_project_context to record it.
 - Check <knowledge_items> for relevant knowledge. Items marked [PREFERENCE] MUST be followed.
 - For complex multi-step tasks, consider spawn_agent to parallelize independent subtasks.
-- When user messages contain <user_attachments>, the listed files are reference materials. You MUST use these file paths in relevant tool calls (e.g., as input images for image generation, as source files for analysis). Never ignore attached files.`
+- When user messages contain <user_attachments>, the listed files are reference materials. Never ignore attached files.
+  * Images: image attachments are ALREADY EMBEDDED in this message as inline base64 data. You can SEE them directly — analyze using your native vision capability FIRST. Only use tools (read_file, spawn_agent) as a fallback if you cannot see the image content.
+  * Non-image files: use their file paths in relevant tool calls (read_file, edit_file, etc.).`
 
 // ToolProtocol goes at MID (near tooling) — procedural reference, looked up when needed
 const ToolProtocol = `CRITICAL — Mandatory Tool Protocol (violation = test failure):

@@ -1065,7 +1065,9 @@ var _ = ctxutil.SessionIDFromContext
 var attachmentRe = regexp.MustCompile(`(?s)<user_attachments>\s*(.*?)\s*</user_attachments>`)
 
 // fileTagRe extracts individual <file ... /> tags.
-var fileTagRe = regexp.MustCompile(`<file\s+([^/]*?)\s*/>`)
+// NOTE: [^>]*? (not [^/]*?) because attribute values contain '/' in file paths.
+var fileTagRe = regexp.MustCompile(`<file\s+([^>]*?)\s*/>`)
+
 
 // attrRe extracts key="value" pairs from a tag.
 var attrRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
