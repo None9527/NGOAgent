@@ -1091,11 +1091,23 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 				continue
 			}
 
-			// Detect MIME type from extension
-			ext := filepath.Ext(filePath)
+			// Detect MIME type robustly
+			ext := strings.ToLower(filepath.Ext(filePath))
 			mimeType := mime.TypeByExtension(ext)
 			if mimeType == "" {
-				mimeType = "image/png" // fallback
+				// Fallback map for OS missing mime.types
+				switch ext {
+				case ".webp":
+					mimeType = "image/webp"
+				case ".jpg", ".jpeg":
+					mimeType = "image/jpeg"
+				case ".gif":
+					mimeType = "image/gif"
+				case ".svg":
+					mimeType = "image/svg+xml"
+				default:
+					mimeType = "image/png"
+				}
 			}
 
 			dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
