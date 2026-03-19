@@ -178,8 +178,9 @@ func (s *Store) GeneratePreferenceKI() string {
 	return b.String()
 }
 
-// GenerateKIIndex returns a discovery index of all KIs: title + summary + artifact paths.
-// L2: Minimal footprint — agent uses read_file on artifact paths when it needs details.
+// GenerateKIIndex returns a discovery index of all KIs.
+// Each entry has title + summary, then artifact path on a separate indented line.
+// Agent uses read_file on artifact paths to get full content.
 func (s *Store) GenerateKIIndex() string {
 	items, err := s.List()
 	if err != nil || len(items) == 0 {
@@ -192,12 +193,11 @@ func (s *Store) GenerateKIIndex() string {
 		if hasTag(item.Tags, "preference") {
 			prefix = " [PREFERENCE]"
 		}
-		b.WriteString(fmt.Sprintf("- **%s**%s: %s", item.Title, prefix, item.Summary))
+		b.WriteString(fmt.Sprintf("- **%s**%s: %s\n", item.Title, prefix, item.Summary))
 		artifacts := s.ListArtifacts(item.ID)
-		if len(artifacts) > 0 {
-			b.WriteString(fmt.Sprintf("  →  %s", strings.Join(artifacts, ", ")))
+		for _, art := range artifacts {
+			b.WriteString(fmt.Sprintf("  📄 %s\n", art))
 		}
-		b.WriteString("\n")
 	}
 	return b.String()
 }

@@ -165,7 +165,7 @@ func (e *Engine) buildKnowledgeIndex(kiIndex string) string {
 	}
 	var b strings.Builder
 	b.WriteString("<knowledge_items>\n")
-	b.WriteString("你的知识库，需要时用 read_file 查看 artifact 路径获取完整内容：\n\n")
+	b.WriteString("你的知识库索引。每个条目下的 📄 路径是完整知识文件，用 read_file 读取即可获取全部内容。\n\n")
 	b.WriteString(kiIndex)
 	b.WriteString("</knowledge_items>")
 	return b.String()
