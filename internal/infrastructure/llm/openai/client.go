@@ -1,6 +1,6 @@
 // Package openai implements an OpenAI-compatible LLM provider.
 // Supports any API that follows the OpenAI chat/completions endpoint format,
-// including DashScope (Qwen), DeepSeek, etc.
+// including DashScope (Qwen), DeepSeek, Ollama, etc.
 package openai
 
 import (
@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -91,11 +92,12 @@ func (c *Client) GenerateStream(ctx context.Context, req *llm.Request, ch chan<-
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		level := llm.ClassifyHTTPError(resp.StatusCode)
-		// 429 with insufficient_quota = fatal (don't retry — need to recharge)
-		// 429 with rate_limit = transient (retry with backoff)
 		if resp.StatusCode == 429 && strings.Contains(string(bodyBytes), "insufficient_quota") {
 			level = llm.ErrorFatal
 		}
+		// DEBUG: log the request body that caused this error
+		log.Printf("[DEBUG] HTTP %d from %s\nRequest body: %s\nResponse: %s",
+			resp.StatusCode, c.baseURL, string(body), string(bodyBytes))
 		return nil, &llm.LLMError{
 			Level:   level,
 			Code:    fmt.Sprintf("http_%d", resp.StatusCode),
@@ -116,8 +118,10 @@ func (c *Client) handleSync(body io.Reader, ch chan<- llm.StreamChunk) (*llm.Res
 	var apiResp struct {
 		Choices []struct {
 			Message struct {
-				Content   string         `json:"content"`
-				ToolCalls []llm.ToolCall `json:"tool_calls"`
+				Content          string         `json:"content"`
+				ReasoningContent string         `json:"reasoning_content"` // DashScope/DeepSeek
+				Reasoning        string         `json:"reasoning"`         // Ollama
+				ToolCalls        []llm.ToolCall `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -144,12 +148,28 @@ func (c *Client) handleSync(body io.Reader, ch chan<- llm.StreamChunk) (*llm.Res
 
 	if len(apiResp.Choices) > 0 {
 		msg := apiResp.Choices[0].Message
-		result.Content = msg.Content
+		// Unify reasoning: prefer reasoning_content (DashScope), fall back to reasoning (Ollama)
+		reasoning := msg.ReasoningContent
+		if reasoning == "" {
+			reasoning = msg.Reasoning
+		}
+		// For models that inline <think>...</think> in content (e.g. some Ollama variants),
+		// extract the think content into reasoning and keep non-think text as content.
+		content, thinkContent := extractThinkTags(msg.Content)
+		if reasoning == "" {
+			reasoning = thinkContent
+		}
+		content = strings.TrimSpace(content)
+		result.Content = content
+		result.Reasoning = reasoning
 		result.ToolCalls = msg.ToolCalls
 		result.StopReason = apiResp.Choices[0].FinishReason
 
-		if msg.Content != "" {
-			ch <- llm.StreamChunk{Type: llm.ChunkText, Text: msg.Content}
+		if content != "" {
+			ch <- llm.StreamChunk{Type: llm.ChunkText, Text: content}
+		}
+		if reasoning != "" {
+			ch <- llm.StreamChunk{Type: llm.ChunkReasoning, Text: reasoning}
 		}
 		for i := range msg.ToolCalls {
 			ch <- llm.StreamChunk{Type: llm.ChunkToolCall, ToolCall: &msg.ToolCalls[i]}
@@ -158,6 +178,32 @@ func (c *Client) handleSync(body io.Reader, ch chan<- llm.StreamChunk) (*llm.Res
 
 	ch <- llm.StreamChunk{Type: llm.ChunkDone}
 	return result, nil
+}
+
+// extractThinkTags splits raw content into (text, thinkContent).
+// It extracts all <think>...</think> segments as reasoning, returning the remainder as text.
+func extractThinkTags(raw string) (text, thinking string) {
+	var textBuf, thinkBuf strings.Builder
+	s := raw
+	for len(s) > 0 {
+		open := strings.Index(s, "<think>")
+		if open == -1 {
+			textBuf.WriteString(s)
+			break
+		}
+		textBuf.WriteString(s[:open])
+		s = s[open+len("<think>"):]
+		close := strings.Index(s, "</think>")
+		if close == -1 {
+			// Unclosed tag — treat remainder as think content.
+			thinkBuf.WriteString(s)
+			s = ""
+		} else {
+			thinkBuf.WriteString(s[:close])
+			s = s[close+len("</think>"):]
+		}
+	}
+	return textBuf.String(), strings.TrimSpace(thinkBuf.String())
 }
 
 // ═══════════════════════════════════════════════════════
@@ -174,9 +220,10 @@ func (m *openAIMapper) MapChunk(data []byte) llm.NormalizedChunk {
 	var raw struct {
 		Choices []struct {
 			Delta struct {
-				Content   string        `json:"content"`
-				Reasoning string        `json:"reasoning_content"` // Qwen/DeepSeek thinking
-				ToolCalls []sseToolCall `json:"tool_calls"`
+				Content          string        `json:"content"`
+				ReasoningContent string        `json:"reasoning_content"` // DashScope/DeepSeek
+				Reasoning        string        `json:"reasoning"`         // Ollama
+				ToolCalls        []sseToolCall `json:"tool_calls"`
 			} `json:"delta"`
 			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
@@ -208,9 +255,17 @@ func (m *openAIMapper) MapChunk(data []byte) llm.NormalizedChunk {
 	choice := raw.Choices[0]
 	delta := choice.Delta
 
+	// Unify reasoning: prefer reasoning_content (DashScope/DeepSeek), fall back to reasoning (Ollama)
+	reasoning := delta.ReasoningContent
+	if reasoning == "" {
+		reasoning = delta.Reasoning
+	}
+
+	// Pass content as-is: the StreamAdapter's thinkParser will handle <think> tags
+	// inline in content for streaming mode, routing them to ChunkReasoning.
 	result := llm.NormalizedChunk{
 		Content:   delta.Content,
-		Reasoning: delta.Reasoning,
+		Reasoning: reasoning,
 		Model:     raw.Model,
 	}
 

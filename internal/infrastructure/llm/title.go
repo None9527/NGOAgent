@@ -55,10 +55,26 @@ func (d *TitleDistiller) DistillTitle(userMessage string) (string, error) {
 	}
 
 	title := strings.TrimSpace(resp.Content)
+	// Fallback: some thinking models (e.g. Ollama Qwen) return only reasoning with
+	// no separate content in non-streaming mode. Extract title from reasoning text.
+	if title == "" && resp.Reasoning != "" {
+		// Take the last non-empty line of reasoning as a best-effort title.
+		lines := strings.Split(resp.Reasoning, "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			if l := strings.TrimSpace(lines[i]); l != "" {
+				title = l
+				break
+			}
+		}
+	}
 	if title == "" {
 		return "", fmt.Errorf("title distill: empty response")
 	}
-	// Strip surrounding quotes models sometimes add
+	// Truncate to reasonable length and strip surrounding quotes
+	runes := []rune(title)
+	if len(runes) > 60 {
+		title = string(runes[:60])
+	}
 	title = strings.Trim(title, `"'`)
 	return title, nil
 }
