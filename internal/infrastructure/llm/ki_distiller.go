@@ -29,19 +29,21 @@ func NewKnowledgeDistiller(r *Router) *KnowledgeDistiller {
 
 const kiDistillPrompt = `You are a knowledge distillation engine. Analyze the following conversation between a user and an AI coding assistant. Extract any reusable, persistent knowledge worth remembering for future sessions.
 
-**What qualifies as worth saving:**
-- Technical decisions, architecture patterns, or design choices for the project
-- Configuration details (API keys setup, env vars, ports, paths)  
-- Bug fixes and their root causes
+**What qualifies as worth saving (bias toward saving):**
+- Bug fixes: root cause analysis, regex/config/logic errors and their fixes
+- Architecture insights: how components connect, data flow, pipeline traces
+- Technical decisions and design choices for the project
+- Configuration details (API keys setup, env vars, ports, paths)
 - Project-specific conventions or constraints
 - Important user preferences or requirements
-- Non-obvious implementation details
+- Non-obvious implementation details or gotchas
+- Debugging techniques: how a problem was traced and resolved
 
-**What does NOT qualify:**
-- Simple Q&A with no lasting value
-- Routine code generation without novel insights
-- Conversations that only discuss transient state  
-- Debugging sessions with no generalizable lesson
+**What does NOT qualify (only skip truly trivial):**
+- Simple factual Q&A with no project context (e.g., "what does X mean?")
+- Conversations that produced no code changes and no insights
+
+**When in doubt, set should_save=true.** It is better to save too much than to lose knowledge.
 
 Respond with a JSON object (no markdown fences):
 {

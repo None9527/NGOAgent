@@ -33,7 +33,7 @@ func DefaultConfig() *Config {
 			Provider:            "", // disabled by default
 			Model:               "text-embedding-v3",
 			Dimensions:          1024,
-			SimilarityThreshold: 0.85,
+			SimilarityThreshold: 0.75,
 			MinKIForEmbedding:   30,
 			TopK:                5,
 		},

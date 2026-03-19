@@ -227,7 +227,7 @@ func TestEvolution_PromptPlanningNoPlanReminder(t *testing.T) {
 
 func TestEvolution_KIDistillHookFiltering(t *testing.T) {
 	saved := false
-	mockStore := &mockKIStore{saveFn: func(summary, content string, tags, sources []string) error {
+	mockStore := &mockKIStore{saveFn: func(title, summary, content string, tags, sources []string) error {
 		saved = true
 		return nil
 	}}
@@ -377,17 +377,17 @@ func (s *testSink) OnText(text string)                                {}
 func (s *testSink) OnPlanReview(string, []string)                     {}
 
 type mockKIStore struct {
-	saveFn func(summary, content string, tags, sources []string) error
+	saveFn func(title, summary, content string, tags, sources []string) error
 }
 
-func (m *mockKIStore) SaveDistilled(summary, content string, tags, sources []string) error {
+func (m *mockKIStore) SaveDistilled(title, summary, content string, tags, sources []string) error {
 	if m.saveFn != nil {
-		return m.saveFn(summary, content, tags, sources)
+		return m.saveFn(title, summary, content, tags, sources)
 	}
 	return nil
 }
 
-func (m *mockKIStore) UpdateContent(id, newContent string) error {
+func (m *mockKIStore) UpdateMerge(id, appendContent, newSummary string) error {
 	return nil
 }
 

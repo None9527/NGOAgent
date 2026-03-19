@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -190,14 +191,43 @@ func (s *Store) ListArtifacts(id string) []string {
 func (s *Store) BaseDir() string { return s.baseDir }
 
 // SaveDistilled implements the domain KIStore interface for auto-distillation hooks.
-func (s *Store) SaveDistilled(summary, content string, tags, sources []string) error {
+func (s *Store) SaveDistilled(title, summary, content string, tags, sources []string) error {
 	return s.Save(&Item{
-		Title:   summary,
+		Title:   title,
 		Summary: summary,
 		Content: content,
 		Tags:    tags,
 		Sources: sources,
 	})
+}
+
+// UpdateMerge appends content to an existing KI AND refreshes its metadata (summary, updated_at).
+// This ensures dedup-merged KIs stay discoverable with current summaries.
+func (s *Store) UpdateMerge(id, appendContent, newSummary string) error {
+	// 1. Append to overview.md
+	artPath := filepath.Join(s.baseDir, id, "artifacts", "overview.md")
+	existing, err := os.ReadFile(artPath)
+	if err != nil {
+		return fmt.Errorf("read existing KI %s: %w", id, err)
+	}
+	if err := os.WriteFile(artPath, []byte(string(existing)+appendContent), 0644); err != nil {
+		return fmt.Errorf("write KI %s: %w", id, err)
+	}
+
+	// 2. Refresh metadata.json
+	item, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("get KI metadata %s: %w", id, err)
+	}
+	if newSummary != "" {
+		item.Summary = newSummary
+	}
+	item.UpdatedAt = time.Now()
+	meta, err := json.MarshalIndent(item, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal KI %s: %w", id, err)
+	}
+	return os.WriteFile(filepath.Join(s.baseDir, id, "metadata.json"), meta, 0644)
 }
 
 // UpdateContent appends new content to an existing KI's overview.md artifact.
@@ -211,13 +241,18 @@ func (s *Store) UpdateContent(id, newContent string) error {
 	return os.WriteFile(artPath, []byte(updated), 0644)
 }
 
+// idUnsafe matches any character not suitable for directory names.
+var idUnsafe = regexp.MustCompile(`[^a-z0-9_]+`)
+
 func sanitizeID(title string) string {
 	id := strings.ToLower(title)
-	id = strings.ReplaceAll(id, " ", "_")
-	id = strings.ReplaceAll(id, "/", "_")
-	if len(id) > 64 {
-		id = id[:64]
+	id = idUnsafe.ReplaceAllString(id, "_")
+	id = strings.Trim(id, "_")
+	if len(id) > 50 {
+		id = id[:50]
 	}
+	// Append timestamp to prevent collision from similar titles
+	id = fmt.Sprintf("%s_%d", id, time.Now().UnixMilli())
 	return id
 }
 

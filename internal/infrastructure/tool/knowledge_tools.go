@@ -248,16 +248,20 @@ func (t *SaveKnowledgeTool) Execute(ctx context.Context, args map[string]any) (d
 		}
 	}
 
-	// Dedup check: if a similar KI exists, update instead of create
+	// Dedup check: if a similar KI exists, merge instead of create
 	if t.retriever != nil {
-		dupID, score := t.retriever.FindDuplicate(key+"\n"+content, t.threshold)
+		dupID, score := t.retriever.FindDuplicate(key, t.threshold)
 		if dupID != "" {
 			appendContent := fmt.Sprintf("\n\n---\n\n## Manual Update\n\n%s", content)
-			if err := t.store.UpdateContent(dupID, appendContent); err != nil {
-				return dtool.ToolResult{Output: fmt.Sprintf("Error updating existing KI: %v", err)}, nil
+			mergeSummary := content
+			if len(mergeSummary) > 200 {
+				mergeSummary = mergeSummary[:200] + "..."
+			}
+			if err := t.store.UpdateMerge(dupID, appendContent, mergeSummary); err != nil {
+				return dtool.ToolResult{Output: fmt.Sprintf("Error merging into existing KI: %v", err)}, nil
 			}
 			_ = t.retriever.EmbedAndIndexByID(dupID)
-			return dtool.ToolResult{Output: fmt.Sprintf("Updated existing knowledge %q (similarity=%.2f)", dupID, score)}, nil
+			return dtool.ToolResult{Output: fmt.Sprintf("Merged into existing knowledge %q (similarity=%.2f)", dupID, score)}, nil
 		}
 	}
 

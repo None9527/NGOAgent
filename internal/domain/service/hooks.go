@@ -89,8 +89,8 @@ type KIDistillHook struct {
 
 // KIStore is the interface needed by the distillation hook.
 type KIStore interface {
-	SaveDistilled(summary, content string, tags, sources []string) error
-	UpdateContent(id, newContent string) error // Append/merge content for existing KI
+	SaveDistilled(title, summary, content string, tags, sources []string) error
+	UpdateMerge(id, appendContent, newSummary string) error // Merge content + refresh metadata
 }
 
 // KIDuplicateChecker detects duplicate KIs using embedding similarity.
@@ -128,8 +128,12 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 				log.Printf("[hook] panic in KI distill: %v", r)
 			}
 		}()
-		// Gate: only distill meaningful conversations
-		if info.Steps < 5 || len(info.History) < 3 {
+		// Gate: only distill conversations with actual tool usage
+		// Steps counts generate→tool→guard cycles, so Steps=0 means pure text Q&A.
+		// Previously Steps<5 filtered too aggressively — most sessions have 1-3 steps.
+		if info.Steps < 2 || len(info.History) < 4 {
+			log.Printf("[hook] KI distill: skipped (steps=%d, history=%d) for session=%s",
+				info.Steps, len(info.History), info.SessionID)
 			return
 		}
 		log.Printf("[hook] KI distill: calling LLM for session=%s steps=%d", info.SessionID, info.Steps)
@@ -154,25 +158,26 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		content := fmt.Sprintf("# %s\n\n%s\n\n---\n\n%s",
 			result.Title, result.Summary, result.Content)
 
-		// Dedup check: if a similar KI exists, update instead of create
+		// Dedup check: if a similar KI exists, merge instead of create
 		if h.dedup != nil {
 			queryText := result.Title + "\n" + result.Summary
 			dupID, score := h.dedup.FindDuplicate(queryText, h.dedupThreshold)
 			if dupID != "" {
-				log.Printf("[hook] KI dedup: found similar KI %q (score=%.3f), updating", dupID, score)
+				log.Printf("[hook] KI dedup: merging into %q (score=%.3f)", dupID, score)
 				appendContent := fmt.Sprintf("\n\n---\n\n## Update from session %s\n\n%s", info.SessionID, result.Content)
-				if err := store.UpdateContent(dupID, appendContent); err != nil {
-					log.Printf("[hook] KI dedup update failed: %v", err)
+				mergeSummary := fmt.Sprintf("%s (updated: %s)", result.Summary, result.Title)
+				if err := store.UpdateMerge(dupID, appendContent, mergeSummary); err != nil {
+					log.Printf("[hook] KI dedup merge failed: %v", err)
 				} else {
 					_ = h.dedup.EmbedAndIndexByID(dupID)
-					log.Printf("[hook] KI dedup: updated existing KI %q", dupID)
+					log.Printf("[hook] KI dedup: merged into %q", dupID)
 				}
 				return
 			}
 		}
 
 		if err := store.SaveDistilled(
-			result.Title, content,
+			result.Title, result.Summary, content,
 			result.Tags,
 			[]string{info.SessionID},
 		); err != nil {
@@ -182,6 +187,7 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		}
 	}()
 }
+
 
 // ═══════════════════════════════════════════
 // TitleDistillHook — LLM-generated session title
