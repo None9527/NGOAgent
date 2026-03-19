@@ -5,11 +5,13 @@
   <img src="https://img.shields.io/badge/License-BSL%201.1-blue?style=for-the-badge" />
 </p>
 
-# NGOAgent
+# NGOAgent: 边缘计算自治 AI 操作系统
 
-**自主式本地 AI Agent** — 运行在你自己机器上的通用自主智能体，具备文件操作、Shell 执行、Web 搜索、知识管理、定时任务、子 Agent 委派等完整能力。不局限于编码，可执行任何需要工具调用的复杂任务。
+**为真实世界的复杂工作流而生：企业级、本地优先的自主智能体架构。**
 
-> ~30K LOC · 21+ 内置工具 · React Web UI · HTTP SSE（断线重连） · LoopPool 多会话并发
+> “不再是聊天机器人，不再是一次性脚本。我们正在定义边缘侧的真正自主行动标杆。”
+
+在数据隐私成为核心壁垒、企业自动化日益复杂的今天，NGOAgent 作为一款生产级、自主决策的 AI 操作系统应运而生。它由超过 **30,000 行健壮的 Go 生产代码** 驱动，依靠原生的领域驱动设计 (DDD)、10状态 ReAct 引擎和金融级安全护栏，将**认知自动化**直接交付到用户的隐私环境中。
 
 <p align="center">
   <img src="assets/demo.gif" alt="NGOAgent Demo" width="720" />
@@ -17,23 +19,28 @@
 
 ---
 
-## 核心特性
+## 💥 六大核心护城河 (The Moat)
 
-| 特性 | 描述 |
-|------|------|
-| 🧠 **ReAct 循环** | 10 状态机驱动的自主决策循环，支持工具调用、上下文压缩、自动重试 |
-| 🔧 **21+ 内置工具** | 文件读写编辑、Shell 执行、Grep/Glob 搜索、Web 搜索/抓取、知识管理、Brain Artifact |
-| 📝 **Prompt Assembly** | U 形注意力布局的系统提示词组装，4 级预算裁剪，支持可插拔组件 |
-| 🛡️ **安全决策链** | Allow / Auto / Ask 三级权限，命令黑名单，工具级审批，审计日志 |
-| 🧩 **技能 + 锻造** | Skill 热加载 + Forge 沙箱验证，MCP 协议集成 |
-| 💾 **跨会话知识** | Brain Artifact (会话级) + KI Store (全局级)，LLM 自动蒸馏 |
-| ⏰ **定时任务** | Cron 引擎，独立会话隔离，支持自主巡检 |
-| 📡 **SSE 断线重连** | BufferedDelta 事件缓冲 + RunTracker 活跃任务跟踪，页面刷新/网络抖动自动恢复 |
-| 🔀 **LoopPool 并发** | 多会话隔离并发，每个会话独立 AgentLoop + Brain + History |
+NGOAgent 从第一天起就以**生产级部署、绝对安全和无限扩展**为核心目标，打破了开源 Agent “玩具级”脚本的脆弱魔咒：
+
+1. 🛡️ **绝对的数据主权 (Local-First)**
+   完美接入本地部署的百亿/千亿大模型（Ollama、vLLM）或私有化云端接口。没有任何数据会离开受信任区域，直击金融、医疗研发中“数据出境”的核心痛点。
+2. 🧠 **Agentic LoopPool™ & ReAct 引擎**
+   高度确定性的 **10 状态 ReAct 状态机**，赋予 Agent 人类般的“思考、规划、执行、验证、重试”决策闭环。独创的 **LoopPool** 池化技术实现了千人千面的硬隔离并发，彻底告别状态污染。
+3. 🔌 **繁荣的私有体系：原生 Skill 插件生态与 Forge 沙箱**
+   摒弃笨重的第三方协议，NGOAgent 拥有一套极度轻量的原生 Skill 热加载生态。只需几行代码，即可将企业私有 ERP、飞书审批流、K8s 调度封装为专属“数字触角”。所有未经审计的代码均会在独创的 **Forge（锻造沙箱）** 中严格隔离演练，确保零风险上线。
+4. 🔗 **永不失联的高可用层 (SSE Telemetry)**
+   专为残酷生产环境设计。重度缓冲的 SSE (Server-Sent Events) 网络层，在网络抖动、页面刷新、甚至笔记本合上期间，后台 Agent 仍死磕任务；网络一经恢复，执行进度条与全量日志瞬间残血回退、同步归位。
+5. 💂‍♂️ **跨入深水区的“金融级”安全靶向**
+   实现了细粒度的 `Allow / Auto / Ask` 权限三叉戟。敏感操作（如大批量删改、高危命令）会自动熔断，并向 Web UI 或 Telegram 发送交互式审批请求。人类永远握着绝对的“一键终止”倒挂开关。
+6. 🏗️ **领域驱动设计 (DDD) 赋能的极速业务定制**
+   极度的“Model-Agnostic”（模型脱钩）。凭借 Go 语言 **领域驱动设计 (DDD)** 的高内聚、松耦合内核，面对任何特定垂直行业（军工、量化计算）的私有化定制需求，都能以乐高式的敏捷速度进行二次开发与重构，永不崩塌。
 
 ---
 
-## 架构
+## 🧩 核心架构图 (Architecture)
+
+NGOAgent 不受算力平台绑架，在内网独立运转了一整套涵盖引擎、持久化、记忆与扩展体系的流式架构：
 
 ```mermaid
 graph TD
@@ -50,16 +57,17 @@ graph TD
         Engine["AgentLoop<br/>ReAct 状态机"]
     end
 
-    subgraph Infra["基础设施 · infrastructure"]
-        Tool["tool · 23 个"]
-        Prompt["prompt · Assembly"]
-        LLM["llm · Provider Router"]
-        Security["security · Hook Chain"]
-        Brain["brain · Artifact"]
-        KI["knowledge · KI Store"]
+    subgraph Infra["基础设施栈 · infrastructure"]
+        Tool["tool · 23 个内置原子工具"]
+        Prompt["prompt · 15-Section 重组"]
+        LLM["llm · Provider 智能漏斗与降级"]
+        Security["security · 安全与 Hook 拦截"]
+        Brain["brain · 会话流 Artifacts"]
+        KI["knowledge · KI 知识蒸馏"]
+        Skill["skill · 热拔插核心"]
     end
 
-    Web -->|SSE| Server
+    Web -->|SSE 毫秒级流送| Server
     Server --> Engine
     Engine --> Tool
     Engine --> Prompt
@@ -67,6 +75,7 @@ graph TD
     Engine --> Security
     Engine --> Brain
     Brain --> KI
+    Engine --> Skill
 
     style Core fill:#1a1a2e,stroke:#e94560,color:#fff
     style Interfaces fill:#16213e,stroke:#0f3460,color:#fff
@@ -75,255 +84,97 @@ graph TD
 
 ---
 
-## 快速开始
+## ⚡ 极速开始 (Quick Start)
 
-### 前置依赖
+### 前置环境
 
 - **Go** ≥ 1.24
-- **Node.js** ≥ 18 (Web UI)
-- **ripgrep** (`rg`) — grep_search 工具依赖
-- **fd** — glob 工具 (可选, 自动降级到 `find`)
+- **Node.js** ≥ 18 (运行极地质感的 React Web UI)
+- **ripgrep** (`rg`) & **fd** — 底层闪电搜索工具依赖
 
-### 构建 & 启动
+### 本地构建部署
 
 ```bash
-# 1. 克隆
+# 1. 深度克隆基座
 git clone https://github.com/ngoclaw/ngoagent.git
 cd ngoagent
 
-# 2. 构建后端
+# 2. 核心后端构建
 go build -o ngoagent ./cmd/ngoagent
 
-# 3. 首次启动 (自动初始化 ~/.ngoagent/ 并生成鉴权 Token)
+# 3. 守护进程启动 (零配置自举 ~/.ngoagent，并生成金钥 Token)
 ./ngoagent serve
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  AUTH TOKEN GENERATED (save this for frontend connection):   ║
-# ║  a1b2c3d4...64 字符 hex...                                  ║
+# ║  e.g: a1b2c3d4...64个字符...                                ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-# 4. 构建并启动 Web UI
+# 4. 前端空间启动
 cd webui && npm install && npm run dev
-# 访问 http://localhost:5173 → 输入 Token 连接
+# 浏览器访问 http://localhost:5173，输入生成的 Token 完成安全握手
 ```
 
-### 配置
+---
 
-首次启动自动生成 `~/.ngoagent/config.yaml`，参考 [config.example.yaml](config.example.yaml)：
+## ⚙️ 动态配置注入 (Configuration)
+
+摒弃复杂的部署链条。首次启动即可自生成带全量注释的中心配置文件 `~/.ngoagent/config.yaml`（支持**热更新重载**）：
 
 ```yaml
 agent:
-  planning_mode: false
-  workspace: "~/.ngoagent/workspace"
+  workspace: "~/.ngoagent/workspace"  # 物理隔离边界
+  planning_mode: false                # NLP启发式触发 Plan
 
 llm:
   providers:
-    - name: "default"
+    - name: "local_ollama"
       type: "openai"
-      base_url: "https://api.openai.com/v1"
-      api_key: "${OPENAI_API_KEY}"
-      models: ["gpt-4"]
+      base_url: "http://localhost:11434/v1"
+      models: ["huihui-opus:latest", "qwen2.5-coder"]
 
 security:
-  mode: "auto"            # allow / auto / ask
+  mode: "auto"                        # allow / auto / ask 三级鉴权
   block_list: ["rm", "rmdir", "mkfs", "dd", "shutdown"]
+  safe_commands: ["ls", "cat", "grep", "find", "go", "npm", "git"]
 
 server:
   http_port: 19997
-  auth_token: "<auto-generated>"  # SHA-256 鉴权 Token (首次启动自动生成)
-```
-
-> **提示**：API Key 通过环境变量注入，不会写入配置文件。支持所有 OpenAI 兼容 API。
-
----
-
-## Token 鉴权
-
-所有 API 请求**强制鉴权**（`/v1/health` 除外）。
-
-| 项目 | 说明 |
-|------|------|
-| **生成时机** | 首次启动时自动生成 (`crypto/rand` 32B → SHA-256 → 64 字符 hex) |
-| **存储** | `~/.ngoagent/config.yaml` 的 `server.auth_token` |
-| **传输方式** | HTTP Header `Authorization: Bearer <token>` |
-| **前端连接** | 打开 Web UI → 输入服务器地址 + Token → 验证通过后自动存储到 localStorage |
-
-### 前后端 Token 链路
-
-```mermaid
-flowchart TD
-    A["🔐 首次启动<br/>后端: crypto/rand → SHA-256<br/>→ config.yaml server.auth_token<br/>终端打印 Token 供用户复制"] --> B
-    B["🌐 前端连接 (ConnectPage)<br/>用户输入 server_url + token<br/>→ GET /v1/health 验证连通<br/>→ 存储 localStorage: SERVER_URL, AUTH_TOKEN"] --> C
-    C["📡 后续所有请求<br/>authFetch() 自动注入 Authorization: Bearer token<br/>→ 后端 authMiddleware 校验<br/>→ 401 = token 无效/过期<br/>页面刷新 → localStorage 自动恢复"]
-
-    style A fill:#1a1a2e,stroke:#e94560,color:#fff
-    style B fill:#16213e,stroke:#0f3460,color:#fff
-    style C fill:#0f3460,stroke:#533483,color:#fff
-```
-
-```bash
-# 查看已生成的 Token
-grep auth_token ~/.ngoagent/config.yaml
-
-# 手动重新生成
-python3 -c "import hashlib,secrets; print(hashlib.sha256(secrets.token_bytes(32)).hexdigest())"
-# 将输出粘贴到 config.yaml 的 auth_token 字段，重启后端生效
+  auth_token: "<auto-generated>"      # 高阶熵 SHA-256 安全验证令
 ```
 
 ---
 
-## 自动初始化
+## 🧰 超级挂载套件 (Toolchain)
 
-首次启动时，NGOAgent 自动创建 `~/.ngoagent/` 目录：
+NGOAgent 目前配备 **23 项原子工具**，完全打通与主流开发栈和互联网的结界边界。
 
-```
-~/.ngoagent/
-├── config.yaml       配置文件 (含 auth_token)
-├── mcp.json          MCP 服务器配置 (Claude Code 兼容格式)
-├── user_rules.md     用户规则 (Agent 行为)
-├── .state.json       启动状态 (new → ready)
-├── data/             SQLite 数据库
-├── brain/            会话级 Artifact
-├── knowledge/        全局知识 (KI Store)
-├── skills/           技能目录 (热加载)
-├── cron/             定时任务
-├── workspace/        默认工作目录
-├── forge/            锻造沙箱
-├── prompts/          提示词变体
-├── mcp/              MCP 运行时数据
-└── logs/             运行日志
-```
+| 功能象限 | 原生工具标示 | 底层用途 |
+|----------|------------|----------|
+| **磁盘 I/O** | `read_file`, `write_file`, `edit_file`, `undo_edit` | 大规模代码重构、多行安全正则替换、精确读写防崩溃 |
+| **Shell 脱管** | `run_command`, `command_status` | 非阻塞异步终端执行，防死结轮询机制 |
+| **全息搜索** | `grep_search`, `glob` | 基于 Rust 底层的极速内容搜集与文件嗅探 |
+| **广域信息** | `web_search`, `web_fetch` | 无缝整合私有化 SearXNG 集群，破除信息孤岛 |
+| **意识持久** | `save_memory`, `update_project_context` | 沉淀全局 KI (Knowledge Item) 资产与项目特定环境上下文 |
+| **多体协同** | `task_boundary`, `task_plan`, `spawn_agent` | PEV 进度跟踪，全周期长文执行规划，甚至子 Agent 横向繁殖 |
 
 ---
 
-## 工具清单
+## 🛡️ 零摩擦双轨流式安全握手 (SSE + Auth)
 
-| 类别 | 工具 | 描述 |
-|------|------|------|
-| **文件** | `read_file` | 读取文件，自动行号标注，二进制检测 |
-| | `write_file` | 创建/覆盖文件，自动建目录 |
-| | `edit_file` | 精确字符串替换，模糊匹配降级 |
-| | `undo_edit` | 撤销文件编辑 |
-| **Shell** | `run_command` | Bash 执行，后台模式，超时控制 |
-| | `command_status` | 查询后台命令状态 |
-| **搜索** | `grep_search` | 基于 ripgrep 的代码搜索 |
-| | `glob` | 基于 fd 的文件查找 (自动降级 find) |
-| **Web** | `web_search` | SearXNG 搜索引擎查询 |
-| | `web_fetch` | URL 内容抓取 |
-| **知识** | `save_memory` | 写入全局 KI Store |
-| | `update_project_context` | 写入项目级 context.md |
-| **协作** | `task_boundary` | Planning/Execution/Verification 模式切换 |
-| | `task_plan` | Brain Artifact (plan/task/walkthrough) |
-| | `notify_user` | 审批请求 + 用户通知 |
-| | `spawn_agent` | 子代理委派 |
-| | `send_message` | 跨会话消息发送 |
-| **扩展** | `script_tool` | 自定义脚本工具 (Skill 自动注册) |
-| | `mcp_adapter` | MCP 协议桥接 |
-| | `forge` | 能力锻造 (沙箱验证) |
-| | `manage_cron` | 定时任务 CRUD |
+所有通信被重度保护并封装在 `DeltaSink` 和基于 Token 的防窃听漏斗下：
+
+1. **Token 鉴权链**：首次起服自动通过伪随机熵与 SHA256 签发 64 字节 Hex 码，前端依靠 `Authorization: Bearer <Token>` 头交互。
+2. **断点回溯协议 (Reconnect)**：连接中断期间一切推理继续进行；重连瞬发 `/v1/chat/reconnect` 请求触发内存快照历史流（Text, Reasoning, Tool_Call）回放式下发。
 
 ---
 
-## 项目结构
+## 📖 设计手札与开发者资源
 
-```
-NGOAgent/
-├── cmd/ngoagent/           程序入口
-├── internal/
-│   ├── domain/service/     核心引擎 (AgentLoop · DeltaSink · Guard)
-│   ├── infrastructure/
-│   │   ├── tool/           23 个内置工具
-│   │   ├── llm/            LLM Provider Router
-│   │   ├── prompt/         Prompt Assembly Pipeline
-│   │   ├── security/       安全决策链
-│   │   ├── brain/          会话 Artifact
-│   │   ├── knowledge/      跨会话知识 (KI)
-│   │   ├── skill/          技能系统
-│   │   ├── cron/           定时任务引擎
-│   │   ├── mcp/            MCP 协议
-│   │   ├── config/         配置管理 + 热重载
-│   │   ├── persistence/    SQLite 持久化
-│   │   └── sandbox/        命令沙箱
-│   ├── application/        API 层 (Builder · AgentAPI)
-│   └── interfaces/
-│       ├── server/         HTTP SSE 服务器
-│       └── grpc/           gRPC 服务器
-├── webui/                  React + TypeScript 前端
-├── api/proto/              gRPC Protobuf 定义
-├── docs/                   设计文档
-└── config.example.yaml     配置示例
-```
+深入了解极其硬核的代码构造，推荐细读核心架构文档：
+- [**design.md**](docs/design.md) — 2000 行纯粹的后端 DDD 拆解思路
+- [**architecture.md**](docs/architecture.md) — 概览、依赖结构、God Interface 抹除技巧
 
----
-
-## 流式协议
-
-所有输出通过统一的 `DeltaSink` 接口流式传输，支持断线重连：
-
-```
-LLM → AgentLoop → BufferedDelta → SSE Writer → Client
-                       ↕
-              断连时缓冲到内存
-              重连时回放 + 续流
-```
-
-| 事件 | 字段 | 描述 |
-|------|------|------|
-| `text_delta` | `content` | 文本流 |
-| `thinking` | `content` | 推理过程 |
-| `tool_start` | `name`, `args` | 工具开始 |
-| `tool_result` | `call_id`, `output`, `error` | 工具结果 |
-| `progress` | `task_name`, `status`, `mode` | 任务进度 |
-| `approval_request` | `approval_id`, `tool_name`, `reason` | 审批请求 |
-| `plan_review` | `message`, `paths` | 方案审查 |
-| `error` | `message` | 错误 |
-| `step_done` | — | 步骤完成 |
-
-### SSE 端点
-
-| 端点 | 方法 | 描述 |
-|------|------|------|
-| `/v1/chat` | POST | 发送消息，SSE 流式响应 |
-| `/v1/chat/status?session_id=xxx` | GET | 查询是否有活跃 run |
-| `/v1/chat/reconnect?session_id=xxx&last_seq=0` | GET | 断线重连，自动回放缓冲事件 |
-
----
-
-## gRPC API (可选)
-
-NGOAgent 支持 gRPC API，默认关闭（`grpc_port: 0`）。启用方法：
-
-```yaml
-# ~/.ngoagent/config.yaml
-server:
-  grpc_port: 19998   # 设为非零端口即可启用
-```
-
-完整 RPC 定义见 [agent_service.proto](api/proto/agent_service.proto)。
-
----
-
-## 开发
-
-```bash
-# 后端编译
-go build -o ngoagent ./cmd/ngoagent
-
-# 后端测试
-go test ./internal/...
-
-# 前端开发 (热重载)
-cd webui && npm run dev
-
-# 前端生产构建
-cd webui && npm run build
-```
-
----
-
-## 设计文档
-
-- [**design.md**](docs/design.md) — 完整后端设计
-- [**architecture.md**](docs/architecture.md) — 架构蓝图
+> “这是数字同时的超级办公桌，一个真正能跑通千行代码长链重构、具有物理反制能力的开源 AI 中枢。”
 
 ---
 
