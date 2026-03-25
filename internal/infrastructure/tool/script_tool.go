@@ -28,16 +28,24 @@ func (t *ScriptTool) Name() string {
 }
 
 func (t *ScriptTool) Description() string {
-	return fmt.Sprintf("Execute skill: %s — %s", t.skill.Name, t.skill.Description)
+	desc := fmt.Sprintf("Execute skill: %s — %s", t.skill.Name, t.skill.Description)
+	if t.skill.Command != "" {
+		desc += fmt.Sprintf("\nUsage example: run.sh %s", t.skill.Command)
+	}
+	return desc
 }
 
 func (t *ScriptTool) Schema() map[string]any {
+	usageDesc := "CLI arguments (subcommand + flags), e.g.: generate \"prompt\""
+	if t.skill.Command != "" {
+		usageDesc = fmt.Sprintf("CLI arguments, e.g.: %s", t.skill.Command)
+	}
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"args": map[string]any{
 				"type":        "string",
-				"description": "Arguments to pass to the skill script",
+				"description": usageDesc,
 			},
 			"input": map[string]any{
 				"type":        "string",
@@ -51,26 +59,26 @@ func (t *ScriptTool) Execute(ctx context.Context, args map[string]any) (dtool.To
 	scriptArgs, _ := args["args"].(string)
 	input, _ := args["input"].(string)
 
-	// Detect script runner based on file extension
+	// Detect script entry point
 	scriptPath := t.skill.Path + "/run.sh"
-	runner := "bash"
-
-	// Check for Python script (os.Stat checks file existence; LookPath only searches $PATH)
 	if _, err := os.Stat(scriptPath); err != nil {
 		pyPath := t.skill.Path + "/run.py"
 		if _, err := os.Stat(pyPath); err == nil {
 			scriptPath = pyPath
-			runner = "python3"
 		}
 	}
 
 	execCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(execCtx, runner, scriptPath)
+	// Use bash -c for proper shell argument splitting.
+	// Without this, exec.Command passes the entire args string as $1,
+	// breaking CLI subcommand parsing (e.g. "generate 'prompt'" → one arg).
+	shellCmd := scriptPath
 	if scriptArgs != "" {
-		cmd = exec.CommandContext(execCtx, runner, scriptPath, scriptArgs)
+		shellCmd = scriptPath + " " + scriptArgs
 	}
+	cmd := exec.CommandContext(execCtx, "bash", "-c", shellCmd)
 	cmd.Dir = t.skill.Path
 
 	if input != "" {
@@ -79,7 +87,13 @@ func (t *ScriptTool) Execute(ctx context.Context, args map[string]any) (dtool.To
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return dtool.ToolResult{Output: fmt.Sprintf("Skill %s failed: %v\nOutput: %s", t.skill.Name, err, string(output))}, nil
+		// On failure, include usage hint so LLM can self-correct
+		usageHint := ""
+		if t.skill.Command != "" {
+			usageHint = fmt.Sprintf("\n\nUsage reference: run.sh %s", t.skill.Command)
+		}
+		return dtool.ToolResult{Output: fmt.Sprintf("Skill %s failed: %v\nOutput: %s%s",
+			t.skill.Name, err, string(output), usageHint)}, nil
 	}
 
 	return dtool.ToolResult{Output: string(output)}, nil

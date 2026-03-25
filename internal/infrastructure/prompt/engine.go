@@ -150,13 +150,23 @@ func (e *Engine) buildSkills(infos []SkillInfo) string {
 	if len(infos) == 0 {
 		return ""
 	}
+	// Separate workflow-only skills (need use_skill) from executable (already ScriptTool)
+	var workflows []SkillInfo
+	for _, s := range infos {
+		if s.Type != "executable" && s.Type != "hybrid" {
+			workflows = append(workflows, s)
+		}
+	}
+	if len(workflows) == 0 {
+		return "" // All skills are executable → already registered as direct tools
+	}
 	var b strings.Builder
 	b.WriteString("You can use specialized 'skills' to help you with complex tasks.\n")
-	b.WriteString("To activate a skill, call the use_skill tool with the skill name. ")
+	b.WriteString("To activate a workflow skill, call the use_skill tool with the skill name. ")
 	b.WriteString("This loads the skill's full guide with domain knowledge, execution steps, and rules. ")
 	b.WriteString("NEVER guess how a skill works — always activate it first.\n\n")
-	b.WriteString("Available skills:\n")
-	for _, s := range infos {
+	b.WriteString("Available workflow skills:\n")
+	for _, s := range workflows {
 		skillMd := s.Path + "/SKILL.md"
 		b.WriteString(fmt.Sprintf("- %s (%s): %s\n", s.Name, skillMd, s.Description))
 	}

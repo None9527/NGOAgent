@@ -5,7 +5,6 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { useStream } from '../providers/StreamProvider'
-import type { SubagentProgressEntry } from '../providers/StreamProvider'
 
 export function SubagentDock() {
   const { subagentProgress } = useStream()
