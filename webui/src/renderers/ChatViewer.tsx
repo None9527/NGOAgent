@@ -327,7 +327,6 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
           ref={virtuosoRef}
           data={renderItems}
           itemContent={renderItem}
-          followOutput="smooth"
           style={customScrollParent ? undefined : { height: '100%' }}
           increaseViewportBy={{ top: 400, bottom: 400 }}
           customScrollParent={customScrollParent ?? undefined}

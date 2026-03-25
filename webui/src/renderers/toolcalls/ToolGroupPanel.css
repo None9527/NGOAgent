@@ -28,6 +28,10 @@
   background: var(--tgp-bg);
   overflow: hidden;
   backdrop-filter: blur(8px);
+  max-height: 60vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
 }
 
 /* ── Header ── */
@@ -38,6 +42,9 @@
   padding: 8px 14px;
   background: var(--tgp-header-bg);
   border-bottom: 1px solid var(--tgp-border);
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .tgp-header-label {
@@ -107,11 +114,7 @@
 
 /* ── Steps container ── */
 .tgp-steps-container {
-  max-height: 50vh;
-  overflow-y: auto;
   overflow-x: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
 }
 
 .tgp-steps-container::-webkit-scrollbar {

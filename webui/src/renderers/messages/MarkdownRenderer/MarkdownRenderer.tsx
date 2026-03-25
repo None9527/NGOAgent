@@ -33,7 +33,7 @@ function getAuthToken(): string {
 function buildFileUrl(path: string): string {
   const cleaned = path.replace(/^file:\/\//, '')
   const token = getAuthToken()
-  return `${cleaned}?token=${encodeURIComponent(token)}`
+  return `/v1/file?path=${encodeURIComponent(cleaned)}&token=${encodeURIComponent(token)}`
 }
 
 // ─── Props ───────────────────────────────────────────────────
@@ -153,8 +153,18 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
   const processedContent = useMemo(() => {
     if (!enableFileLinks) return content
 
-    // Replace bare absolute paths with markdown links (only outside code blocks)
     let result = content
+
+    // First: convert bare media file paths to markdown images
+    // Match absolute paths ending with media extensions on their own line or standalone
+    const IMAGE_PATH_REGEX = /(?<![[\](!])(?:^|\s)(\/[\w\-./]+\.(?:png|jpe?g|gif|webp|svg|bmp|avif|tiff?|mp4|webm|mov))(?=\s|$)/gim
+    result = result.replace(IMAGE_PATH_REGEX, (match, path) => {
+      const filename = path.split('/').pop() || 'image'
+      const prefix = match.startsWith(path) ? '' : match[0]
+      return `${prefix}![${filename}](${path})`
+    })
+
+    // Then: replace bare absolute code file paths with markdown links
     FILE_PATH_REGEX.lastIndex = 0
     result = result.replace(FILE_PATH_REGEX, (match) => {
       // Don't double-linkify already-linked paths
