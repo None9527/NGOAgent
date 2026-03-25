@@ -105,6 +105,26 @@ func (t *UseSkillTool) LoadSkill(_ context.Context, name, topic string) (dtool.T
 		return dtool.ToolResult{Output: fmt.Sprintf("Error reading skill %s: %v", name, err)}, nil
 	}
 
+	// Executable skills are registered as direct tools — redirect LLM
+	if skill.Type == "executable" || skill.Type == "hybrid" {
+		usage := skill.Command
+		if usage == "" {
+			usage = "generate \"prompt\""
+		}
+		redirect := fmt.Sprintf(
+			"⚡ Skill '%s' is a direct tool. Call it directly instead of use_skill:\n\n"+
+				"  Tool: %s\n  Args: %s\n\n"+
+				"Example: %s(args='%s')\n\n"+
+				"Do NOT use use_skill for this. Call the tool directly with args.",
+			skill.Name, skill.Name, usage, skill.Name, usage,
+		)
+		// Also append a brief from SKILL.md so LLM knows available subcommands
+		if topic != "" {
+			redirect += fmt.Sprintf("\n\nTopic requested: %s", topic)
+		}
+		return dtool.ToolResult{Output: redirect}, nil
+	}
+
 	output := string(content)
 	if topic != "" {
 		output = fmt.Sprintf("## Activated Skill: %s\n## Topic: %s\n\n%s", skill.Name, topic, output)
