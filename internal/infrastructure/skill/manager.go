@@ -70,11 +70,23 @@ func (m *Manager) Discover() {
 			cmd := parseSkillCommand(string(content))
 			skillDir := filepath.Join(dir, entry.Name())
 			skillType := detectSkillType(skillDir)
+			triggers := parseTriggers(string(content)) // Use full content, not `desc` (YAML `|` multiline breaks parseSkillHeader)
+			weight := parseSkillWeight(string(content))
+			// Auto-detect weight: has triggers → heavy, otherwise → light
+			if weight == "" {
+				if len(triggers) > 0 {
+					weight = "heavy"
+				} else {
+					weight = "light"
+				}
+			}
 			m.skills[name] = &entity.Skill{
 				ID:          name,
 				Name:        name,
 				Description: desc,
 				Type:        skillType,
+				Weight:      weight,
+				Triggers:    triggers,
 				Command:     cmd,
 				Path:        filepath.Join(dir, entry.Name()),
 				Content:     string(content),
@@ -234,6 +246,93 @@ func parseSkillHeader(content string) (name, desc string) {
 		}
 	}
 	return
+}
+
+// parseTriggers extracts trigger words from the description.
+// Looks for "触发词：" or "triggers:" line and splits by Chinese/English comma.
+func parseTriggers(desc string) []string {
+	for _, line := range strings.Split(desc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		var triggerPart string
+		if strings.HasPrefix(trimmed, "触发词：") || strings.HasPrefix(trimmed, "触发词:") {
+			triggerPart = strings.TrimPrefix(trimmed, "触发词：")
+			triggerPart = strings.TrimPrefix(triggerPart, "触发词:")
+		} else if strings.HasPrefix(strings.ToLower(trimmed), "triggers:") {
+			triggerPart = trimmed[len("triggers:"):]
+		} else {
+			continue
+		}
+		// Split by Chinese comma, English comma, or 、
+		var triggers []string
+		for _, sep := range []string{"、", "，", ","} {
+			triggerPart = strings.ReplaceAll(triggerPart, sep, "|")
+		}
+		for _, t := range strings.Split(triggerPart, "|") {
+			t = strings.TrimSpace(t)
+			if t != "" && t != "。" {
+				triggers = append(triggers, strings.ToLower(t))
+			}
+		}
+		return triggers
+	}
+	return nil
+}
+
+// parseSkillWeight extracts weight from SKILL.md frontmatter.
+// Returns "light", "heavy", or "" for auto-detect.
+func parseSkillWeight(content string) string {
+	lines := strings.Split(content, "\n")
+	inFrontmatter := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "---" {
+			if inFrontmatter {
+				break
+			}
+			inFrontmatter = true
+			continue
+		}
+		if !inFrontmatter {
+			continue
+		}
+		if strings.HasPrefix(line, "weight:") {
+			w := strings.TrimSpace(strings.TrimPrefix(line, "weight:"))
+			w = strings.Trim(w, "\"'")
+			if w == "light" || w == "heavy" {
+				return w
+			}
+		}
+	}
+	return ""
+}
+
+// MatchTriggers checks user message against all skill triggers.
+// Returns matched heavy skills with their quick usage hint.
+func (m *Manager) MatchTriggers(userMsg string) []SkillTriggerMatch {
+	lowerMsg := strings.ToLower(userMsg)
+	var matches []SkillTriggerMatch
+	seen := make(map[string]bool)
+	for _, s := range m.skills {
+		if s.Weight != "heavy" || !s.Enabled {
+			continue
+		}
+		for _, trigger := range s.Triggers {
+			if strings.Contains(lowerMsg, trigger) && !seen[s.Name] {
+				seen[s.Name] = true
+				matches = append(matches, SkillTriggerMatch{
+					Skill:   s,
+					Trigger: trigger,
+				})
+				break
+			}
+		}
+	}
+	return matches
+}
+
+// SkillTriggerMatch represents a skill matched by trigger word.
+type SkillTriggerMatch struct {
+	Skill   *entity.Skill
+	Trigger string
 }
 
 // HasCommand checks if any skill defines the given slash command name.

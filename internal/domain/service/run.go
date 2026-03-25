@@ -467,6 +467,28 @@ func (a *AgentLoop) doPrepare(_ context.Context) {
 		a.InjectEphemeral(msg)
 	}
 
+	// === Layer 4: Skill trigger auto-injection (heavy skills) ===
+	// When user message matches a heavy skill's trigger words, inject a quick hint
+	// so LLM can use run_command directly without reading full SKILL.md.
+	if a.deps.SkillMgr != nil && lastMsg != "" && a.currentStep < 2 {
+		matches := a.deps.SkillMgr.MatchTriggers(lastMsg)
+		for _, m := range matches {
+			usage := m.Skill.Command
+			if usage == "" {
+				usage = "<subcommand> [args]"
+			}
+			a.InjectEphemeral(fmt.Sprintf(
+				"	Skill available: %s\n"+
+					"Entry: %s/run.sh\n"+
+					"Quick usage via run_command: cd %s && ./run.sh %s\n"+
+					"For full guide: use_skill(name='%s')",
+				m.Skill.Name, m.Skill.Path,
+				m.Skill.Path, usage,
+				m.Skill.Name,
+			))
+		}
+	}
+
 	// L2 Progressive Disclosure: inject skill instruction after SKILL.md read
 	a.mu.Lock()
 	skillName := a.skillLoaded
@@ -674,6 +696,7 @@ func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunO
 				Name:        s.Name,
 				Description: s.Description,
 				Type:        s.Type,
+				Weight:      s.Weight,
 				Command:     s.Command,
 				Path:        s.Path,
 			})

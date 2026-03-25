@@ -522,11 +522,15 @@ func Build() (*App, error) {
 	useSkillTool := tool.NewUseSkillTool(skillMgr)
 	registry.Register(useSkillTool)
 	registry.SetSkillFallback(useSkillTool)
-	// Only register executable skills (with run.sh/run.py) as direct tools
+	// Layered registration:
+	// - light + executable: register as ScriptTool (LLM calls directly)
+	// - heavy + executable: trigger-inject + run_command (LLM uses run_command after ephemeral hint)
 	for _, sk := range skillMgr.AutoPromote() {
-		if sk.Type == "executable" || sk.Type == "hybrid" {
+		if (sk.Type == "executable" || sk.Type == "hybrid") && sk.Weight == "light" {
 			registry.Register(tool.NewScriptTool(sk))
-			log.Printf("[skill] Registered executable: %s", sk.Name)
+			log.Printf("[skill] Registered light ScriptTool: %s", sk.Name)
+		} else if sk.Weight == "heavy" {
+			log.Printf("[skill] Heavy skill (trigger-inject): %s [%d triggers]", sk.Name, len(sk.Triggers))
 		}
 	}
 	log.Printf("[skill] use_skill tool registered with %d skills available", len(skillMgr.List()))

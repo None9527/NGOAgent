@@ -28,7 +28,9 @@ type Skill struct {
 	ID          string
 	Name        string
 	Description string
-	Type        string // workflow / tool / reference
+	Type        string   // executable / workflow
+	Weight      string   // light (→ ScriptTool) / heavy (→ Trigger-Inject + run_command)
+	Triggers    []string // Trigger words extracted from description for auto-injection
 	Content     string
 	Command     string // Quick command extracted from SKILL.md bash block
 	Path        string
