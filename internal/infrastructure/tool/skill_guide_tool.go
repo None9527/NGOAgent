@@ -105,8 +105,9 @@ func (t *UseSkillTool) LoadSkill(_ context.Context, name, topic string) (dtool.T
 		return dtool.ToolResult{Output: fmt.Sprintf("Error reading skill %s: %v", name, err)}, nil
 	}
 
-	// Executable skills are registered as direct tools — redirect LLM
-	if skill.Type == "executable" || skill.Type == "hybrid" {
+	// Only redirect light+executable skills to ScriptTool (they're registered as direct tools).
+	// Heavy skills use run_command — give usage hint, NOT redirect.
+	if (skill.Type == "executable" || skill.Type == "hybrid") && skill.Weight == "light" {
 		usage := skill.Command
 		if usage == "" {
 			usage = "generate \"prompt\""
@@ -118,11 +119,29 @@ func (t *UseSkillTool) LoadSkill(_ context.Context, name, topic string) (dtool.T
 				"Do NOT use use_skill for this. Call the tool directly with args.",
 			skill.Name, skill.Name, usage, skill.Name, usage,
 		)
-		// Also append a brief from SKILL.md so LLM knows available subcommands
 		if topic != "" {
 			redirect += fmt.Sprintf("\n\nTopic requested: %s", topic)
 		}
 		return dtool.ToolResult{Output: redirect}, nil
+	}
+
+	// Heavy+executable: return concise run_command hint (NOT full SKILL.md)
+	if skill.Weight == "heavy" && (skill.Type == "executable" || skill.Type == "hybrid") {
+		usage := skill.Command
+		if usage == "" {
+			usage = "<subcommand> [args]"
+		}
+		hint := fmt.Sprintf(
+			"🎯 Skill '%s' — use run_command to execute:\n\n"+
+				"  cd %s && ./run.sh %s\n\n"+
+				"Available subcommands (run ./run.sh --help for details).\n"+
+				"For full guide with domain rules: use_skill(name='%s') again with name only.",
+			skill.Name, skill.Path, usage, skill.Name,
+		)
+		if topic != "" {
+			hint += fmt.Sprintf("\n\nTopic: %s", topic)
+		}
+		return dtool.ToolResult{Output: hint}, nil
 	}
 
 	output := string(content)
