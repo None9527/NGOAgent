@@ -91,17 +91,15 @@ func (c *Client) GenerateStream(ctx context.Context, req *llm.Request, ch chan<-
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		level := llm.ClassifyHTTPError(resp.StatusCode)
-		if resp.StatusCode == 429 && strings.Contains(string(bodyBytes), "insufficient_quota") {
-			level = llm.ErrorFatal
-		}
+		bodyStr := string(bodyBytes)
+		level := llm.ClassifyByBody(resp.StatusCode, bodyStr)
 		// DEBUG: log the request body that caused this error
-		log.Printf("[DEBUG] HTTP %d from %s\nRequest body: %s\nResponse: %s",
-			resp.StatusCode, c.baseURL, string(body), string(bodyBytes))
+		log.Printf("[DEBUG] HTTP %d from %s [%s]\nRequest body: %s\nResponse: %s",
+			resp.StatusCode, c.baseURL, level, string(body), bodyStr)
 		return nil, &llm.LLMError{
 			Level:   level,
 			Code:    fmt.Sprintf("http_%d", resp.StatusCode),
-			Message: string(bodyBytes),
+			Message: bodyStr,
 		}
 	}
 

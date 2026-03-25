@@ -86,6 +86,7 @@ export const api = {
   getHistory: (sessionId: string) =>
     get<{ messages: HistoryMessage[] }>(`/api/v1/history?session_id=${encodeURIComponent(sessionId)}`),
   clearHistory: () => post<{ status: string }>('/api/v1/history/clear'),
+  retry: (sessionId: string) => post<{ status: string; last_message: string }>('/v1/retry', { session_id: sessionId }),
 }
 
 export { API_BASE }

@@ -1,0 +1,477 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Styles for MarkdownRenderer component
+ */
+
+.markdown-content {
+  line-height: 1.6;
+  font-size: 15px;
+  color: var(--app-primary-foreground);
+}
+
+/* Global image constraint — catches ALL images in markdown */
+.markdown-content img {
+  max-width: 100% !important;
+  max-height: 380px !important;
+  height: auto !important;
+  border-radius: 12px;
+  cursor: zoom-in;
+  display: block;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4,
+.markdown-content h5,
+.markdown-content h6 {
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+  font-weight: 600;
+}
+
+.markdown-content h1 {
+  font-size: 1.75em;
+  border-bottom: 1px solid var(--app-primary-border-color);
+  padding-bottom: 0.3em;
+}
+
+.markdown-content h2 {
+  font-size: 1.5em;
+  border-bottom: 1px solid var(--app-primary-border-color);
+  padding-bottom: 0.3em;
+}
+
+.markdown-content h3 {
+  font-size: 1.25em;
+}
+
+.markdown-content h4 {
+  font-size: 1.1em;
+}
+
+.markdown-content h5,
+.markdown-content h6 {
+  font-size: 1em;
+}
+
+.markdown-content p {
+  margin-top: 0;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  margin-top: 1em;
+  margin-bottom: 1em;
+  padding-left: 2em;
+}
+
+/* Ensure list markers are visible even with global CSS resets */
+.markdown-content ul {
+  list-style-type: disc;
+  list-style-position: outside;
+}
+
+.markdown-content ol {
+  list-style-type: decimal;
+  list-style-position: outside;
+}
+
+/* Nested list styles */
+.markdown-content ul ul {
+  list-style-type: circle;
+}
+
+.markdown-content ul ul ul {
+  list-style-type: square;
+}
+
+.markdown-content ol ol {
+  list-style-type: lower-alpha;
+}
+
+.markdown-content ol ol ol {
+  list-style-type: lower-roman;
+}
+
+/* Style the marker explicitly so themes don't hide it */
+.markdown-content li::marker {
+  color: var(--app-secondary-foreground);
+}
+
+.markdown-content li {
+  margin-bottom: 0.25em;
+}
+
+.markdown-content li > p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.markdown-content blockquote {
+  margin: 0 0 1em;
+  padding: 0 1em;
+  border-left: 0.25em solid var(--app-primary-border-color);
+  color: var(--app-secondary-foreground);
+}
+
+.markdown-content a {
+  color: var(--app-link-foreground, #007acc);
+  text-decoration: none;
+}
+
+.markdown-content a:hover {
+  color: var(--app-link-active-foreground, #005a9e);
+  text-decoration: underline;
+}
+
+.markdown-content code {
+  font-family: var(
+    --app-monospace-font-family,
+    'SF Mono',
+    Monaco,
+    'Cascadia Code',
+    'Roboto Mono',
+    Consolas,
+    'Courier New',
+    monospace
+  );
+  font-size: 0.9em;
+  background-color: var(--app-code-background, rgba(0, 0, 0, 0.05));
+  border: 1px solid var(--app-primary-border-color);
+  border-radius: var(--corner-radius-small, 4px);
+  padding: 0.2em 0.4em;
+  white-space: pre-wrap; /* Support automatic line wrapping */
+  word-break: break-word; /* Break words when necessary */
+}
+
+.markdown-content pre {
+  margin: 1em 0;
+  padding: 1em;
+  background-color: var(--app-code-background, rgba(0, 0, 0, 0.05));
+  border: 1px solid var(--app-primary-border-color);
+  border-radius: var(--corner-radius-small, 4px);
+  font-family: var(
+    --app-monospace-font-family,
+    'SF Mono',
+    Monaco,
+    'Cascadia Code',
+    'Roboto Mono',
+    Consolas,
+    'Courier New',
+    monospace
+  );
+  font-size: 0.9em;
+  line-height: 1.5;
+}
+
+/* Code block with copy button wrapper */
+.markdown-content pre.code-block-wrapper {
+  position: relative;
+  padding-top: 2.2em;
+}
+
+.markdown-content .code-lang-label {
+  position: absolute;
+  top: 6px;
+  left: 12px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(255,255,255,0.3);
+  pointer-events: none;
+  user-select: none;
+}
+
+.markdown-content .code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.4);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+  z-index: 2;
+}
+
+.markdown-content pre.code-block-wrapper:hover .code-copy-btn {
+  opacity: 1;
+}
+
+.markdown-content .code-copy-btn:hover {
+  color: rgba(255,255,255,0.8);
+  background: rgba(255,255,255,0.12);
+  border-color: rgba(255,255,255,0.15);
+}
+
+.markdown-content pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  white-space: pre-wrap; /* Support automatic line wrapping */
+  word-break: break-word; /* Break words when necessary */
+}
+
+.markdown-content .file-path-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: var(
+    --app-monospace-font-family,
+    'SF Mono',
+    Monaco,
+    'Cascadia Code',
+    'Roboto Mono',
+    Consolas,
+    'Courier New',
+    monospace
+  );
+  font-size: 0.95em;
+  color: var(--app-link-foreground, #007acc);
+  text-decoration: underline;
+  cursor: pointer;
+  transition: color 0.1s ease;
+}
+
+.markdown-content .file-path-link:hover {
+  color: var(--app-link-active-foreground, #005a9e);
+}
+
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid var(--app-primary-border-color);
+  margin: 1.5em 0;
+}
+
+.markdown-content img {
+  max-width: 100%;
+  max-height: 380px;
+  height: auto;
+  object-fit: contain;
+}
+
+.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.markdown-content th,
+.markdown-content td {
+  padding: 0.5em 1em;
+  border: 1px solid var(--app-primary-border-color);
+  text-align: left;
+}
+
+.markdown-content th {
+  background-color: var(--app-secondary-background);
+  font-weight: 600;
+}
+
+/* ── Standalone images (no card, like open-webui) ── */
+.markdown-content .media-img {
+  display: block;
+  max-width: 100%;
+  max-height: 380px;
+  height: auto;
+  border-radius: 12px;
+  cursor: zoom-in;
+  margin: 8px 0;
+  transition: opacity 0.2s;
+}
+
+.markdown-content .media-img:hover {
+  opacity: 0.92;
+}
+
+/* Safety net: any img without .media-img class gets same treatment */
+.markdown-content img:not(.media-img) {
+  max-width: 100%;
+  max-height: 380px;
+  height: auto;
+  border-radius: 12px;
+  cursor: zoom-in;
+  display: block;
+  margin: 8px 0;
+}
+
+/* Hide empty blocks left by dedup removal */
+.markdown-content p:empty,
+.markdown-content li:empty,
+.markdown-content div:empty:not(.media-block) {
+  display: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── Media Block Cards (video/audio/pdf only) ── */
+.markdown-content .media-block {
+  margin: 10px 0;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  display: inline-block;
+  width: fit-content;
+  max-width: 100%;
+  transition: border-color 0.2s;
+}
+
+.markdown-content .media-block:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.markdown-content .media-block img {
+  max-width: min(480px, 100%);
+  max-height: 24rem;
+  height: auto;
+  display: block;
+  border-radius: 12px 12px 0 0;
+  cursor: zoom-in;
+}
+
+.markdown-content .media-block video {
+  max-width: 100%;
+  display: block;
+  border-radius: 12px 12px 0 0;
+}
+
+.markdown-content .media-block .media-caption {
+  padding: 5px 12px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.markdown-content .media-block.media-audio {
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.markdown-content .media-block.media-audio .audio-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.markdown-content .media-block.media-audio .audio-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.markdown-content .media-block.media-audio .audio-name {
+  font-size: 12px;
+  color: #aaa;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markdown-content .media-block.media-audio audio {
+  width: 100%;
+  height: 32px;
+}
+
+.markdown-content .media-block.media-pdf {
+  padding: 14px 16px;
+}
+
+.markdown-content .media-block.media-pdf a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #93c5fd;
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.markdown-content .media-block.media-pdf a:hover {
+  color: #bdd8ff;
+}
+
+.markdown-content .media-block.media-pdf .pdf-icon {
+  font-size: 22px;
+  flex-shrink: 0;
+}
+
+.markdown-content .media-block.media-pdf .pdf-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.markdown-content .media-block.media-pdf .pdf-badge {
+  color: rgba(255, 255, 255, 0.3);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+/* Compact inline file chip (for deduplicated paths) */
+.markdown-content .media-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: transparent;
+  border: none;
+  color: #93c5fd;
+  text-decoration: none;
+  font-size: 12px;
+  vertical-align: middle;
+  max-width: 200px;
+}
+
+.markdown-content .media-chip:hover {
+  text-decoration: underline;
+}
+
+.markdown-content .media-chip .chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ═══ Mobile adaptations ═══ */
+@media (max-width: 639px) {
+  .markdown-content {
+    font-size: 14px;
+  }
+  .markdown-content h1 { font-size: 1.4em; }
+  .markdown-content h2 { font-size: 1.25em; }
+  .markdown-content h3 { font-size: 1.1em; }
+  .markdown-content ul,
+  .markdown-content ol {
+    padding-left: 1.5em;
+  }
+  .markdown-content pre {
+    padding: 0.75em;
+    font-size: 0.85em;
+  }
+  .markdown-content th,
+  .markdown-content td {
+    padding: 0.35em 0.6em;
+    font-size: 0.9em;
+  }
+  .markdown-content .media-chip {
+    max-width: 150px;
+  }
+}

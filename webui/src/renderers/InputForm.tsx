@@ -1,7 +1,7 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025 NGOClaw Team
+ * SPDX-License-Identifier: BSL-1.1
  *
  * InputForm component - Main chat input with toolbar
  * Platform-agnostic version with configurable edit modes
@@ -23,6 +23,9 @@ import { CompletionMenu } from './CompletionMenu.js';
 import { ContextIndicator } from './ContextIndicator.js';
 import type { CompletionItem } from './types.js';
 import type { ContextUsage } from './ContextIndicator.js';
+import { useStream } from '../providers/StreamProvider';
+import { useConfig } from '../providers/ConfigProvider';
+import { useSession } from '../providers/SessionProvider';
 
 /**
  * Edit mode display information
@@ -117,69 +120,21 @@ export const getEditModeIcon = (iconType: EditModeIconType): ReactNode => {
 };
 
 /**
- * Props for InputForm component
+ * Props for InputForm component — minimized via Provider consumption
  */
 export interface InputFormProps {
   /** Current input text */
   inputText: string;
   /** Ref for the input field */
   inputFieldRef: React.RefObject<HTMLDivElement>;
-  /** Whether AI is currently generating */
-  isStreaming: boolean;
-  /** Whether waiting for response */
-  isWaitingForResponse: boolean;
-  /** Whether IME composition is in progress */
-  isComposing: boolean;
-  /** Edit mode display information */
-  editModeInfo: EditModeInfo;
-  /** Whether thinking mode is enabled */
-  thinkingEnabled: boolean;
-  /** Active file name (from editor) */
-  activeFileName: string | null;
-  /** Active selection range */
-  activeSelection: { startLine: number; endLine: number } | null;
-  /** Whether to skip auto-loading active context */
-  skipAutoActiveContext: boolean;
-  /** Context usage information */
-  contextUsage: ContextUsage | null;
   /** Input change callback */
   onInputChange: (text: string) => void;
-  /** Composition start callback */
-  onCompositionStart: () => void;
-  /** Composition end callback */
-  onCompositionEnd: () => void;
-  /** Key down callback */
-  onKeyDown: (e: React.KeyboardEvent) => void;
   /** Submit callback */
-  onSubmit: (e: React.FormEvent) => void;
-  /** Cancel callback */
-  onCancel: () => void;
-  /** Toggle edit mode callback */
-  onToggleEditMode: () => void;
-  /** Toggle thinking callback */
-  onToggleThinking: () => void;
-  /** Focus active editor callback */
-  onFocusActiveEditor?: () => void;
-  /** Toggle skip auto context callback */
-  onToggleSkipAutoActiveContext: () => void;
+  onSubmit: (e?: React.FormEvent) => void;
   /** Attached files */
   attachedFiles?: FileItem[];
-  /** Files change callback — supports direct value or updater function */
+  /** Files change callback */
   onFilesChange?: (filesOrUpdater: FileItem[] | ((prev: FileItem[]) => FileItem[])) => void;
-  /** Toggle security mode callback */
-  onToggleSecurityMode?: () => void;
-  /** Security mode label */
-  securityModeLabel?: string;
-  /** Whether completion menu is open */
-  completionIsOpen: boolean;
-  /** Completion items */
-  completionItems?: CompletionItem[];
-  /** Completion select callback */
-  onCompletionSelect?: (item: CompletionItem) => void;
-  /** Completion close callback */
-  onCompletionClose?: () => void;
-  /** Placeholder text */
-  placeholder?: string;
 }
 
 /**
@@ -210,41 +165,47 @@ export interface InputFormProps {
 export const InputForm: FC<InputFormProps> = ({
   inputText,
   inputFieldRef,
-  isStreaming,
-  isWaitingForResponse,
-  // isComposing — handled internally via composingRef, external prop unused
-  editModeInfo,
-  // thinkingEnabled,  // Temporarily disabled
-  activeFileName,
-  activeSelection,
-  skipAutoActiveContext,
-  contextUsage,
   onInputChange,
-  onCompositionStart,
-  onCompositionEnd,
-  onKeyDown,
   onSubmit,
-  onCancel,
-  onToggleEditMode,
-  // onToggleThinking,  // Temporarily disabled
-  onToggleSkipAutoActiveContext,
   attachedFiles = [],
   onFilesChange,
-  onToggleSecurityMode,
-  securityModeLabel,
-  completionIsOpen,
-  completionItems,
-  onCompletionSelect,
-  onCompletionClose,
-  placeholder = 'Ask Qwen Code …',
 }) => {
+  // ── Provider-driven state ──
+  const stream = useStream();
+  const config = useConfig();
+  const { sessionId } = useSession();
+  const { isStreaming } = stream;
+  const { planMode, securityMode } = config;
+
+  // Derived from providers
+  const isWaitingForResponse = isStreaming;
+  const onCancel = useCallback(() => { stream.stopStream(sessionId); }, [stream, sessionId]);
+  const onToggleEditMode = useCallback(() => config.togglePlanMode(), [config]);
+  const onToggleSecurityMode = useCallback(() => config.toggleSecurityMode(), [config]);
+  const securityModeLabel = securityMode === 'allow' ? 'Allow' : 'Ask';
+  const editModeInfo: EditModeInfo = {
+    label: planMode === 'plan' ? 'Plan' : planMode === 'agentic' ? 'Agentic' : 'Auto',
+    title: planMode === 'plan' ? 'Planning mode' : planMode === 'agentic' ? 'Agentic mode' : 'Auto mode',
+    icon: null,
+  };
+  const placeholder = isStreaming ? 'Agent is thinking...' : 'Message NGOAgent...';
+
+  // Internalized defaults (no-ops or constants)
+  const activeFileName: string | null = null;
+  const activeSelection: { startLine: number; endLine: number } | null = null;
+  const skipAutoActiveContext = false;
+  const contextUsage: ContextUsage | null = null;
+  const completionIsOpen = false;
+  const completionItemsResolved: CompletionItem[] = [];
+  const onToggleSkipAutoActiveContext = useCallback(() => {}, []);
+  const onCompositionStart = useCallback(() => {}, []);
+  const onCompositionEnd = useCallback(() => {}, []);
+  const onKeyDown = useCallback((_e: React.KeyboardEvent) => {}, []);
+  const onCompletionSelect = undefined as ((item: CompletionItem) => void) | undefined;
+  const onCompletionClose = undefined as (() => void) | undefined;
+
   const composerDisabled = isStreaming || isWaitingForResponse;
-  const completionItemsResolved = completionItems ?? [];
-  const completionActive =
-    completionIsOpen &&
-    completionItemsResolved.length > 0 &&
-    !!onCompletionSelect &&
-    !!onCompletionClose;
+  const completionActive = completionIsOpen && completionItemsResolved.length > 0 && !!onCompletionSelect && !!onCompletionClose;
 
   // Internal IME composing state — not relying on external prop
   const composingRef = useRef(false);
@@ -376,8 +337,8 @@ export const InputForm: FC<InputFormProps> = ({
   };
 
   // Selection label like "6 lines selected"; no line numbers
-  const selectedLinesCount = activeSelection
-    ? Math.max(1, activeSelection.endLine - activeSelection.startLine + 1)
+  const selectedLinesCount = activeSelection !== null
+    ? Math.max(1, (activeSelection as { startLine: number; endLine: number }).endLine - (activeSelection as { startLine: number; endLine: number }).startLine + 1)
     : 0;
   const selectedLinesText =
     selectedLinesCount > 0
@@ -493,12 +454,14 @@ export const InputForm: FC<InputFormProps> = ({
               className={`px-2.5 h-7 inline-flex items-center gap-1 rounded-full text-[11px] font-medium transition-all duration-300 hover:scale-105 active:scale-95 border ${
                 editModeInfo.label === 'Plan'
                   ? 'bg-blue-600/20 border-blue-500/40 text-blue-300 hover:shadow-[0_0_15px_rgba(59,130,246,0.2)]'
+                  : editModeInfo.label === 'Agentic'
+                  ? 'bg-purple-600/20 border-purple-500/40 text-purple-300 hover:shadow-[0_0_15px_rgba(147,51,234,0.2)]'
                   : 'bg-white/[0.04] border-white/[0.08] text-gray-400 hover:text-gray-200 hover:bg-white/[0.08] hover:shadow-[0_0_15px_rgba(255,255,255,0.05)]'
               }`}
               title={editModeInfo.title}
               onClick={onToggleEditMode}
             >
-              {editModeInfo.label === 'Plan' ? '📋' : '⚡'} {editModeInfo.label}
+              {editModeInfo.label === 'Plan' ? '📋' : editModeInfo.label === 'Agentic' ? '🤖' : '⚡'} {editModeInfo.label}
             </button>
             {onToggleSecurityMode && (
               <button

@@ -274,6 +274,42 @@ func (s *Store) UpdateMerge(id, appendContent, newSummary string) error {
 	return os.WriteFile(filepath.Join(s.baseDir, id, "metadata.json"), meta, 0644)
 }
 
+// ReplaceMerge replaces the entire content of a KI (LLM-consolidated merge).
+// Unlike UpdateMerge which appends, this does a full replacement to keep KIs concise.
+func (s *Store) ReplaceMerge(id, newContent, newSummary string) error {
+	// 1. Write new content to overview.md
+	artPath := filepath.Join(s.baseDir, id, "artifacts", "overview.md")
+	if err := os.WriteFile(artPath, []byte(newContent), 0644); err != nil {
+		return fmt.Errorf("write KI %s: %w", id, err)
+	}
+
+	// 2. Refresh metadata.json
+	item, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("get KI metadata %s: %w", id, err)
+	}
+	if newSummary != "" {
+		item.Summary = newSummary
+	}
+	item.Content = newContent
+	item.UpdatedAt = time.Now()
+	meta, err := json.MarshalIndent(item, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal KI %s: %w", id, err)
+	}
+	return os.WriteFile(filepath.Join(s.baseDir, id, "metadata.json"), meta, 0644)
+}
+
+// GetContent reads the authoritative content of a KI from overview.md.
+func (s *Store) GetContent(id string) (string, error) {
+	artPath := filepath.Join(s.baseDir, id, "artifacts", "overview.md")
+	data, err := os.ReadFile(artPath)
+	if err != nil {
+		return "", fmt.Errorf("read KI %s content: %w", id, err)
+	}
+	return string(data), nil
+}
+
 // UpdateContent appends new content to an existing KI's overview.md artifact.
 func (s *Store) UpdateContent(id, newContent string) error {
 	artPath := filepath.Join(s.baseDir, id, "artifacts", "overview.md")

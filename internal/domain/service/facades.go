@@ -16,24 +16,26 @@ import (
 // ═══════════════════════════════════════════
 
 // ChatEngine provides the high-level chat API.
+// Multi-tenant: uses LoopPool to route requests to per-session loops.
 type ChatEngine struct {
-	loop    *AgentLoop
+	pool    *LoopPool
 	sessMgr *SessionManager
 	history HistoryPersister
 }
 
-// NewChatEngine creates a ChatEngine.
-func NewChatEngine(loop *AgentLoop, sessMgr *SessionManager, history HistoryPersister) *ChatEngine {
-	return &ChatEngine{loop: loop, sessMgr: sessMgr, history: history}
+// NewChatEngine creates a ChatEngine backed by a LoopPool.
+func NewChatEngine(pool *LoopPool, sessMgr *SessionManager, history HistoryPersister) *ChatEngine {
+	return &ChatEngine{pool: pool, sessMgr: sessMgr, history: history}
 }
 
 // Chat sends a user message and runs the agent loop.
 // If sessionID is provided and the loop has no history, load from DB (session resume).
 func (ce *ChatEngine) Chat(ctx context.Context, sessionID, message string) error {
+	loop := ce.pool.Get(sessionID)
 	if sessionID != "" {
 		ce.sessMgr.Activate(sessionID)
 		// Session resume: load history from DB if loop is empty
-		if ce.history != nil && len(ce.loop.GetHistory()) == 0 {
+		if ce.history != nil && len(loop.GetHistory()) == 0 {
 			exports, err := ce.history.LoadAll(sessionID)
 			if err == nil && len(exports) > 0 {
 				msgs := make([]llm.Message, len(exports))
@@ -47,14 +49,14 @@ func (ce *ChatEngine) Chat(ctx context.Context, sessionID, message string) error
 						json.Unmarshal([]byte(e.ToolCalls), &msgs[i].ToolCalls)
 					}
 				}
-				ce.loop.SetHistory(msgs)
+				loop.SetHistory(msgs)
 				// Auto-compact on resume: prevent full-history overload
-				ce.loop.CompactIfNeeded()
+				loop.CompactIfNeeded()
 				log.Printf("[session] Resumed %d messages for session %s", len(msgs), sessionID)
 			}
 		}
 	}
-	err := ce.loop.Run(ctx, message)
+	err := loop.Run(ctx, message)
 	// Bump updated_at so sidebar re-sorts by most recent activity
 	ce.TouchSession(sessionID)
 	return err
@@ -68,43 +70,45 @@ func (ce *ChatEngine) TouchSession(id string) {
 }
 
 // RetryLastRun re-runs the last assistant turn by removing it and re-generating.
-func (ce *ChatEngine) RetryLastRun(ctx context.Context) error {
-	ce.loop.mu.Lock()
+func (ce *ChatEngine) RetryLastRun(ctx context.Context, sessionID string) error {
+	loop := ce.pool.Get(sessionID)
+	loop.mu.Lock()
 	// Remove last assistant + tool messages
-	for len(ce.loop.history) > 0 {
-		last := ce.loop.history[len(ce.loop.history)-1]
+	for len(loop.history) > 0 {
+		last := loop.history[len(loop.history)-1]
 		if last.Role == "user" {
 			break
 		}
-		ce.loop.history = ce.loop.history[:len(ce.loop.history)-1]
+		loop.history = loop.history[:len(loop.history)-1]
 	}
 	// Get last user message
 	lastUser := ""
-	if len(ce.loop.history) > 0 {
-		lastUser = ce.loop.history[len(ce.loop.history)-1].Content
-		ce.loop.history = ce.loop.history[:len(ce.loop.history)-1]
+	if len(loop.history) > 0 {
+		lastUser = loop.history[len(loop.history)-1].Content
+		loop.history = loop.history[:len(loop.history)-1]
 	}
-	ce.loop.mu.Unlock()
+	loop.mu.Unlock()
 
 	if lastUser == "" {
 		return fmt.Errorf("no previous user message to retry")
 	}
-	return ce.loop.Run(ctx, lastUser)
+	return loop.Run(ctx, lastUser)
 }
 
-// StopChat signals the agent loop to stop.
-func (ce *ChatEngine) StopChat() {
-	ce.loop.Stop()
+// StopChat signals the agent loop for a specific session to stop.
+func (ce *ChatEngine) StopChat(sessionID string) {
+	loop := ce.pool.Get(sessionID)
+	loop.Stop()
 }
 
-// DeleteSession removes a session's history and metadata.
-// This is the kernel-owned operation for full session teardown.
+// DeleteSession removes a session's history, metadata, and loop from pool.
 func (ce *ChatEngine) DeleteSession(id string) error {
 	if ce.history != nil {
 		if err := ce.history.DeleteSession(id); err != nil {
 			log.Printf("[session] delete history error: %v", err)
 		}
 	}
+	ce.pool.Remove(id)
 	return ce.sessMgr.Delete(id)
 }
 
@@ -131,11 +135,13 @@ type ConversationInfo struct {
 }
 
 // SessionManager manages conversation sessions.
+// Multi-tenant: tracks per-user active sessions.
 type SessionManager struct {
-	mu       sync.RWMutex
-	sessions map[string]*SessionState
-	active   string
-	repo     SessionRepo
+	mu           sync.RWMutex
+	sessions     map[string]*SessionState
+	active       string            // backward-compat: global active for single-user mode
+	activeByUser map[string]string  // userKey → sessionID
+	repo         SessionRepo
 }
 
 // SessionState holds an in-memory session.
@@ -148,8 +154,9 @@ type SessionState struct {
 // NewSessionManager creates a session manager.
 func NewSessionManager(repo SessionRepo) *SessionManager {
 	return &SessionManager{
-		sessions: make(map[string]*SessionState),
-		repo:     repo,
+		sessions:     make(map[string]*SessionState),
+		activeByUser: make(map[string]string),
+		repo:         repo,
 	}
 }
 
@@ -227,11 +234,13 @@ func (sm *SessionManager) Delete(id string) error {
 	return nil
 }
 
-// Activate sets the active session.
+// Activate sets the active session for the user who owns this session.
 func (sm *SessionManager) Activate(id string) {
+	userKey := ExtractUserKey(id)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	sm.active = id
+	sm.active = id // backward-compat
+	sm.activeByUser[userKey] = id
 }
 
 // SetTitle updates the title of an in-memory session and persists it.
@@ -246,11 +255,18 @@ func (sm *SessionManager) SetTitle(id, title string) {
 	}
 }
 
-// Active returns the current active session ID.
+// Active returns the current active session ID (backward-compat: global).
 func (sm *SessionManager) Active() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.active
+}
+
+// ActiveFor returns the active session for a specific user key.
+func (sm *SessionManager) ActiveFor(userKey string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.activeByUser[userKey]
 }
 
 // ═══════════════════════════════════════════

@@ -24,6 +24,7 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
 	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
+	"github.com/ngoclaw/ngoagent/pkg/ctxutil"
 )
 
 // Version is set at build time via -ldflags.
@@ -114,11 +115,16 @@ var ErrBusy = fmt.Errorf("agent is busy")
 //   - Concurrency guard (TryAcquire / ReleaseAcquire)
 //   - Delta sink binding
 //   - Agent loop execution
-func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message string, delta *service.Delta) error {
+func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message, mode string, delta *service.Delta) error {
 	// Resolve loop: per-session if LoopPool available
 	loop := a.loop
 	if sessionID != "" && a.loopPool != nil {
 		loop = a.loopPool.Get(sessionID)
+	}
+
+	// Set per-request plan mode ("auto" | "plan" | "agentic")
+	if mode != "" {
+		loop.SetPlanMode(mode)
 	}
 
 	// Session resume: load persisted history if loop's memory is empty
@@ -152,6 +158,9 @@ func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message string, de
 	// Bind protocol-specific event sink
 	loop.SetDelta(delta)
 
+	// Inject session ID into context so SpawnFunc can retrieve runtime session ID
+	ctx = ctxutil.WithSessionID(ctx, sessionID)
+
 	// Execute agent loop — title distillation is handled by TitleDistillHook post-run
 	return loop.RunWithoutAcquire(ctx, message)
 }
@@ -177,6 +186,35 @@ func (a *AgentAPI) StopRun(sessionID string) {
 	if a.sandboxMgr != nil {
 		a.sandboxMgr.KillAll()
 	}
+}
+
+// RetryRun strips the last assistant turn from the agent loop and returns
+// the last user message text. The frontend re-sends it via normal ChatStream.
+func (a *AgentAPI) RetryRun(_ context.Context, sessionID string) (string, error) {
+	loop := a.loop
+	if sessionID != "" && a.loopPool != nil {
+		loop = a.loopPool.Get(sessionID)
+	}
+	// Session resume: load persisted history if loop's memory is empty
+	if sessionID != "" && a.histQuery != nil && len(loop.GetHistory()) == 0 {
+		exports, err := a.histQuery.LoadAll(sessionID)
+		if err == nil && len(exports) > 0 {
+			msgs := make([]llm.Message, len(exports))
+			for i, e := range exports {
+				msgs[i] = llm.Message{
+					Role:       e.Role,
+					Content:    e.Content,
+					ToolCallID: e.ToolCallID,
+				}
+				if e.ToolCalls != "" {
+					json.Unmarshal([]byte(e.ToolCalls), &msgs[i].ToolCalls)
+				}
+			}
+			loop.SetHistory(msgs)
+			log.Printf("[retry] Resumed %d messages for session %s", len(msgs), sessionID)
+		}
+	}
+	return loop.StripLastTurn()
 }
 
 // Approve resolves a pending tool approval.
@@ -246,12 +284,58 @@ func (a *AgentAPI) GetHistory(sessionID string) ([]apitype.HistoryMessage, error
 	if a.histQuery == nil {
 		return nil, fmt.Errorf("history store not configured")
 	}
+
+	// First Principles: The Active AgentLoop memory is the absolute Ground Truth.
+	// If the loop is actively running (or recently used and in memory), it has
+	// messages that are not yet persisted to the database.
+	if sessionID != "" && a.loopPool != nil {
+		if loop := a.loopPool.GetIfExists(sessionID); loop != nil {
+			msgs := loop.GetHistory()
+			if len(msgs) > 0 {
+				return a.convertLLMToHistory(msgs), nil
+			}
+		}
+	}
+
+	// Fallback to database
 	exports, err := a.histQuery.LoadAll(sessionID)
 	if err != nil {
 		return nil, err
 	}
+	return a.convertExportsToHistory(exports), nil
+}
 
-	// Build toolCallID → tool name/args maps from assistant messages' ToolCalls
+// convertLLMToHistory converts the agent's internal memory format to the API format.
+func (a *AgentAPI) convertLLMToHistory(msgs []llm.Message) []apitype.HistoryMessage {
+	nameMap := make(map[string]string)
+	argsMap := make(map[string]string)
+	for _, m := range msgs {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				nameMap[tc.ID] = tc.Function.Name
+				argsMap[tc.ID] = string(tc.Function.Arguments)
+			}
+		}
+	}
+
+	apiMsgs := make([]apitype.HistoryMessage, len(msgs))
+	for i, m := range msgs {
+		hm := apitype.HistoryMessage{
+			Role:      m.Role,
+			Content:   m.Content,
+			Reasoning: m.Reasoning,
+		}
+		if m.Role == "tool" && m.ToolCallID != "" {
+			hm.ToolName = nameMap[m.ToolCallID]
+			hm.ToolArgs = argsMap[m.ToolCallID]
+		}
+		apiMsgs[i] = hm
+	}
+	return apiMsgs
+}
+
+// convertExportsToHistory converts DB format to API format.
+func (a *AgentAPI) convertExportsToHistory(exports []service.HistoryExport) []apitype.HistoryMessage {
 	nameMap := make(map[string]string)
 	argsMap := make(map[string]string)
 	for _, e := range exports {
@@ -280,26 +364,37 @@ func (a *AgentAPI) GetHistory(sessionID string) ([]apitype.HistoryMessage, error
 
 	msgs := make([]apitype.HistoryMessage, len(exports))
 	for i, e := range exports {
-		m := apitype.HistoryMessage{Role: e.Role, Content: e.Content}
+		m := apitype.HistoryMessage{
+			Role:      e.Role,
+			Content:   e.Content,
+			Reasoning: e.Reasoning,
+		}
 		if e.Role == "tool" && e.ToolCallID != "" {
 			m.ToolName = nameMap[e.ToolCallID]
 			m.ToolArgs = argsMap[e.ToolCallID]
 		}
-		if e.Role == "assistant" && e.Reasoning != "" {
-			m.Reasoning = e.Reasoning
-		}
 		msgs[i] = m
 	}
-	return msgs, nil
+	return msgs
 }
 
-// ClearHistory resets the conversation history.
+// ClearHistory resets the conversation history for the active session.
 func (a *AgentAPI) ClearHistory() {
+	sid := a.sessMgr.Active()
+	if sid != "" && a.loopPool != nil {
+		a.loopPool.Get(sid).ClearHistory()
+		return
+	}
 	a.loop.ClearHistory()
 }
 
-// CompactContext triggers context compaction.
+// CompactContext triggers context compaction for the active session.
 func (a *AgentAPI) CompactContext() {
+	sid := a.sessMgr.Active()
+	if sid != "" && a.loopPool != nil {
+		a.loopPool.Get(sid).Compact()
+		return
+	}
 	a.loop.Compact()
 }
 
@@ -419,9 +514,15 @@ func (a *AgentAPI) GetSecurity() apitype.SecurityResponse {
 	return resp
 }
 
-// GetContextStats returns context usage stats.
+// GetContextStats returns context usage stats for the active session.
 func (a *AgentAPI) GetContextStats() apitype.ContextStats {
-	history := a.loop.GetHistory()
+	var history []llm.Message
+	sid := a.sessMgr.Active()
+	if sid != "" && a.loopPool != nil {
+		history = a.loopPool.Get(sid).GetHistory()
+	} else {
+		history = a.loop.GetHistory()
+	}
 	tokenEst := 0
 	for _, m := range history {
 		tokenEst += len(m.Content) / 4

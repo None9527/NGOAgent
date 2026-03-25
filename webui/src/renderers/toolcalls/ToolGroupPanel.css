@@ -1,0 +1,288 @@
+/**
+ * ToolGroupPanel — premium dark-theme collapsible panel
+ *
+ * Design: rounded bordered panel + sticky header + numbered rows
+ * Inspired by Antigravity's Progress Updates panel
+ */
+
+/* ── CSS Variables ── */
+.tgp-panel {
+  --tgp-bg: rgba(255, 255, 255, 0.03);
+  --tgp-border: rgba(255, 255, 255, 0.08);
+  --tgp-header-bg: rgba(255, 255, 255, 0.05);
+  --tgp-row-hover: rgba(255, 255, 255, 0.04);
+  --tgp-text-primary: #e5e5e5;
+  --tgp-text-secondary: rgba(255, 255, 255, 0.45);
+  --tgp-text-muted: rgba(255, 255, 255, 0.3);
+  --tgp-status-success: #4caf50;
+  --tgp-status-error: #ef4444;
+  --tgp-status-loading: #3b82f6;
+  --tgp-accent: #6366f1;
+}
+
+/* ── Panel container ── */
+.tgp-panel {
+  margin: 4px 0;
+  border: 1px solid var(--tgp-border);
+  border-radius: 10px;
+  background: var(--tgp-bg);
+  overflow: hidden;
+  backdrop-filter: blur(8px);
+}
+
+/* ── Header ── */
+.tgp-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: var(--tgp-header-bg);
+  border-bottom: 1px solid var(--tgp-border);
+}
+
+.tgp-header-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--tgp-text-secondary);
+  letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Mode badge (PLANNING / EXECUTION / VERIFICATION) */
+.tgp-mode-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  line-height: 1.4;
+}
+
+.tgp-badge-planning {
+  background: rgba(59, 130, 246, 0.15);
+  color: #93c5fd;
+}
+
+.tgp-badge-execution {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fcd34d;
+}
+
+.tgp-badge-verification {
+  background: rgba(16, 185, 129, 0.15);
+  color: #6ee7b7;
+}
+
+.tgp-header-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--tgp-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tgp-header-toggle:hover {
+  color: var(--tgp-text-primary);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.tgp-header-chevron {
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transform: rotate(-90deg);
+}
+
+.tgp-header-chevron.tgp-chevron-open {
+  transform: rotate(0deg);
+}
+
+/* ── Steps container ── */
+.tgp-steps-container {
+  max-height: 50vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
+.tgp-steps-container::-webkit-scrollbar {
+  width: 4px;
+}
+
+.tgp-steps-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tgp-steps-container::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+/* ── Step row ── */
+.tgp-step {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.tgp-step:last-child {
+  border-bottom: none;
+}
+
+.tgp-step-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  user-select: none;
+}
+
+.tgp-step-header:hover {
+  background: var(--tgp-row-hover);
+}
+
+/* Step index number */
+.tgp-step-index {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--tgp-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status icon: bullet default, chevron on hover */
+.tgp-step-icon {
+  position: relative;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tgp-step-bullet {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  transition: opacity 0.15s ease;
+}
+
+.tgp-step-chevron {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  color: var(--tgp-text-secondary);
+}
+
+/* Hover: bullet → chevron */
+.tgp-step-header:hover .tgp-step-bullet {
+  opacity: 0;
+}
+
+.tgp-step-header:hover .tgp-step-chevron {
+  opacity: 1;
+}
+
+/* Chevron icon rotation */
+.tgp-chevron-icon {
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  width: 12px;
+  height: 12px;
+}
+
+.tgp-chevron-icon.tgp-chevron-open {
+  transform: rotate(0deg);
+}
+
+.tgp-chevron-icon:not(.tgp-chevron-open) {
+  transform: rotate(-90deg);
+}
+
+/* Step label (kind) */
+.tgp-step-label {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tgp-text-primary);
+}
+
+/* Step title */
+.tgp-step-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--tgp-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Loading spinner */
+.tgp-step-spinner {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--tgp-status-loading);
+  border-radius: 50%;
+  animation: tgp-spin 0.8s linear infinite;
+}
+
+@keyframes tgp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Expanded content area ── */
+.tgp-step-content {
+  padding: 0 14px 8px 42px;
+  animation: tgp-slide-down 0.2s ease;
+}
+
+/* Remove nested toolcall-container padding/decorations when inside panel */
+.tgp-step-content .toolcall-container {
+  padding-left: 0 !important;
+  margin: 0;
+}
+
+.tgp-step-content .toolcall-container::before {
+  display: none !important;
+}
+
+.tgp-step-content .toolcall-container::after {
+  display: none !important;
+}
+
+/* Hide the label row in expanded content (already shown in step header) */
+.tgp-step-content .toolcall-content-wrapper > .flex.items-baseline {
+  display: none;
+}
+
+@keyframes tgp-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

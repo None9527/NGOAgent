@@ -24,7 +24,7 @@ func NewScriptTool(skill *entity.Skill) *ScriptTool {
 }
 
 func (t *ScriptTool) Name() string {
-	return "skill_" + t.skill.Name
+	return t.skill.Name
 }
 
 func (t *ScriptTool) Description() string {

@@ -4,9 +4,11 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
@@ -35,6 +37,7 @@ type DeltaSink interface {
 	OnPlanReview(message string, paths []string)
 	OnApprovalRequest(approvalID, toolName string, args map[string]any, reason string)
 	OnTitleUpdate(sessionID, title string)
+	OnAutoWakeStart() // Subagent results arrived, parent auto-continuing
 	OnComplete()
 	OnError(err error)
 }
@@ -77,7 +80,8 @@ type Deps struct {
 	// Persistence + Hooks
 	HistoryStore HistoryPersister
 	FileHistory  *workspace.FileHistory // File edit history with snapshot rollback
-	Hooks        *PostRunHookChain
+	Hooks        *HookManager
+	MemoryStore  MemoryStorer // Vector memory for semantic recall (nil = disabled)
 }
 
 // KISemanticRetriever abstracts semantic search over KIs (avoids import cycle with knowledge.Retriever).
@@ -98,6 +102,7 @@ type AgentLoop struct {
 	options        RunOptions
 	guard          *BehaviorGuard
 	ephemerals     []string // Pending ephemeral messages for next LLM call
+	pendingWake    atomic.Bool // Set by barrier when subagents complete; checked by runInner tail
 
 	// Task boundary state (written by task_boundary tool intercept in doToolExec).
 	// Mirrors Anti's latest_task_boundary_step tracking.
@@ -115,6 +120,10 @@ type AgentLoop struct {
 	// Artifact staleness tracking (Anti-style: steps since last interaction)
 	artifactLastStep map[string]int // artifact name → last step that touched it
 	currentStep      int            // global step counter across tool calls
+
+	// Runtime plan mode: "plan" | "auto" — set via API, NOT persisted to config.yaml.
+	// Default from config.Agent.PlanningMode on startup.
+	runtimePlanMode string
 }
 
 // RunOptions configure a single run.
@@ -133,12 +142,18 @@ func NewAgentLoop(deps Deps) *AgentLoop {
 	if deps.Brain != nil && deps.Workspace != nil {
 		deps.Brain.SetWorkspaceDir(deps.Workspace.WorkDir())
 	}
+	// Derive initial plan mode from config (bool → string)
+	initPlanMode := "auto"
+	if deps.Config != nil && deps.Config.Agent.PlanningMode {
+		initPlanMode = "plan"
+	}
 	return &AgentLoop{
 		deps:            deps,
 		state:           StateIdle,
 		stopCh:          make(chan struct{}),
 		guard:           NewBehaviorGuard(agentCfg),
 		artifactLastStep: make(map[string]int),
+		runtimePlanMode: initPlanMode,
 		options: RunOptions{
 			Mode: "chat",
 		},
@@ -178,6 +193,33 @@ func (a *AgentLoop) GetHistory() []llm.Message {
 	return h
 }
 
+// StripLastTurn removes the last assistant turn (tool + assistant messages)
+// and extracts the last user message content. Used for retry: the frontend
+// re-sends the returned text through the normal ChatStream flow.
+func (a *AgentLoop) StripLastTurn() (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Strip trailing assistant/tool messages
+	for len(a.history) > 0 {
+		last := a.history[len(a.history)-1]
+		if last.Role == "user" {
+			break
+		}
+		a.history = a.history[:len(a.history)-1]
+	}
+	// Extract last user message
+	if len(a.history) == 0 {
+		return "", fmt.Errorf("no previous user message to retry")
+	}
+	lastUser := a.history[len(a.history)-1].Content
+	a.history = a.history[:len(a.history)-1]
+	// Update persisted count to avoid re-persisting stripped messages
+	if a.persistedCount > len(a.history) {
+		a.persistedCount = len(a.history)
+	}
+	return lastUser, nil
+}
+
 // CurrentState returns the current state machine state.
 func (a *AgentLoop) CurrentState() State {
 	a.mu.Lock()
@@ -197,6 +239,13 @@ func (a *AgentLoop) InjectEphemeral(msg string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.ephemerals = append(a.ephemerals, msg)
+}
+
+// SignalWake sets the pendingWake flag. The currently-running runInner will
+// check this flag at its tail and auto-continue to process injected ephemerals.
+// If no run is active, the caller should also try Run() as a fallback.
+func (a *AgentLoop) SignalWake() {
+	a.pendingWake.Store(true)
 }
 
 // ClearHistory resets the conversation history.
@@ -230,8 +279,9 @@ func (a *AgentLoop) CompactIfNeeded() {
 		return
 	}
 
-	// Model context budget: default 128K, use 70%
-	budget := 128000 * 70 / 100 // ~89K tokens
+	// Model context budget: resolved per-model (model_config > agent > fallback)
+	mp := a.deps.Config.ResolveModelParams(a.deps.LLMRouter.CurrentModel())
+	budget := int(float64(mp.ContextWindow) * mp.CompactRatio)
 	if tokenEst > budget {
 		log.Printf("[compact] Auto-compacting on resume: %d tokens > %d budget (%d messages)",
 			tokenEst, budget, msgCount)
@@ -259,8 +309,31 @@ func (a *AgentLoop) Stop() {
 	// Wait for the agent loop to completely exit by acquiring and releasing the run lock.
 	// This prevents a race condition where the frontend immediately sends a new request
 	// while the stopping loop is still doing teardown (e.g., persisting history).
-	a.runMu.Lock()
-	a.runMu.Unlock()
+	func() {
+		a.runMu.Lock()
+		defer a.runMu.Unlock()
+		// intentional fence: wait for run loop to fully exit before returning
+	}()
+}
+
+// SetPlanMode sets the runtime planning mode ("plan" or "auto").
+// This is an in-memory toggle; it does NOT write to config.yaml.
+func (a *AgentLoop) SetPlanMode(mode string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if mode == "plan" || mode == "auto" {
+		a.runtimePlanMode = mode
+	}
+}
+
+// PlanMode returns the current runtime planning mode.
+func (a *AgentLoop) PlanMode() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.runtimePlanMode == "" {
+		return "auto"
+	}
+	return a.runtimePlanMode
 }
 
 // protoState snapshots the loop's boundary fields into a dtool.LoopState
@@ -269,6 +342,7 @@ func (a *AgentLoop) protoState() *dtool.LoopState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return &dtool.LoopState{
+		PlanMode:         a.runtimePlanMode,
 		PreviousMode:     a.previousMode,
 		BoundaryTaskName: a.boundaryTaskName,
 		BoundaryMode:     a.boundaryMode,
@@ -290,13 +364,19 @@ func (a *AgentLoop) syncLoopState(ps *dtool.LoopState) {
 	a.boundarySummary = ps.BoundarySummary
 	a.stepsSinceUpdate = ps.StepsSinceUpdate
 	a.yieldRequested = ps.YieldRequested
+	// Agentic self-review: inject pending ephemerals from protocol dispatcher
+	for _, eph := range ps.PendingEphemerals {
+		a.ephemerals = append(a.ephemerals, eph)
+	}
+	ps.PendingEphemerals = nil
 	// L2 Progressive Disclosure: capture skill loaded signal
 	if ps.SkillLoaded != "" {
 		a.skillLoaded = ps.SkillLoaded
 		a.skillPath = ps.SkillPath
 	}
 	// Deterministic force: plan.md → must call notify_user next
-	if ps.ForceNextTool != "" {
+	// Skip in agentic mode — agent self-reviews, no forced yield
+	if ps.ForceNextTool != "" && ps.PlanMode != "agentic" {
 		a.guard.SetForceToolName(ps.ForceNextTool)
 	}
 }

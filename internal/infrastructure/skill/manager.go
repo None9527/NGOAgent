@@ -11,6 +11,18 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/domain/entity"
 )
 
+// detectSkillType checks skill directory contents to determine type.
+//   - "executable": has run.sh or run.py
+//   - "workflow": SKILL.md only (guide for LLM)
+func detectSkillType(skillDir string) string {
+	for _, script := range []string{"run.sh", "run.py"} {
+		if _, err := os.Stat(filepath.Join(skillDir, script)); err == nil {
+			return "executable"
+		}
+	}
+	return "workflow"
+}
+
 // Manager handles skill discovery, loading, and lifecycle.
 type Manager struct {
 	skillDirs []string // Ordered: global, project
@@ -56,11 +68,13 @@ func (m *Manager) Discover() {
 			}
 
 			cmd := parseSkillCommand(string(content))
+			skillDir := filepath.Join(dir, entry.Name())
+			skillType := detectSkillType(skillDir)
 			m.skills[name] = &entity.Skill{
 				ID:          name,
 				Name:        name,
 				Description: desc,
-				Type:        "workflow",
+				Type:        skillType,
 				Command:     cmd,
 				Path:        filepath.Join(dir, entry.Name()),
 				Content:     string(content),
@@ -232,16 +246,16 @@ func (m *Manager) HasCommand(name string) bool {
 	return false
 }
 
-// AutoPromote discovers all executable skills and returns their paths
-// for bridge-tool registration in the tool registry.
+// AutoPromote returns all skills for tool registry registration.
+// Each skill's Type determines which adapter to use:
+//   - "executable"/"hybrid": ScriptTool (runs run.sh/run.py)
+//   - "workflow": SkillGuideTool (returns SKILL.md content)
 func (m *Manager) AutoPromote() []*entity.Skill {
-	var executable []*entity.Skill
+	result := make([]*entity.Skill, 0, len(m.skills))
 	for _, s := range m.skills {
-		if s.Type == "executable" || s.Type == "hybrid" {
-			executable = append(executable, s)
-		}
+		result = append(result, s)
 	}
-	return executable
+	return result
 }
 
 // ListUnforged returns skills in draft status.

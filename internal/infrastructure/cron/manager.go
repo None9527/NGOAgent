@@ -24,6 +24,7 @@ type Job struct {
 	Schedule  string     `json:"schedule"`    // interval like "30s", "5m", "1h"
 	Prompt    string     `json:"prompt"`
 	Enabled   bool       `json:"enabled"`
+	Internal  bool       `json:"internal,omitempty"` // true = system heartbeat job, cannot be deleted
 	RunCount  int        `json:"run_count"`
 	FailCount int        `json:"fail_count"`
 	LastRun   *time.Time `json:"last_run,omitempty"`
@@ -89,7 +90,10 @@ func NewManager(baseDir string, factory RunnerFactory) (*Manager, error) {
 func (m *Manager) BaseDir() string { return m.baseDir }
 
 // Start loads all enabled jobs from disk and schedules them.
+// Also ensures internal heartbeat jobs are registered.
 func (m *Manager) Start() error {
+	m.ensureHeartbeatJobs()
+
 	jobs, err := m.List()
 	if err != nil {
 		return fmt.Errorf("load cron jobs: %w", err)
@@ -105,6 +109,39 @@ func (m *Manager) Start() error {
 
 	log.Printf("[cron] Started with %d active jobs", count)
 	return nil
+}
+
+// ensureHeartbeatJobs registers built-in system jobs if they don't already exist.
+// These share the same scheduling pipeline as user cron jobs but are marked Internal=true.
+func (m *Manager) ensureHeartbeatJobs() {
+	heartbeats := []Job{
+		{
+			Name:     "_heartbeat",
+			Schedule: "30m",
+			Prompt:   "执行心跳巡检：检查系统状态、整理过期临时文件、报告异常。",
+			Enabled:  true,
+			Internal: true,
+		},
+		{
+			Name:     "_diary_digest",
+			Schedule: "24h",
+			Prompt:   "整理昨天的日记：读取 memory/diary/ 下昨日文件，汇总所有条目生成精炼摘要。",
+			Enabled:  true,
+			Internal: true,
+		},
+	}
+	for _, hb := range heartbeats {
+		if _, err := m.getJob(hb.Name); err != nil {
+			hb.CreatedAt = time.Now()
+			hb.UpdatedAt = time.Now()
+			os.MkdirAll(filepath.Join(m.baseDir, hb.Name, "logs"), 0755)
+			if err := m.saveJob(hb); err != nil {
+				log.Printf("[cron] failed to create heartbeat job %q: %v", hb.Name, err)
+			} else {
+				log.Printf("[cron] registered heartbeat job %q (schedule=%s)", hb.Name, hb.Schedule)
+			}
+		}
+	}
 }
 
 // Stop cancels all running job schedules.
@@ -161,7 +198,15 @@ func (m *Manager) Create(name, schedule, prompt string) error {
 }
 
 // Delete removes a cron job and all its logs.
+// Internal (heartbeat) jobs cannot be deleted.
 func (m *Manager) Delete(name string) error {
+	job, err := m.getJob(name)
+	if err != nil {
+		return err
+	}
+	if job.Internal {
+		return fmt.Errorf("cannot delete system job %q", name)
+	}
 	m.unschedule(name)
 	jobDir := filepath.Join(m.baseDir, name)
 	if err := os.RemoveAll(jobDir); err != nil {

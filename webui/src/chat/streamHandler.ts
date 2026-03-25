@@ -1,275 +1,72 @@
 /**
- * SSE stream handler — processes /v1/chat SSE events into ChatMessageData.
- * Extracted from adapter.ts. Uses messageMapper for shared tool logic.
+ * streamHandler.ts — Thin orchestration facade (backward-compatible API).
+ *
+ * Phase 7 refactor: event processing and transport are now separate modules:
+ * - eventProcessor.ts — pure functions, fully unit-testable
+ * - transport.ts      — SSE/WS network I/O
+ *
+ * This file:
+ * 1. Re-exports the full public API so existing callers (StreamProvider,
+ *    ConnectionProvider, etc.) continue to work with zero changes.
+ * 2. chatStream() — orchestration: WS if available, SSE fallback.
+ * 3. checkActiveRun() — stays here as it is a simple HTTP helper.
+ *
+ * Future (Phase 8): Remove StreamProvider and inline chatStream() into
+ * ConnectionProvider. streamHandler.ts can then be deleted.
  */
 
-import type { ToolCallData, StreamCallbacks } from './types'
+import type { StreamCallbacks } from './types'
 import { getApiBase, getAuthToken } from './api'
-import { mapToolKind, normalizeToolArgs, getDisplayTitle, uid } from './messageMapper'
-import { buildToolCallContent } from '../renderers/toolcalls/shared/utils'
+import {
+  chatStreamSSE,
+  chatStreamWS,
+  getSharedWSClient,
+  onWSStateChange as _onWSStateChange,
+} from './transport'
+
+// ─── Re-exports (keep callers from changing) ─────────────────
+
+export { getSharedWSClient, closeSharedWSClient } from './transport'
+export { onWSStateChange } from './transport'
+export { reconnectStream } from './transport'
+export { createStreamState, processEvent } from './eventProcessor'
+
+// ─── Orchestration ───────────────────────────────────────────
 
 /**
- * Start an SSE chat stream.
- * Parses backend delta events and emits ChatMessageData objects.
+ * Start a chat stream.
+ * Auto-routes to WS if the shared client is connected, falls back to SSE.
  */
 export function chatStream(
   message: string,
   sessionId: string,
+  mode: string,
   cb: StreamCallbacks,
 ): { cancel: () => void } {
-  const controller = new AbortController()
-  let aborted = false // Guard: suppress onError after manual cancel
-  let currentAssistantId: string | null = null
-  let currentAssistantText = ''
-  let currentThinkingId: string | null = null
-  let currentThinkingText = ''
-  // Track tool_start → tool_result correlation using name→id stack
-  const pendingToolIds: Map<string, string[]> = new Map()
-
-  ;(async () => {
-    try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      const token = getAuthToken()
-      if (token) headers['Authorization'] = `Bearer ${token}`
-
-      const res = await fetch(`${getApiBase()}/v1/chat`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ message, session_id: sessionId }),
-        signal: controller.signal,
-      })
-
-      if (!res.ok) {
-        if (aborted) { cb.onEnd(); return }
-        cb.onError(new Error(`HTTP ${res.status}`))
-        return
-      }
-
-      const reader = res.body?.getReader()
-      if (!reader) {
-        if (aborted) { cb.onEnd(); return }
-        cb.onError(new Error('No stream'))
-        return
-      }
-
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const raw = line.slice(6).trim()
-          if (raw === '[DONE]') {
-            cb.onEnd()
-            return
-          }
-
-          let event: Record<string, unknown>
-          try {
-            event = JSON.parse(raw)
-          } catch {
-            continue
-          }
-
-          const type = event.type as string
-
-          switch (type) {
-            case 'text_delta': {
-              const delta = (event.content as string) || ''
-              if (!currentAssistantId) {
-                currentAssistantId = uid()
-                currentAssistantText = delta
-                cb.onMessage({
-                  uuid: currentAssistantId,
-                  timestamp: new Date().toISOString(),
-                  type: 'assistant',
-                  message: { role: 'model', parts: [{ text: delta }] },
-                })
-              } else {
-                currentAssistantText += delta
-                cb.onUpdate(currentAssistantId, {
-                  message: { role: 'model', parts: [{ text: currentAssistantText }] },
-                })
-              }
-              break
-            }
-
-            case 'thinking': {
-              const delta = (event.content as string) || ''
-              if (!currentThinkingId) {
-                currentThinkingId = uid()
-                currentThinkingText = delta
-                cb.onMessage({
-                  uuid: currentThinkingId,
-                  timestamp: new Date().toISOString(),
-                  type: 'assistant',
-                  message: { role: 'thinking', parts: [{ text: delta }] },
-                })
-              } else {
-                currentThinkingText += delta
-                cb.onUpdate(currentThinkingId, {
-                  message: { role: 'thinking', parts: [{ text: currentThinkingText }] },
-                })
-              }
-              break
-            }
-
-            case 'tool_start': {
-              // Suppress task_boundary from rendering as tool card
-              const toolName = (event.name as string) || 'unknown'
-              if (toolName === 'task_boundary') break
-
-              // Finalize current assistant/thinking
-              currentAssistantId = null
-              currentAssistantText = ''
-              currentThinkingId = null
-              currentThinkingText = ''
-
-              const rawArgs = (event.args || {}) as Record<string, unknown>
-              const normalizedInput = normalizeToolArgs(rawArgs, toolName)
-              const displayTitle = getDisplayTitle(normalizedInput, toolName)
-
-              const cardId = (event.call_id as string) || uid()
-              const stack = pendingToolIds.get(toolName) || []
-              stack.push(cardId)
-              pendingToolIds.set(toolName, stack)
-
-              const toolData: ToolCallData = {
-                toolCallId: cardId,
-                kind: mapToolKind(toolName),
-                title: displayTitle,
-                status: 'in_progress',
-                rawInput: normalizedInput,
-                content: [],
-              }
-              cb.onToolCall({
-                uuid: cardId,
-                timestamp: new Date().toISOString(),
-                type: 'tool_call',
-                toolCall: toolData,
-              })
-              break
-            }
-
-            case 'tool_result': {
-              const resultToolName = (event.name as string) || ''
-              if (resultToolName === 'task_boundary') break
-
-              const output = (event.output as string) || ''
-              const hasError = !!(event.error as string)
-
-
-
-
-              let targetId = (event.call_id as string) || ''
-              if (!targetId) {
-                const stack = pendingToolIds.get(resultToolName)
-                if (stack && stack.length > 0) {
-                  targetId = stack.shift()!
-                  if (stack.length === 0) pendingToolIds.delete(resultToolName)
-                }
-              }
-
-              if (targetId) {
-                cb.onUpdate(targetId, {
-                  toolCall: {
-                    toolCallId: targetId,
-                    kind: mapToolKind(resultToolName || 'unknown'),
-                    title: '',
-                    status: hasError ? 'failed' : 'completed',
-                    content: buildToolCallContent(output, hasError ? (event.error as string) : null)
-                  },
-                })
-              }
-              currentAssistantText = ''
-              break
-            }
-
-            case 'approval_request': {
-              cb.onApproval({
-                approvalId: (event.approval_id as string) || '',
-                toolName: (event.tool_name as string) || '',
-                args: (event.args as Record<string, unknown>) || {},
-                reason: (event.reason as string) || '',
-              })
-              break
-            }
-
-            case 'error': {
-              // If manually cancelled, suppress error event from backend
-              if (aborted) { cb.onEnd(); return }
-              cb.onError(new Error((event.message as string) || (event.error as string) || 'Unknown error'))
-              break
-            }
-
-            case 'title_updated': {
-              const sessionId = (event.session_id as string) || ''
-              const title = (event.title as string) || ''
-              if (sessionId && title) {
-                cb.onTitleUpdate?.(sessionId, title)
-              }
-              break
-            }
-
-            case 'step_done': {
-              currentAssistantId = null
-              currentAssistantText = ''
-              currentThinkingId = null
-              currentThinkingText = ''
-              cb.onStepDone?.()
-              break
-            }
-
-            case 'plan_review': {
-              const message = (event.message as string) || ''
-              const paths = (event.paths as string[]) || []
-              cb.onPlanReview?.(message, paths)
-              break
-            }
-
-            case 'progress': {
-              const taskName = (event.task_name as string) || ''
-              const status = (event.status as string) || ''
-              const summary = (event.summary as string) || ''
-              const mode = (event.mode as string) || ''
-              cb.onProgress?.(taskName, status, summary, mode)
-              break
-            }
-          }
-        }
-      }
-      cb.onEnd()
-    } catch (err: unknown) {
-      // After manual cancel: any error is expected, treat as clean end
-      if (aborted || (err instanceof Error && err.name === 'AbortError')) {
-        cb.onEnd()
-        return
-      }
-      cb.onError(err instanceof Error ? err : new Error(String(err)))
-    }
-  })()
-
-  return { cancel: () => { aborted = true; controller.abort() } }
+  const ws = getSharedWSClient()
+  if (ws && ws.state === 'connected') {
+    return chatStreamWS(ws, message, sessionId, mode, cb)
+  }
+  return chatStreamSSE(message, sessionId, mode, cb)
 }
+
+// ─── Status check ─────────────────────────────────────────────
 
 /**
  * Check if a session has an active (in-progress) run on the backend.
- * Used on page load to detect runs that survived a page refresh.
  */
-export async function checkActiveRun(sessionId: string): Promise<{ active: boolean; done: boolean; lastSeq: number }> {
+export async function checkActiveRun(
+  sessionId: string,
+): Promise<{ active: boolean; done: boolean; lastSeq: number }> {
   try {
     const headers: Record<string, string> = {}
     const token = getAuthToken()
     if (token) headers['Authorization'] = `Bearer ${token}`
 
-    const res = await fetch(`${getApiBase()}/v1/chat/status?session_id=${encodeURIComponent(sessionId)}`, { headers })
+    const res = await fetch(
+      `${getApiBase()}/v1/chat/status?session_id=${encodeURIComponent(sessionId)}`,
+      { headers },
+    )
     if (!res.ok) return { active: false, done: false, lastSeq: 0 }
     const data = await res.json()
     return { active: !!data.active, done: !!data.done, lastSeq: data.last_seq || 0 }
@@ -277,226 +74,3 @@ export async function checkActiveRun(sessionId: string): Promise<{ active: boole
     return { active: false, done: false, lastSeq: 0 }
   }
 }
-
-/**
- * Reconnect to an active SSE stream, replaying buffered events.
- * The backend replays all events since lastSeqId and then streams live.
- */
-export function reconnectStream(
-  sessionId: string,
-  lastSeqId: number,
-  cb: StreamCallbacks,
-): { cancel: () => void } {
-  const controller = new AbortController()
-  let aborted = false // Guard: suppress onError after manual cancel
-  let currentAssistantId: string | null = null
-  let currentAssistantText = ''
-  let currentThinkingId: string | null = null
-  let currentThinkingText = ''
-  const pendingToolIds: Map<string, string[]> = new Map()
-
-  ;(async () => {
-    try {
-      const headers: Record<string, string> = {}
-      const token = getAuthToken()
-      if (token) headers['Authorization'] = `Bearer ${token}`
-
-      const url = `${getApiBase()}/v1/chat/reconnect?session_id=${encodeURIComponent(sessionId)}&last_seq=${lastSeqId}`
-      const res = await fetch(url, { headers, signal: controller.signal })
-
-      if (!res.ok) {
-        if (res.status === 404) { cb.onEnd(); return }
-        if (aborted) { cb.onEnd(); return }
-        cb.onError(new Error(`HTTP ${res.status}`))
-        return
-      }
-
-      const reader = res.body?.getReader()
-      if (!reader) {
-        if (aborted) { cb.onEnd(); return }
-        cb.onError(new Error('No stream'))
-        return
-      }
-
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const raw = line.slice(6).trim()
-          if (raw === '[DONE]') { cb.onEnd(); return }
-
-          let event: Record<string, unknown>
-          try { event = JSON.parse(raw) } catch { continue }
-
-          const type = event.type as string
-
-          switch (type) {
-            case 'text_delta': {
-              const delta = (event.content as string) || ''
-              if (!currentAssistantId) {
-                currentAssistantId = uid()
-                currentAssistantText = delta
-                cb.onMessage({
-                  uuid: currentAssistantId,
-                  timestamp: new Date().toISOString(),
-                  type: 'assistant',
-                  message: { role: 'model', parts: [{ text: delta }] },
-                })
-              } else {
-                currentAssistantText += delta
-                cb.onUpdate(currentAssistantId, {
-                  message: { role: 'model', parts: [{ text: currentAssistantText }] },
-                })
-              }
-              break
-            }
-
-            case 'thinking': {
-              const delta = (event.content as string) || ''
-              if (!currentThinkingId) {
-                currentThinkingId = uid()
-                currentThinkingText = delta
-                cb.onMessage({
-                  uuid: currentThinkingId,
-                  timestamp: new Date().toISOString(),
-                  type: 'assistant',
-                  message: { role: 'thinking', parts: [{ text: delta }] },
-                })
-              } else {
-                currentThinkingText += delta
-                cb.onUpdate(currentThinkingId, {
-                  message: { role: 'thinking', parts: [{ text: currentThinkingText }] },
-                })
-              }
-              break
-            }
-
-            case 'tool_start': {
-              const toolName = (event.name as string) || 'unknown'
-              if (toolName === 'task_boundary') break
-
-              currentAssistantId = null
-              currentAssistantText = ''
-              currentThinkingId = null
-              currentThinkingText = ''
-
-              const rawArgs = (event.args || {}) as Record<string, unknown>
-              const normalizedInput = normalizeToolArgs(rawArgs, toolName)
-              const displayTitle = getDisplayTitle(normalizedInput, toolName)
-
-              const cardId = (event.call_id as string) || uid()
-              const stack = pendingToolIds.get(toolName) || []
-              stack.push(cardId)
-              pendingToolIds.set(toolName, stack)
-
-              const toolData: ToolCallData = {
-                toolCallId: cardId,
-                kind: mapToolKind(toolName),
-                title: displayTitle,
-                status: 'in_progress',
-                rawInput: normalizedInput,
-                content: [],
-              }
-              cb.onToolCall({
-                uuid: cardId,
-                timestamp: new Date().toISOString(),
-                type: 'tool_call',
-                toolCall: toolData,
-              })
-              break
-            }
-
-            case 'tool_result': {
-              const resultToolName = (event.name as string) || ''
-              if (resultToolName === 'task_boundary') break
-
-              const output = (event.output as string) || ''
-              const hasError = !!(event.error as string)
-
-              let targetId = (event.call_id as string) || ''
-              if (!targetId) {
-                const stack = pendingToolIds.get(resultToolName)
-                if (stack && stack.length > 0) {
-                  targetId = stack.shift()!
-                  if (stack.length === 0) pendingToolIds.delete(resultToolName)
-                }
-              }
-
-              if (targetId) {
-                cb.onUpdate(targetId, {
-                  toolCall: {
-                    toolCallId: targetId,
-                    kind: mapToolKind(resultToolName || 'unknown'),
-                    title: '',
-                    status: hasError ? 'failed' : 'completed',
-                    content: buildToolCallContent(output, hasError ? (event.error as string) : null),
-                  },
-                })
-              }
-              currentAssistantText = ''
-              break
-            }
-
-            case 'approval_request': {
-              cb.onApproval({
-                approvalId: (event.approval_id as string) || '',
-                toolName: (event.tool_name as string) || '',
-                args: (event.args as Record<string, unknown>) || {},
-                reason: (event.reason as string) || '',
-              })
-              break
-            }
-
-            case 'error': {
-              // If manually cancelled, suppress error event from backend
-              if (aborted) { cb.onEnd(); return }
-              cb.onError(new Error((event.message as string) || 'Unknown error'))
-              break
-            }
-
-            case 'step_done': {
-              currentAssistantId = null
-              currentAssistantText = ''
-              currentThinkingId = null
-              currentThinkingText = ''
-              cb.onStepDone?.()
-              break
-            }
-
-            case 'plan_review': {
-              cb.onPlanReview?.((event.message as string) || '', (event.paths as string[]) || [])
-              break
-            }
-
-            case 'progress': {
-              cb.onProgress?.(
-                (event.task_name as string) || '',
-                (event.status as string) || '',
-                (event.summary as string) || '',
-                (event.mode as string) || '',
-              )
-              break
-            }
-          }
-        }
-      }
-      cb.onEnd()
-    } catch (err: unknown) {
-      // After manual cancel: any error is expected, treat as clean end
-      if (aborted || (err instanceof Error && err.name === 'AbortError')) { cb.onEnd(); return }
-      cb.onError(err instanceof Error ? err : new Error(String(err)))
-    }
-  })()
-
-  return { cancel: () => { aborted = true; controller.abort() } }
-}
-

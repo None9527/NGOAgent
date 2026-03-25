@@ -2,6 +2,7 @@ import { authFetch } from '../chat/api'
 import { useState, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { MdStyles } from './shared/mdStyles'
 
 const API_BASE = ''
 
@@ -158,12 +159,12 @@ export function SkillMCPManager({ onNavigateDetail }: SkillMCPManagerProps) {
           {contentLoading ? (
             <div className="text-center py-12 text-gray-500 text-sm">加载中…</div>
           ) : (
-            <div className="skill-md-content text-sm text-gray-300 leading-relaxed max-w-none">
+            <div className="hub-md-content text-sm text-gray-300 leading-relaxed max-w-none">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{skillContent || ''}</ReactMarkdown>
             </div>
           )}
         </div>
-        {skillMdStyles}
+        <MdStyles />
       </div>
     )
   }
@@ -308,22 +309,4 @@ export function SkillMCPManager({ onNavigateDetail }: SkillMCPManagerProps) {
   )
 }
 
-const skillMdStyles = (
-  <style>{`
-    .skill-md-content h1, .skill-md-content h2, .skill-md-content h3 { font-weight: 600; margin: 0.8em 0 0.4em; color: #d4d4d4; }
-    .skill-md-content h1 { font-size: 1.15em; color: #e5e5e5; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 0.3em; }
-    .skill-md-content h2 { font-size: 1.05em; }
-    .skill-md-content h3 { font-size: 0.95em; color: #a3a3a3; }
-    .skill-md-content p { margin: 0.5em 0; line-height: 1.6; }
-    .skill-md-content ul, .skill-md-content ol { padding-left: 1.4em; margin: 0.5em 0; }
-    .skill-md-content li { margin: 0.2em 0; line-height: 1.5; }
-    .skill-md-content code { background: rgba(255,255,255,0.08); padding: 0.15em 0.35em; border-radius: 4px; font-size: 0.85em; color: #e879f9; }
-    .skill-md-content pre { background: rgba(0,0,0,0.35); padding: 0.8em; border-radius: 6px; overflow-x: auto; margin: 0.6em 0; }
-    .skill-md-content pre code { background: none; padding: 0; color: #d4d4d4; font-size: 0.85em; }
-    .skill-md-content blockquote { border-left: 3px solid rgba(96,165,250,0.4); padding-left: 0.8em; margin: 0.6em 0; color: #a3a3a3; }
-    .skill-md-content table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.85em; display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    .skill-md-content th, .skill-md-content td { border: 1px solid rgba(255,255,255,0.1); padding: 0.4em 0.6em; text-align: left; }
-    .skill-md-content th { background: rgba(255,255,255,0.04); color: #a3a3a3; font-weight: 600; }
-    .skill-md-content hr { border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 0.8em 0; }
-  `}</style>
-)
+

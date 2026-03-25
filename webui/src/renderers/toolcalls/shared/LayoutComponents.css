@@ -1,7 +1,7 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025 NGOClaw Team
+ * SPDX-License-Identifier: BSL-1.1
  *
  * LayoutComponents.css - Tool call layout styles with timeline support
  */
@@ -226,3 +226,55 @@
   white-space: pre-wrap;
   width: 100%;
 }
+
+/* ─── GenericToolCall collapsible output ─── */
+.generic-toolcall-output {
+  margin-top: 4px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.generic-toolcall-output-text {
+  margin: 0;
+  padding: 10px 14px;
+  font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--app-secondary-foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.generic-toolcall-output-text::-webkit-scrollbar {
+  width: 4px;
+}
+
+.generic-toolcall-output-text::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+}
+
+.generic-toolcall-toggle {
+  display: block;
+  width: 100%;
+  padding: 6px 14px;
+  background: transparent;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--app-secondary-foreground);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.generic-toolcall-toggle:hover {
+  color: var(--app-primary-foreground);
+  background: rgba(255, 255, 255, 0.04);
+}
+

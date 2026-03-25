@@ -1,7 +1,7 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025 NGOClaw Team
+ * SPDX-License-Identifier: BSL-1.1
  *
  * Shared utility functions for tool call components
  * Platform-agnostic utilities that can be used across different platforms
@@ -177,11 +177,31 @@ export const safeTitle = (title: unknown): string => {
 };
 
 /**
- * Check if a tool call should be displayed
- * Hides internal tool calls
+ * Check if a tool call should be displayed.
+ * Hides:
+ * - Internal tool calls (kind contains 'internal')
+ * - Tool calls that failed with "tool not found" (LLM hallucination)
+ * - Silent internal tools (recall, brainstorming, memory lookup)
  */
-export const shouldShowToolCall = (kind: string): boolean =>
-  !kind.includes('internal');
+export const shouldShowToolCall = (kind: string, toolCall?: ToolCallData): boolean => {
+  if (kind.includes('internal')) return false;
+
+  // Hide LLM-hallucinated tools ("tool not found" errors)
+  if (toolCall?.content) {
+    const { errors } = groupContent(toolCall.content);
+    if (errors.some(e => e.toLowerCase().includes('tool not found'))) {
+      return false;
+    }
+  }
+
+  // Hide silent internal tools by kind
+  const silentKinds = ['brainstorming', 'recall', 'memory_lookup'];
+  if (silentKinds.includes(kind.toLowerCase())) {
+    return false;
+  }
+
+  return true;
+};
 
 /**
  * Group tool call content by type to avoid duplicate labels

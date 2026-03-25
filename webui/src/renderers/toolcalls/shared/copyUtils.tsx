@@ -1,7 +1,7 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025 NGOClaw Team
+ * SPDX-License-Identifier: BSL-1.1
  *
  * Shared copy utilities for toolcall components
  */
@@ -26,8 +26,18 @@ export const handleCopyToClipboard = async (
     // Use platform-specific copy if available, otherwise fall back to navigator.clipboard
     if (platformCopy) {
       await platformCopy(text);
-    } else {
+    } else if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(text);
+    } else {
+      // Fallback for non-HTTPS (e.g. localhost HTTP dev server)
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
     }
   } catch (err) {
     console.error('Failed to copy text:', err);

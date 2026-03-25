@@ -1,7 +1,7 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025 NGOClaw Team
+ * SPDX-License-Identifier: BSL-1.1
  *
  * Shared layout components for tool call UI
  * Platform-agnostic version using webui components

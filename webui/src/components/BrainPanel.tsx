@@ -2,6 +2,7 @@ import { authFetch } from '../chat/api'
 import { useState, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { MdStyles } from './shared/mdStyles'
 
 interface BrainArtifact {
   name: string
@@ -51,11 +52,19 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
     }
   }, [sessionId, loadArtifacts])
 
-  // Auto-refresh on step_done events
+  // Auto-refresh on step_done events — also refresh detail content if viewing a file
   useEffect(() => {
     if (sessionId && refreshTrigger > 0) {
       loadArtifacts()
+      // If detail view is open, re-fetch to show latest content
+      if (detailFile) {
+        loadContent(detailFile).then(c => {
+          setDetailContent(c)
+          setExpanded(prev => ({ ...prev, [detailFile]: c }))
+        }).catch(() => {})
+      }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshTrigger, sessionId, loadArtifacts])
 
   const loadContent = async (name: string): Promise<string> => {
@@ -90,12 +99,11 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
     onNavigateDetail?.(name)
     setDetailLoading(true)
     try {
-      if (expanded[name] !== undefined && expanded[name] !== null) {
-        setDetailContent(expanded[name]!)
-      } else {
-        const content = await loadContent(name)
-        setDetailContent(content)
-      }
+      // Always fetch fresh content — cache may be stale after agent updates
+      const content = await loadContent(name)
+      setDetailContent(content)
+      // Keep expanded cache in sync for accordion view
+      setExpanded(prev => ({ ...prev, [name]: content }))
     } catch {
       setDetailContent('⚠️ 无法读取文件')
     } finally {
@@ -146,7 +154,7 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
       // Ensure single newlines become paragraph breaks (markdown requires double newlines)
       const withBreaks = content.replace(/\n/g, '\n\n')
       return (
-        <div className={`brain-md-content ${full ? 'px-5 py-4 text-sm' : 'px-3 py-2 text-xs'} text-gray-300 leading-relaxed`}>
+        <div className={`hub-md-content ${full ? 'px-5 py-4 text-sm' : 'px-3 py-2 text-xs'} text-gray-300 leading-relaxed`}>
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
@@ -209,7 +217,7 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
           )}
         </div>
 
-        {mdStyles}
+        <MdStyles />
       </div>
     )
   }
@@ -320,42 +328,36 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
       {/* Footer — click SID to copy brain path */}
       <div className="px-3 py-2.5 border-t border-white/5">
         <div
-          className="text-[11px] text-gray-500 font-mono break-all cursor-pointer hover:text-gray-300 transition-colors"
-          title="点击复制 Brain 目录路径"
-          onClick={() => navigator.clipboard.writeText(`~/.ngoagent/brain/${sessionId}`)}
+          className="text-[11px] text-gray-500 font-mono break-all cursor-pointer hover:text-gray-300 transition-colors select-all"
+          title="点击复制 Session ID"
+          onClick={(e) => {
+            const text = sessionId
+            // Fallback copy for non-HTTPS
+            try {
+              const el = document.createElement('textarea')
+              el.value = text
+              el.style.position = 'fixed'
+              el.style.opacity = '0'
+              document.body.appendChild(el)
+              el.select()
+              document.execCommand('copy')
+              document.body.removeChild(el)
+            } catch {
+              navigator.clipboard?.writeText(text)
+            }
+            // Visual feedback
+            const target = e.currentTarget
+            const original = target.textContent
+            target.textContent = '✓ 已复制'
+            target.style.color = '#4ade80'
+            setTimeout(() => { target.textContent = original; target.style.color = '' }, 1200)
+          }}
         >
           {sessionId || '—'}
         </div>
       </div>
 
-      {mdStyles}
+      <MdStyles />
     </div>
   )
 }
-
-const mdStyles = (
-  <style>{`
-    .brain-md-content h1 { font-size: 1.15em; font-weight: 700; margin: 0.8em 0 0.4em; color: #e5e5e5; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 0.3em; }
-    .brain-md-content h2 { font-size: 1.05em; font-weight: 600; margin: 0.7em 0 0.3em; color: #d4d4d4; }
-    .brain-md-content h3 { font-size: 0.95em; font-weight: 600; margin: 0.5em 0 0.2em; color: #a3a3a3; }
-    .brain-md-content p { margin: 0.4em 0; }
-    .brain-md-content ul, .brain-md-content ol { padding-left: 1.4em; margin: 0.3em 0; }
-    .brain-md-content li { margin: 0.15em 0; }
-    .brain-md-content li::marker { color: #525252; }
-    .brain-md-content code { background: rgba(255,255,255,0.08); padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.85em; color: #e879f9; }
-    .brain-md-content pre { background: rgba(0,0,0,0.35); padding: 0.7em; border-radius: 6px; overflow-x: auto; margin: 0.5em 0; }
-    .brain-md-content pre code { background: none; padding: 0; color: #d4d4d4; }
-    .brain-md-content blockquote { border-left: 3px solid rgba(96,165,250,0.4); padding-left: 0.8em; margin: 0.5em 0; color: #a3a3a3; }
-    .brain-md-content table { border-collapse: collapse; width: 100%; margin: 0.5em 0; font-size: 0.85em; display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    .brain-md-content th, .brain-md-content td { border: 1px solid rgba(255,255,255,0.1); padding: 0.35em 0.6em; text-align: left; }
-    .brain-md-content th { background: rgba(255,255,255,0.06); font-weight: 600; color: #d4d4d4; }
-    .brain-md-content a { color: #60a5fa; text-decoration: none; }
-    .brain-md-content a:hover { text-decoration: underline; }
-    .brain-md-content hr { border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 0.8em 0; }
-    .brain-md-content input[type="checkbox"] { appearance: none; -webkit-appearance: none; width: 14px; height: 14px; margin-right: 0.4em; border: 1.5px solid #525252; border-radius: 3px; vertical-align: middle; position: relative; top: -1px; cursor: default; flex-shrink: 0; }
-    .brain-md-content input[type="checkbox"]:checked { background: #22c55e; border-color: #22c55e; }
-    .brain-md-content input[type="checkbox"]:checked::before { content: ""; display: block; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); position: absolute; top: 1px; left: 4px; }
-    .brain-md-content strong { color: #f5f5f5; }
-    .brain-md-content em { color: #a3a3a3; }
-  `}</style>
-)

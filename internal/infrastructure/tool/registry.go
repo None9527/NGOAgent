@@ -4,6 +4,7 @@ package tool
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
@@ -27,10 +28,11 @@ type ToolInfo struct {
 
 // Registry manages tool registration, lookup, enable/disable, and path resolution.
 type Registry struct {
-	mu           sync.RWMutex
-	tools        map[string]Tool
-	disabled     map[string]bool
-	workspaceDir string // Default workspace for resolving relative paths
+	mu            sync.RWMutex
+	tools         map[string]Tool
+	disabled      map[string]bool
+	workspaceDir  string        // Default workspace for resolving relative paths
+	skillFallback *UseSkillTool // Fallback for skill-name tool calls
 }
 
 // NewRegistry creates an empty tool registry.
@@ -39,6 +41,15 @@ func NewRegistry() *Registry {
 		tools:    make(map[string]Tool),
 		disabled: make(map[string]bool),
 	}
+}
+
+// SetSkillFallback registers the UseSkillTool as fallback handler.
+// When a tool is not found but matches a skill name, the skill's
+// SKILL.md content is returned automatically.
+func (r *Registry) SetSkillFallback(ust *UseSkillTool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.skillFallback = ust
 }
 
 // SetWorkspaceDir sets the default workspace directory for path resolution.
@@ -88,6 +99,13 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 	r.mu.RUnlock()
 
 	if !ok {
+		// Fallback: check if name matches a skill → auto-load SKILL.md
+		if r.skillFallback != nil {
+			result, err := r.skillFallback.LoadSkill(ctx, name, "")
+			if err == nil && !strings.Contains(result.Output, "not found") {
+				return result, nil
+			}
+		}
 		return dtool.ToolResult{}, &ToolError{Code: "not_found", Message: "tool not found: " + name}
 	}
 	if disabled {
@@ -188,6 +206,29 @@ func (r *Registry) Disable(name string) error {
 	}
 	r.disabled[name] = true
 	return nil
+}
+
+// CloneWithDisabled creates a lightweight registry clone that shares tool
+// implementations but has additional tools disabled. Safe for sub-agent isolation.
+// Returns any to satisfy cross-layer interface matching (caller asserts to ToolExecutor).
+func (r *Registry) CloneWithDisabled(names []string) any {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	clone := &Registry{
+		tools:        r.tools, // shared (read-only from clone's perspective)
+		disabled:     make(map[string]bool, len(r.disabled)+len(names)),
+		workspaceDir: r.workspaceDir,
+	}
+	// Copy existing disabled set
+	for k, v := range r.disabled {
+		clone.disabled[k] = v
+	}
+	// Add new disabled tools
+	for _, name := range names {
+		clone.disabled[name] = true
+	}
+	return clone
 }
 
 // IsEnabled checks whether a tool is enabled.

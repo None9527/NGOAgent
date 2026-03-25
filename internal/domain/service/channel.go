@@ -58,6 +58,7 @@ func NewSubagentChannel(announceFn func(runID string, result string)) *SubagentC
 
 func (c *SubagentChannel) Name() string          { return "subagent" }
 func (c *SubagentChannel) DeltaSink() DeltaSink  { return c.collector }
+func (c *SubagentChannel) Collector() *OutputCollector { return c.collector }
 func (c *SubagentChannel) OnComplete(runID string, _ string, err error) {
 	result := c.collector.Result()
 	if err != nil {
@@ -109,6 +110,7 @@ func (s *LogSink) OnProgress(string, string, string, string) {}
 func (s *LogSink) OnPlanReview(string, []string)              {}
 func (s *LogSink) OnApprovalRequest(string, string, map[string]any, string) {}
 func (s *LogSink) OnTitleUpdate(string, string) {}
+func (s *LogSink) OnAutoWakeStart()              {}
 func (s *LogSink) OnComplete() {}
 func (s *LogSink) OnError(err error) {
 	if err != nil {

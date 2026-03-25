@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { BrainPanel } from '../BrainPanel'
 import { KIManager } from '../KIManager'
 import { CronManager } from '../CronManager'
@@ -28,15 +28,31 @@ export const IntelligenceHub: React.FC<IntelligenceHubProps> = ({
   refreshTrigger,
   brainFocusTrigger
 }) => {
-  const [detailViews, setDetailViews] = useState<Record<string, string | null>>({})
+  // Lazy mount: only mount a tab after it has been selected at least once
+  const [mountedTabs, setMountedTabs] = useState<Set<string>>(() => new Set([activeTab]))
+  // isDrilledDown: controlled by child panel callbacks (single source of truth in child)
+  const [isDrilledDown, setIsDrilledDown] = useState(false)
   const startYRef = useRef<number>(0)
   const sheetRef = useRef<HTMLDivElement>(null)
 
-  const handleNavigateDetail = (tab: string, id: string | null) => {
-    setDetailViews(prev => ({ ...prev, [tab]: id }))
-  }
+  // Ensure active tab is always mounted
+  useEffect(() => {
+    setMountedTabs(prev => {
+      if (prev.has(activeTab)) return prev
+      return new Set(prev).add(activeTab)
+    })
+  }, [activeTab])
 
-  const isDrilledDown = detailViews[activeTab] !== null && detailViews[activeTab] !== undefined
+  // Reset mounted tabs and drilled-down state when switching sessions
+  useEffect(() => {
+    setMountedTabs(new Set([activeTab]))
+    setIsDrilledDown(false)
+  }, [sessionId])
+
+  // Stable callback: child panels report whether they are in detail view
+  const handleNavigateDetail = useCallback((id: string | null) => {
+    setIsDrilledDown(id !== null)
+  }, [])
 
   // ─── Touch-to-dismiss (swipe down) ───
   const handleTouchStart = (e: React.TouchEvent) => {
@@ -52,25 +68,33 @@ export const IntelligenceHub: React.FC<IntelligenceHubProps> = ({
     if (e.target === e.currentTarget) onClose()
   }
 
-  // ─── Shared content pane ───
+  // ─── Keep-alive content pane: all mounted tabs stay alive, hidden via display ───
   const contentPane = (
     <div className="flex-1 overflow-hidden relative min-h-0">
-      <div className={`absolute inset-0 transition-opacity duration-300 ${activeTab === 'brain' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-        <BrainPanel onNavigateDetail={(id) => handleNavigateDetail('brain', id)} sessionId={sessionId} refreshTrigger={refreshTrigger} focusTrigger={brainFocusTrigger} />
-      </div>
-      <div className={`absolute inset-0 transition-opacity duration-300 ${activeTab === 'knowledge' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-        <KIManager onNavigateDetail={(id) => handleNavigateDetail('knowledge', id)} />
-      </div>
-      <div className={`absolute inset-0 transition-opacity duration-300 ${activeTab === 'cron' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-        <CronManager onNavigateDetail={(id) => handleNavigateDetail('cron', id)} />
-      </div>
-      <div className={`absolute inset-0 transition-opacity duration-300 ${activeTab === 'skills' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-        <SkillMCPManager onNavigateDetail={(id) => handleNavigateDetail('skills', id)} />
-      </div>
+      {mountedTabs.has('brain') && (
+        <div className="w-full h-full" style={{ display: activeTab === 'brain' ? 'flex' : 'none' }}>
+          <BrainPanel onNavigateDetail={handleNavigateDetail} sessionId={sessionId} refreshTrigger={refreshTrigger} focusTrigger={brainFocusTrigger} />
+        </div>
+      )}
+      {mountedTabs.has('knowledge') && (
+        <div className="w-full h-full" style={{ display: activeTab === 'knowledge' ? 'flex' : 'none' }}>
+          <KIManager onNavigateDetail={handleNavigateDetail} refreshTrigger={refreshTrigger} />
+        </div>
+      )}
+      {mountedTabs.has('cron') && (
+        <div className="w-full h-full" style={{ display: activeTab === 'cron' ? 'flex' : 'none' }}>
+          <CronManager onNavigateDetail={handleNavigateDetail} />
+        </div>
+      )}
+      {mountedTabs.has('skills') && (
+        <div className="w-full h-full" style={{ display: activeTab === 'skills' ? 'flex' : 'none' }}>
+          <SkillMCPManager onNavigateDetail={handleNavigateDetail} />
+        </div>
+      )}
     </div>
   )
 
-  // ─── Desktop: right sidebar (unchanged) ───
+  // ─── Desktop: right sidebar ───
   const desktopPanel = (
     <div className="hidden md:flex md:relative md:w-[420px] shrink-0 h-full flex-col bg-black/40 backdrop-blur-[60px] border-l border-white/[0.06] shadow-[-30px_0_60px_-15px_rgba(0,0,0,0.6)] z-40"
          style={{ animation: 'slideInRight 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}>

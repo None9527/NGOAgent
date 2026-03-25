@@ -33,6 +33,7 @@ type Deps struct {
 	ProjectContext string
 	SkillInfos     []SkillInfo
 	ConvSummary    string   // KI index for prompt injection
+	MemoryContent  string   // Vector memory retrieval for prompt injection
 	ToolDescs      []ToolDesc
 	Ephemeral      []string
 	FocusFile      string
@@ -78,6 +79,22 @@ func (e *Engine) Assemble(deps Deps) (string, int) {
 	return e.prune(sections, deps.TokenBudget)
 }
 
+// AssembleSubagent builds a streamlined prompt for sub-agent workers.
+// Keeps full execution capability but removes planning ceremony, user interaction,
+// skills, KI, memory, and user rules. ~25% of parent prompt size.
+func (e *Engine) AssembleSubagent(deps Deps) (string, int) {
+	sections := []Section{
+		{Order: 1, Name: "Identity", Content: prompttext.SubAgentIdentity, Priority: 0},
+		{Order: 2, Name: "CoreBehavior", Content: prompttext.SubAgentBehavior, Priority: 0},
+		{Order: 3, Name: "Safety", Content: prompttext.Safety, Priority: 0},
+		{Order: 4, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
+		{Order: 5, Name: "ToolCalling", Content: prompttext.ToolCalling, Priority: 0},
+		{Order: 6, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
+		{Order: 7, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
+	}
+	return e.prune(sections, deps.TokenBudget)
+}
+
 // buildSections creates the first-principles ordered sections.
 // Layout: Head(Identity→CoreBehavior→Safety→PreferenceKI→UserRules) → Mid(Tooling→Skills→ToolProtocol→ToolCalling→ProjectCtx) → Tail(ResponseFormat→SemanticKI→Runtime→Focus→Ephemeral)
 // Mid follows natural dependency: WHAT I can do → HOW to work
@@ -99,9 +116,10 @@ func (e *Engine) buildSections(deps Deps) []Section {
 		// ═══ Tail Peak: Output format + Task Knowledge + Live Context (HIGH attention) ═══
 		{Order: 13, Name: "ResponseFormat", Content: prompttext.ResponseFormat, Priority: 0},
 		{Order: 14, Name: "KnowledgeIndex", Content: e.buildKnowledgeIndex(deps.ConvSummary), Priority: 0},
-		{Order: 15, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
-		{Order: 16, Name: "Focus", Content: e.buildFocus(deps.FocusFile), Priority: 2},
-		{Order: 17, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
+		{Order: 15, Name: "SemanticMemory", Content: e.buildSemanticMemory(deps.MemoryContent), Priority: 2},
+		{Order: 16, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
+		{Order: 17, Name: "Focus", Content: e.buildFocus(deps.FocusFile), Priority: 2},
+		{Order: 18, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
 	}
 	return sections
 }
@@ -134,9 +152,9 @@ func (e *Engine) buildSkills(infos []SkillInfo) string {
 	}
 	var b strings.Builder
 	b.WriteString("You can use specialized 'skills' to help you with complex tasks.\n")
-	b.WriteString("IMPORTANT: You MUST use `read_file` on a skill's SKILL.md BEFORE using it. ")
-	b.WriteString("SKILL.md contains critical domain knowledge, execution commands, and rules. ")
-	b.WriteString("NEVER guess commands or skip reading SKILL.md.\n\n")
+	b.WriteString("To activate a skill, call the use_skill tool with the skill name. ")
+	b.WriteString("This loads the skill's full guide with domain knowledge, execution steps, and rules. ")
+	b.WriteString("NEVER guess how a skill works — always activate it first.\n\n")
 	b.WriteString("Available skills:\n")
 	for _, s := range infos {
 		skillMd := s.Path + "/SKILL.md"
@@ -169,6 +187,13 @@ func (e *Engine) buildKnowledgeIndex(kiIndex string) string {
 	b.WriteString(kiIndex)
 	b.WriteString("</knowledge_items>")
 	return b.String()
+}
+
+func (e *Engine) buildSemanticMemory(memContent string) string {
+	if memContent == "" {
+		return ""
+	}
+	return "<semantic_memory>\nThe following are fragments from previous conversations that may be relevant to the current context:\n\n" + memContent + "</semantic_memory>"
 }
 
 

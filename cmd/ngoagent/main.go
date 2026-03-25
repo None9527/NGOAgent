@@ -24,6 +24,11 @@ func main() {
 		app.Config.StopWatching()
 	}()
 
+	// Wire subagent progress events → parent session SSE stream
+	if app.SpawnTool != nil && app.Server != nil {
+		app.SpawnTool.SetEventPusher(app.Server.PushEvent)
+	}
+
 	// Start config hot-reload watcher
 	if err := app.Config.StartWatching(); err != nil {
 		log.Printf("Warning: config watcher: %v", err)

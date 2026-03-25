@@ -18,6 +18,7 @@ type Delta struct {
 	OnTitleUpdateFunc func(sessionID, title string)
 	OnCompleteFunc   func()
 	OnErrorFunc      func(error)
+	OnAutoWakeStartFunc func()
 }
 
 func (d *Delta) OnText(text string) {
@@ -80,12 +81,20 @@ func (d *Delta) OnError(err error) {
 	}
 }
 
+func (d *Delta) OnAutoWakeStart() {
+	if d.OnAutoWakeStartFunc != nil {
+		d.OnAutoWakeStartFunc()
+	}
+}
+
 // OutputCollector is a DeltaSink that accumulates text output AND tool events.
 // Used by spawn_agent to collect sub-agent results with structured tool info.
 type OutputCollector struct {
 	buf        strings.Builder
 	events     []ToolEvent
 	pending    map[string]pendingTool // callID → start info
+	StepPush   func(toolName string)  // optional: push current step to parent (for SubagentDock)
+	toolCount  int                    // total tools executed (for step counting)
 }
 
 // ToolEvent records a single tool invocation by the sub-agent.
@@ -108,6 +117,11 @@ func (c *OutputCollector) OnToolStart(callID string, name string, args map[strin
 		c.pending = make(map[string]pendingTool)
 	}
 	c.pending[callID] = pendingTool{name: name, args: args}
+	c.toolCount++
+	// Push step info to parent so SubagentDock shows current activity
+	if c.StepPush != nil {
+		c.StepPush(name)
+	}
 }
 func (c *OutputCollector) OnToolResult(callID string, name string, output string, err error) {
 	ev := ToolEvent{Name: name, Output: output}
@@ -128,6 +142,7 @@ func (c *OutputCollector) OnProgress(string, string, string, string)          {}
 func (c *OutputCollector) OnPlanReview(string, []string)                      {}
 func (c *OutputCollector) OnApprovalRequest(string, string, map[string]any, string) {}
 func (c *OutputCollector) OnTitleUpdate(string, string)                       {}
+func (c *OutputCollector) OnAutoWakeStart()                                   {}
 func (c *OutputCollector) OnComplete()                                        {}
 func (c *OutputCollector) OnError(error)                                      {}
 

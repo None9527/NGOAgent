@@ -19,4 +19,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/sqlite v1.6.0 // indirect
 	gorm.io/gorm v1.31.1 // indirect
+	nhooyr.io/websocket v1.8.17 // indirect
 )

@@ -1,7 +1,7 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025 NGOClaw Team
+ * SPDX-License-Identifier: BSL-1.1
  */
 
 import {
@@ -10,72 +10,26 @@ import {
   useMemo,
   useRef,
 } from 'react';
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
+import type { ChatMessageData, MessagePart, ClaudeContentItem } from '../chat/types.js';
+import { groupMessages, type RenderItem } from '../chat/groupMessages.js';
+import { MessageErrorBoundary } from '../components/ErrorBoundary.js';
 import { UserMessage } from './messages/UserMessage.js';
 import { AssistantMessage } from './messages/Assistant/AssistantMessage.js';
 import { ThinkingMessage } from './messages/ThinkingMessage.js';
-import {
-  GenericToolCall,
-  ThinkToolCall,
-  SaveMemoryToolCall,
-  EditToolCall,
-  WriteToolCall,
-  SearchToolCall,
-  UpdatedPlanToolCall,
-  ShellToolCall,
-  ReadToolCall,
-  WebFetchToolCall,
-  SpawnAgentToolCall,
-  ArtifactHookToolCall,
-  shouldShowToolCall,
-} from './toolcalls/index.js';
+import { getToolRenderer } from './toolcalls/toolRegistry.js';
+import { ToolGroupPanel } from './toolcalls/ToolGroupPanel.js';
+import { shouldShowToolCall } from './toolcalls/index.js';
 import type { ToolCallData as BaseToolCallData } from './toolcalls/index.js';
+// Side-effect import: registers all tools into toolRegistry
+import './toolcalls/index.js';
 import './ChatViewer.css';
-
-/**
- * Message part containing text content (Qwen format)
- */
-export interface MessagePart {
-  text: string;
-}
-
-/**
- * Claude format content item
- */
-export interface ClaudeContentItem {
-  type: 'text' | 'tool_use' | 'tool_result';
-  text?: string;
-  name?: string;
-  input?: unknown;
-}
 
 /**
  * Tool call data for rendering tool call UI
  */
 export type ToolCallData = BaseToolCallData;
-
-/**
- * Single chat message from JSONL format
- * Supports both Qwen format and Claude format
- */
-export interface ChatMessageData {
-  uuid: string;
-  parentUuid?: string | null;
-  sessionId?: string;
-  timestamp: string; // ISO timestamp string
-  type: 'user' | 'assistant' | 'system' | 'tool_call';
-  // Qwen format
-  message?: {
-    role?: string;
-    parts?: MessagePart[];
-    content?: string | ClaudeContentItem[]; // Claude format content
-  };
-  model?: string; // for assistant messages
-  // Tool call data
-  toolCall?: ToolCallData;
-  // Additional Claude format fields
-  cwd?: string;
-  gitBranch?: string;
-}
+export type { ChatMessageData, MessagePart, ClaudeContentItem };
 
 /**
  * ChatViewer ref handle for programmatic control
@@ -107,25 +61,29 @@ export interface ChatViewerProps {
   showEmptyIcon?: boolean;
   /** Current Session ID for fetching artifacts */
   sessionId?: string;
+  /** Retry callback — re-generate last assistant response */
+  onRetry?: () => void;
+  /**
+   * External scroll container for Virtuoso.
+   * When provided, Virtuoso uses this element as its scroller instead of
+   * creating its own fixed-height viewport — fixing the height:0 bug.
+   */
+  customScrollParent?: HTMLElement | null;
+  /** Whether the agent is currently streaming (shows thinking dots) */
+  isStreaming?: boolean;
 }
 
-/**
- * Extract text content from message (supports both Qwen and Claude formats)
- */
 function extractContent(message: ChatMessageData['message']): string {
   if (!message) return '';
 
-  // Qwen format: message.parts[].text
   if (message.parts && Array.isArray(message.parts)) {
     return message.parts.map((part) => part.text || '').join('');
   }
 
-  // Claude format: message.content as string
   if (typeof message.content === 'string') {
     return message.content;
   }
 
-  // Claude format: message.content as array of content items
   if (Array.isArray(message.content)) {
     return message.content
       .filter((item) => item.type === 'text' && item.text)
@@ -136,97 +94,12 @@ function extractContent(message: ChatMessageData['message']): string {
   return '';
 }
 
-/**
- * Convert ISO timestamp string to numeric timestamp
- */
 function parseTimestamp(isoString: string): number {
   const date = new Date(isoString);
   return isNaN(date.getTime()) ? Date.now() : date.getTime();
 }
 
-/**
- * Get the appropriate tool call component based on kind and target
- */
-function getToolCallComponent(toolCall: ToolCallData) {
-  const normalizedKind = toolCall.kind.toLowerCase();
-  
-  if (normalizedKind === 'edit' || normalizedKind === 'write') {
-    const titleLower = typeof toolCall.title === 'string' ? toolCall.title.toLowerCase() : '';
-    if (
-      titleLower.endsWith('task.md') ||
-      titleLower.endsWith('implementation_plan.md') ||
-      titleLower.endsWith('walkthrough.md')
-    ) {
-      return ArtifactHookToolCall;
-    }
-  }
 
-  switch (normalizedKind) {
-    case 'read':
-      return ReadToolCall;
-    case 'write':
-      return WriteToolCall;
-    case 'edit':
-      return EditToolCall;
-    case 'execute':
-    case 'bash':
-    case 'command':
-      return ShellToolCall;
-    case 'spawn_agent':
-      return SpawnAgentToolCall;
-    case 'updated_plan':
-    case 'updatedplan':
-    case 'todo_write':
-    case 'update_todos':
-    case 'todowrite':
-      return UpdatedPlanToolCall;
-    case 'search':
-      return SearchToolCall;
-    case 'think':
-    case 'thinking':
-      return ThinkToolCall;
-    case 'save_memory':
-    case 'savememory':
-    case 'memory':
-      return SaveMemoryToolCall;
-    case 'fetch':
-    case 'web_fetch':
-    case 'webfetch':
-    case 'web_search':
-    case 'websearch':
-      return WebFetchToolCall;
-    default:
-      return GenericToolCall;
-  }
-}
-
-/**
- * ChatViewer - A standalone component for displaying chat conversations
- *
- * Renders a conversation flow from JSONL-formatted data using existing
- * message components (UserMessage, AssistantMessage, ThinkingMessage).
- * This is a pure UI component without VSCode or external dependencies.
- *
- * @example
- * ```tsx
- * const messages = [
- *   { uuid: '1', type: 'user', message: { role: 'user', parts: [{ text: 'Hello!' }] }, ... },
- *   { uuid: '2', type: 'assistant', message: { role: 'model', parts: [{ text: 'Hi there!' }] }, ... },
- * ];
- *
- * <ChatViewer messages={messages} onFileClick={(path) => console.log(path)} />
- * ```
- *
- * @example With ref for programmatic control
- * ```tsx
- * const chatRef = useRef<ChatViewerHandle>(null);
- *
- * // Scroll to bottom programmatically
- * chatRef.current?.scrollToBottom('smooth');
- *
- * <ChatViewer ref={chatRef} messages={messages} />
- * ```
- */
 export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
   (
     {
@@ -237,83 +110,93 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
       theme = 'auto',
       showEmptyIcon = true,
       sessionId,
+      onRetry,
+      customScrollParent,
+      isStreaming = false,
     },
     ref,
   ) => {
+    const virtuosoRef = useRef<VirtuosoHandle>(null);
+    // Keep a fallback scrollContainerRef for the imperative handle
     const scrollContainerRef = useRef<HTMLDivElement>(null);
 
-    // Sort messages by timestamp and filter out system messages and hidden tool calls
     const sortedMessages = useMemo(
       () =>
-        messages
+        [...messages]
           .filter((msg) => {
             if (msg.type === 'system') return false;
-            // Filter out hidden tool calls
             if (msg.type === 'tool_call' && msg.toolCall) {
-              return shouldShowToolCall(msg.toolCall.kind);
+              return shouldShowToolCall(msg.toolCall.kind, msg.toolCall);
             }
             return true;
           })
-          .sort(
-            (a, b) => parseTimestamp(a.timestamp) - parseTimestamp(b.timestamp),
-          ),
+          .sort((a, b) => {
+            const timeA = parseTimestamp(a.timestamp);
+            const timeB = parseTimestamp(b.timestamp);
+            return timeA - timeB;
+          }),
       [messages],
     );
 
-    // Expose imperative handle for programmatic control
+    // Group consecutive tool_call messages into collapsible panels
+    const renderItems = useMemo(
+      () => groupMessages(sortedMessages),
+      [sortedMessages],
+    );
+
+    const lastAssistantIndex = useMemo(() => {
+      for (let i = renderItems.length - 1; i >= 0; i--) {
+        const item = renderItems[i];
+        if (item.type === 'message' && item.data.type === 'assistant' && item.data.message?.role !== 'thinking') return i;
+      }
+      return -1;
+    }, [renderItems]);
+
     useImperativeHandle(
       ref,
       () => ({
         scrollToBottom: (behavior: ScrollBehavior = 'smooth') => {
-          const container = scrollContainerRef.current;
-          if (container) {
-            container.scrollTo({
-              top: container.scrollHeight,
-              behavior,
-            });
+          if (virtuosoRef.current) {
+            virtuosoRef.current.scrollToIndex({ index: renderItems.length - 1, behavior: behavior as 'smooth' | 'auto' | undefined })
+          } else {
+            const container = scrollContainerRef.current;
+            if (container) container.scrollTo({ top: container.scrollHeight, behavior });
           }
         },
         scrollToTop: (behavior: ScrollBehavior = 'smooth') => {
-          const container = scrollContainerRef.current;
-          if (container) {
-            container.scrollTo({
-              top: 0,
-              behavior,
-            });
+          if (virtuosoRef.current) {
+            virtuosoRef.current.scrollToIndex({ index: 0, behavior: behavior as 'smooth' | 'auto' | undefined })
+          } else {
+            const container = scrollContainerRef.current;
+            if (container) container.scrollTo({ top: 0, behavior });
           }
         },
         getScrollContainer: () => scrollContainerRef.current,
       }),
-      [],
+      [renderItems.length],
     );
 
-    // Determine if previous/next is a user message (breaks the AI sequence)
-    const isUserType = (msg: ChatMessageData | undefined) =>
-      !msg || msg.type === 'user';
-
-    // Render individual message based on type
-    const renderMessage = (
-      msg: ChatMessageData,
+    // Render a single non-grouped message
+    const renderSingleMessage = (
       index: number,
-      allMsgs: ChatMessageData[],
+      msg: ChatMessageData,
     ) => {
       const key = msg.uuid || `msg-${index}`;
-      const prev = allMsgs[index - 1];
-      const next = allMsgs[index + 1];
+      const prevItem = renderItems[index - 1];
+      const nextItem = renderItems[index + 1];
 
-      // Calculate timeline position for AI responses
-      const isFirst = isUserType(prev);
-      const isLast = isUserType(next);
+      // Determine isFirst/isLast based on surrounding render items
+      const isFirst = !prevItem || (prevItem.type === 'message' && prevItem.data.type === 'user') || prevItem.type === 'tool_group';
+      const isLast = !nextItem || (nextItem.type === 'message' && nextItem.data.type === 'user') || nextItem.type === 'tool_group';
 
-      // Handle tool calls
+      let element: React.ReactElement | null = null;
+
       if (msg.type === 'tool_call' && msg.toolCall) {
-        const ToolCallComponent = getToolCallComponent(msg.toolCall);
-
-        if (!ToolCallComponent) {
-          return null;
-        }
-
-        return (
+        // Single tool_call not in a group (shouldn't happen with groupMessages, but fallback)
+        const config = getToolRenderer(msg.toolCall);
+        if (!config) return null;
+        const ToolCallComponent = config.component;
+        element = (
           <ToolCallComponent
             key={key}
             toolCall={msg.toolCall}
@@ -322,19 +205,13 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
             sessionId={sessionId}
           />
         );
-      }
+      } else {
+        const content = extractContent(msg.message);
+        if (!content.trim()) return null;
+        const timestamp = parseTimestamp(msg.timestamp);
 
-      const content = extractContent(msg.message);
-      const timestamp = parseTimestamp(msg.timestamp);
-
-      // Skip empty messages (but not tool calls)
-      if (!content.trim()) {
-        return null;
-      }
-
-      switch (msg.type) {
-        case 'user':
-          return (
+        if (msg.type === 'user') {
+          element = (
             <UserMessage
               key={key}
               content={content}
@@ -342,11 +219,9 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
               onFileClick={onFileClick}
             />
           );
-
-        case 'assistant':
-          // Check if this is a thinking message based on role
+        } else if (msg.type === 'assistant') {
           if (msg.message?.role === 'thinking') {
-            return (
+            element = (
               <ThinkingMessage
                 key={key}
                 content={content}
@@ -354,24 +229,52 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
                 onFileClick={onFileClick}
               />
             );
+          } else {
+            element = (
+              <AssistantMessage
+                key={key}
+                content={content}
+                timestamp={timestamp}
+                onFileClick={onFileClick}
+                isFirst={isFirst}
+                isLast={isLast}
+                isLastAssistant={index === lastAssistantIndex}
+                onRetry={onRetry}
+              />
+            );
           }
-          return (
-            <AssistantMessage
-              key={key}
-              content={content}
-              timestamp={timestamp}
-              onFileClick={onFileClick}
-              isFirst={isFirst}
-              isLast={isLast}
-            />
-          );
-
-        default:
-          return null;
+        }
       }
+
+      if (!element) return null;
+
+      return (
+        <MessageErrorBoundary key={key}>
+          {element}
+        </MessageErrorBoundary>
+      );
     };
 
-    // Build container class names
+    // Render a RenderItem (single message or tool group panel)
+    const renderItem = (
+      index: number,
+      item: RenderItem,
+    ) => {
+      if (item.type === 'tool_group') {
+        return (
+          <MessageErrorBoundary key={item.id}>
+            <ToolGroupPanel
+              items={item.items}
+              sessionId={sessionId}
+              sectionTitle={item.section?.taskName}
+              sectionMode={item.section?.mode}
+            />
+          </MessageErrorBoundary>
+        );
+      }
+      return renderSingleMessage(index, item.data);
+    };
+
     const containerClasses = [
       'chat-viewer-container',
       theme === 'light' ? 'light-theme' : '',
@@ -381,29 +284,55 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
       .filter(Boolean)
       .join(' ');
 
-    return (
-      <div className={containerClasses}>
-        <div
-          ref={scrollContainerRef}
-          className="chat-viewer-messages"
-        >
-          {sortedMessages.length === 0 ? (
-            <div className="chat-viewer-empty">
-              {showEmptyIcon && (
-                <div className="chat-viewer-empty-icon" aria-hidden="true">
-                  💬
-                </div>
-              )}
-              <div className="chat-viewer-empty-text">{emptyMessage}</div>
-            </div>
-          ) : (
-            <>
-              {sortedMessages.map((msg, index) =>
-                renderMessage(msg, index, sortedMessages),
-              )}
-            </>
-          )}
+    if (renderItems.length === 0) {
+      return (
+        <div className={containerClasses}>
+          <div className="chat-viewer-empty">
+            {showEmptyIcon && (
+              <div className="chat-viewer-empty-icon" aria-hidden="true">
+                💬
+              </div>
+            )}
+            <div className="chat-viewer-empty-text">{emptyMessage}</div>
+          </div>
         </div>
+      );
+    }
+
+    // Footer: thinking dots (before first response) + spacer for floating composer
+    const Footer = () => {
+      if (!isStreaming || renderItems.length === 0) return (
+        <div className="h-[200px] md:h-[250px] pointer-events-none" aria-hidden="true" />
+      );
+      const last = renderItems[renderItems.length - 1];
+      const showDots = last.type === 'message' && last.data.type === 'user';
+      return (
+        <>
+          {showDots && (
+            <div className="flex items-center gap-[6px] pl-[10px] py-4">
+              <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" />
+              <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" style={{ animationDelay: '0.3s' }} />
+              <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" style={{ animationDelay: '0.6s' }} />
+            </div>
+          )}
+          <div className="h-[200px] md:h-[250px] pointer-events-none" aria-hidden="true" />
+        </>
+      );
+    };
+
+    return (
+      <div className={containerClasses} ref={scrollContainerRef}
+           style={customScrollParent ? undefined : { height: '100%' }}>
+        <Virtuoso
+          ref={virtuosoRef}
+          data={renderItems}
+          itemContent={renderItem}
+          followOutput="smooth"
+          style={customScrollParent ? undefined : { height: '100%' }}
+          increaseViewportBy={{ top: 400, bottom: 400 }}
+          customScrollParent={customScrollParent ?? undefined}
+          components={{ Footer }}
+        />
       </div>
     );
   },

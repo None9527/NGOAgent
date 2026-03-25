@@ -120,6 +120,78 @@ func (d *KnowledgeDistiller) DistillKnowledge(messages []Message) (*KIResult, er
 	return &result, nil
 }
 
+const kiMergePrompt = `You are a knowledge consolidation engine. Below are two pieces of knowledge about the SAME topic:
+
+**EXISTING KNOWLEDGE:**
+%s
+
+**NEW KNOWLEDGE from latest session:**
+%s
+
+Your task: Merge these into ONE consolidated, concise knowledge document.
+
+Rules:
+1. REMOVE duplicate information — keep only one version of each fact
+2. KEEP all unique details, configurations, and code snippets from both
+3. PRIORITIZE newer information when there are conflicts
+4. The result should be SHORTER or EQUAL in length to the combined input
+5. Use markdown format with clear headers
+
+Respond with JSON (no markdown fences):
+{
+  "title": "Updated concise title (max 10 words)",
+  "summary": "1-2 sentence summary of the merged knowledge",
+  "content": "Merged knowledge content in clean markdown"
+}
+`
+
+// MergeKnowledge consolidates old and new KI content via LLM.
+// Returns a unified KIResult that replaces (not appends to) the existing KI.
+func (d *KnowledgeDistiller) MergeKnowledge(existingContent, newContent string) (*KIResult, error) {
+	prov, model, err := d.router.ResolveWithFallback("")
+	if err != nil {
+		return nil, fmt.Errorf("ki merge: no provider: %w", err)
+	}
+
+	// Truncate inputs to prevent context overflow
+	if len([]rune(existingContent)) > 3000 {
+		existingContent = string([]rune(existingContent)[:3000]) + "\n...(truncated)"
+	}
+	if len([]rune(newContent)) > 2000 {
+		newContent = string([]rune(newContent)[:2000]) + "\n...(truncated)"
+	}
+
+	prompt := fmt.Sprintf(kiMergePrompt, existingContent, newContent)
+
+	req := &Request{
+		Model:     model,
+		MaxTokens: 1500,
+		Messages: []Message{
+			{Role: "user", Content: prompt},
+		},
+		Stream: false,
+	}
+
+	ch := make(chan StreamChunk, 64)
+	resp, err := prov.GenerateStream(context.Background(), req, ch)
+	if err != nil {
+		return nil, fmt.Errorf("ki merge: llm error: %w", err)
+	}
+
+	raw := strings.TrimSpace(resp.Content)
+	raw = strings.TrimPrefix(raw, "```json")
+	raw = strings.TrimPrefix(raw, "```")
+	raw = strings.TrimSuffix(raw, "```")
+	raw = strings.TrimSpace(raw)
+
+	var result KIResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return nil, fmt.Errorf("ki merge: parse json: %w (raw: %s)", err, raw[:min(len(raw), 200)])
+	}
+	result.ShouldSave = true
+	return &result, nil
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

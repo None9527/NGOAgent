@@ -3,10 +3,21 @@ package config
 // DefaultConfig returns the default configuration.
 func DefaultConfig() *Config {
 	return &Config{
+		Server: ServerConfig{
+			HTTPPort: 8080,
+			GRPCPort: 19998,
+			Mode:     "release",
+			Timezone: "system",
+		},
 		Agent: AgentConfig{
-			PlanningMode: false,
-			MaxSteps:     200,
-			Workspace:    "~/.ngoagent/workspace",
+			PlanningMode:    false,
+			MaxSteps:        200,
+			Workspace:       "~/.ngoagent/workspace",
+			Temperature:     0.7,
+			TopP:            0.9,
+			MaxOutputTokens: 8192,
+			ContextWindow:   32768,
+			CompactRatio:    0.7,
 		},
 		LLM: LLMConfig{},
 		Security: SecurityConfig{
@@ -38,15 +49,33 @@ func DefaultConfig() *Config {
 			TopK:                5,
 			KIBudgetChars:       6000,
 		},
+		Memory: MemoryConfig{
+			HalfLifeDays: 30,
+			MaxFragments: 0, // unlimited
+		},
 	}
 }
 
 // DefaultConfigYAML returns the default config.yaml content for bootstrap.
 const DefaultConfigYAML = `# NGOAgent Configuration
 
+server:
+  http_port: 8080
+  grpc_port: 19998
+  mode: "release"
+  timezone: "system"        # "system" or IANA name like "Asia/Shanghai"
+  auth_token: ""            # Auto-generated on first run
+
 agent:
   planning_mode: false
-  workspace: "~/.ngoagent/workspace"  # default cwd for shell commands
+  max_steps: 200
+  workspace: "~/.ngoagent/workspace"
+  # LLM hyperparameters
+  temperature: 0.7          # 0.0-2.0, lower = more deterministic
+  top_p: 0.9                # 0.0-1.0, nucleus sampling threshold
+  max_output_tokens: 8192   # max tokens per LLM response
+  context_window: 32768     # fallback context window for unknown models
+  compact_ratio: 0.7        # trigger context compaction at 70% usage
 
 llm:
   providers:
@@ -55,6 +84,10 @@ llm:
       base_url: "https://api.openai.com/v1"
       api_key: "${OPENAI_API_KEY}"
       models: ["gpt-4"]
+      # model_config:         # optional per-model overrides
+      #   gpt-4:
+      #     context_window: 128000
+      #     max_output_tokens: 16384
 
 security:
   mode: "auto"
@@ -70,23 +103,21 @@ storage:
 cron:
   enabled: true
 
-server:
-  http_port: 8080
-  auth_token: ""               # Auto-generated on first run / 首次启动自动生成
+memory:
+  half_life_days: 30        # time-decay half-life for memory fragments
+  max_fragments: 0          # 0 = unlimited
 
 embedding:
-  provider: ""           # "dashscope" | "openai" | "" (disabled)
+  provider: ""              # "dashscope" | "openai" | "" (disabled)
   # base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   # api_key: "${DASHSCOPE_API_KEY}"
   # model: "text-embedding-v3"
   # dimensions: 1024
-  # similarity_threshold: 0.85
-  # min_ki_for_embedding: 30   # KI < 30: full injection; >= 30: embedding retrieval
-  # top_k: 5                   # retrieve top-K relevant KIs
+  # similarity_threshold: 0.75
+  # min_ki_for_embedding: 30
+  # top_k: 5
 
-# MCP servers are configured in ~/.ngoagent/mcp.json (CC-compatible format).
-# Use mcp.json to add/manage MCP servers. See mcp.json for format reference.
-# Inline servers below are merged at lowest priority (mcp.json wins on name collision).
+# MCP servers: configured in ~/.ngoagent/mcp.json (CC-compatible format).
 mcp:
   servers: []
 `

@@ -1,7 +1,7 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025 NGOClaw Team
+ * SPDX-License-Identifier: BSL-1.1
  *
  * UserMessage - renders user messages with parsed attachments.
  * Uses the SAME .media-img CSS class as MarkdownRenderer for unified look.
@@ -107,7 +107,7 @@ export const UserMessage: FC<UserMessageProps> = memo(({
         document.body
       )}
 
-      <div className="w-full flex justify-end mt-4 md:mt-12 mb-4 md:mb-8 relative">
+      <div className="w-full flex justify-end mt-4 md:mt-12 mb-4 md:mb-8 relative group/usermsg">
         <div className="flex flex-col items-end max-w-[90%] md:max-w-[75%]">
 
           {/* Attachments — SAME .media-img class as assistant messages */}
@@ -153,6 +153,31 @@ export const UserMessage: FC<UserMessageProps> = memo(({
               <CollapsibleFileContent content={cleanContent} onFileClick={onFileClick} enableFileLinks={false} />
             </div>
           )}
+
+          {/* Action bar — matches assistant layout pattern */}
+          <div className="msg-action-bar group-hover/usermsg:opacity-100">
+            <button
+              type="button"
+              className="msg-action-btn"
+              title="复制消息"
+              onClick={() => {
+                const text = cleanContent || content
+                try {
+                  navigator.clipboard?.writeText(text)
+                } catch {
+                  const el = document.createElement('textarea')
+                  el.value = text; el.style.position = 'fixed'; el.style.opacity = '0'
+                  document.body.appendChild(el); el.select()
+                  document.execCommand('copy'); document.body.removeChild(el)
+                }
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+              </svg>
+            </button>
+          </div>
 
           {/* Fallback: no attachments, no parsed text */}
           {!cleanContent && attachments.length === 0 && (

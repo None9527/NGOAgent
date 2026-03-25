@@ -248,7 +248,7 @@ func TestMCPManagerMethods(t *testing.T) {
 
 func TestSecurityHookExists(t *testing.T) {
 	// Just verify construction doesn't panic
-	_ = security.NewHook(nil, nil)
+	_ = security.NewHook(nil)
 	t.Log("✅ Security: NewHook")
 }
 

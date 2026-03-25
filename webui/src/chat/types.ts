@@ -1,11 +1,30 @@
 /**
- * Chat types — self-owned type definitions for NGOAgent WebUI.
- * Replaces dependency on ui/components/ChatViewer and ui/toolcalls/shared/types.
+ * Chat types — single source of truth for NGOAgent WebUI.
+ * All message, tool call, stream, and API types are defined here.
  */
 
 // ═══════════════════════════════════════════
-// Tool Call types
+// Message Role & Format Types
 // ═══════════════════════════════════════════
+
+export type MessageRole = 'user' | 'model' | 'thinking' | 'system'
+
+/**
+ * Claude format content item
+ */
+export interface ClaudeContentItem {
+  type: 'text' | 'tool_use' | 'tool_result'
+  text?: string
+  name?: string
+  input?: unknown
+}
+
+/**
+ * Message part containing text content
+ */
+export interface MessagePart {
+  text: string
+}
 
 export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
 
@@ -34,11 +53,37 @@ export interface ToolCallData {
 }
 
 // ═══════════════════════════════════════════
+// Stream types (migrated from StreamProvider)
+// ═══════════════════════════════════════════
+
+export type StreamPhase =
+  | 'idle'
+  | 'streaming'
+  | 'waiting_approval'
+  | 'awaiting_subagents'
+  | 'auto_waking'
+  | 'reconnecting'
+
+export interface SubagentProgressEntry {
+  runID: string
+  taskName: string
+  status: 'running' | 'completed' | 'failed'
+  done: number
+  total: number
+  error?: string
+  output?: string
+  currentStep?: string
+}
+
+// ═══════════════════════════════════════════
 // Chat Message types
 // ═══════════════════════════════════════════
 
-export interface MessagePart {
-  text: string
+export interface TaskSectionMeta {
+  taskName: string
+  status: string
+  summary: string
+  mode: string // planning | execution | verification
 }
 
 export interface ChatMessageData {
@@ -46,13 +91,17 @@ export interface ChatMessageData {
   parentUuid?: string | null
   sessionId?: string
   timestamp: string
-  type: 'user' | 'assistant' | 'system' | 'tool_call'
+  type: 'user' | 'assistant' | 'system' | 'tool_call' | 'task_section'
   message?: {
-    role?: string
+    role?: MessageRole | string
     parts?: MessagePart[]
+    content?: string | ClaudeContentItem[] // Claude format
   }
   model?: string
   toolCall?: ToolCallData
+  taskSection?: TaskSectionMeta
+  cwd?: string
+  gitBranch?: string
 }
 
 // ═══════════════════════════════════════════
@@ -107,6 +156,8 @@ export interface StreamCallbacks {
   onStepDone?: () => void
   onTitleUpdate?: (sessionId: string, title: string) => void
   onProgress?: (taskName: string, status: string, summary: string, mode: string) => void
+  onSubagentProgress?: (runID: string, taskName: string, status: string, done: number, total: number, error?: string, output?: string, currentStep?: string) => void
+  onAutoWakeStart?: () => void
   onEnd: () => void
   onError: (err: Error) => void
 }

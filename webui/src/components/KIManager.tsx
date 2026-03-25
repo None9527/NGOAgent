@@ -2,6 +2,7 @@ import { authFetch } from '../chat/api'
 import { useState, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { MdStyles } from './shared/mdStyles'
 
 const API_BASE = ''
 
@@ -28,10 +29,11 @@ interface ArtifactContent {
 }
 
 interface KIManagerProps {
+  refreshTrigger?: number
   onNavigateDetail?: (id: string | null) => void
 }
 
-export function KIManager({ onNavigateDetail }: KIManagerProps) {
+export function KIManager({ refreshTrigger = 0, onNavigateDetail }: KIManagerProps) {
   const [items, setItems] = useState<KIItem[]>([])
   const [search, setSearch] = useState('')
   const [selectedKI, setSelectedKI] = useState<KIItem | null>(null)
@@ -50,6 +52,11 @@ export function KIManager({ onNavigateDetail }: KIManagerProps) {
   useEffect(() => {
     loadItems(); setSelectedKI(null); setArtifactContents([]); onNavigateDetail?.(null);
   }, [loadItems])
+
+  // Auto-refresh when refreshTrigger changes (e.g. after KI distillation)
+  useEffect(() => {
+    if (refreshTrigger > 0) loadItems()
+  }, [refreshTrigger, loadItems])
 
   const openKI = async (item: KIItem) => {
     setSelectedKI(item)
@@ -168,7 +175,7 @@ export function KIManager({ onNavigateDetail }: KIManagerProps) {
                   {ac.loading ? (
                     <div className="text-gray-500 text-xs text-center py-4">加载中…</div>
                   ) : ac.name.endsWith('.md') ? (
-                    <div className="ki-md-content text-sm text-gray-300 leading-relaxed">
+                    <div className="hub-md-content text-sm text-gray-300 leading-relaxed">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{ac.content}</ReactMarkdown>
                     </div>
                   ) : ac.name.endsWith('.json') ? (
@@ -185,7 +192,7 @@ export function KIManager({ onNavigateDetail }: KIManagerProps) {
             ))}
           </div>
         </div>
-        {mdStyles}
+        <MdStyles />
       </div>
     )
   }
@@ -257,30 +264,8 @@ export function KIManager({ onNavigateDetail }: KIManagerProps) {
           </div>
         )}
       </div>
-      {mdStyles}
+      {/* Use shared Hub markdown styles */}
+      <MdStyles />
     </div>
   )
 }
-
-const mdStyles = (
-  <style>{`
-    .ki-md-content h1 { font-size: 1.3em; font-weight: 700; margin: 1em 0 0.5em; color: #e5e5e5; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 0.3em; }
-    .ki-md-content h2 { font-size: 1.15em; font-weight: 600; margin: 0.8em 0 0.4em; color: #d4d4d4; }
-    .ki-md-content h3 { font-size: 1em; font-weight: 600; margin: 0.6em 0 0.3em; color: #a3a3a3; }
-    .ki-md-content p { margin: 0.5em 0; line-height: 1.75; }
-    .ki-md-content ul, .ki-md-content ol { padding-left: 1.5em; margin: 0.4em 0; }
-    .ki-md-content li { margin: 0.2em 0; line-height: 1.65; }
-    .ki-md-content li::marker { color: #525252; }
-    .ki-md-content code { background: rgba(255,255,255,0.08); padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.85em; color: #e879f9; }
-    .ki-md-content pre { background: rgba(0,0,0,0.35); padding: 0.8em; border-radius: 6px; overflow-x: auto; margin: 0.6em 0; }
-    .ki-md-content pre code { background: none; padding: 0; color: #d4d4d4; }
-    .ki-md-content blockquote { border-left: 3px solid rgba(96,165,250,0.4); padding-left: 1em; margin: 0.6em 0; color: #a3a3a3; }
-    .ki-md-content table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.9em; display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    .ki-md-content th, .ki-md-content td { border: 1px solid rgba(255,255,255,0.1); padding: 0.4em 0.6em; text-align: left; }
-    .ki-md-content th { background: rgba(255,255,255,0.06); font-weight: 600; color: #d4d4d4; }
-    .ki-md-content a { color: #60a5fa; text-decoration: none; }
-    .ki-md-content a:hover { text-decoration: underline; }
-    .ki-md-content hr { border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 1em 0; }
-    .ki-md-content strong { color: #f5f5f5; }
-  `}</style>
-)

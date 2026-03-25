@@ -24,7 +24,7 @@ import (
 // Mirrors server.API (HTTP) — both are satisfied by *application.AgentAPI.
 type API interface {
 	// Chat — unified streaming entry point
-	ChatStream(ctx context.Context, sessionID, message string, delta *service.Delta) error
+	ChatStream(ctx context.Context, sessionID, message, mode string, delta *service.Delta) error
 	SessionID(sessionID string) string
 	StopRun(sessionID string)
 	Approve(approvalID string, approved bool) error
@@ -183,7 +183,7 @@ func (s *Server) Chat(req *pb.AgentChatRequest, stream pb.AgentService_ChatServe
 	}
 
 	// Unified API call — all kernel operations handled by API layer
-	if err := s.api.ChatStream(stream.Context(), sessionID, req.GetMessage(), delta); err != nil {
+	if err := s.api.ChatStream(stream.Context(), sessionID, req.GetMessage(), "", delta); err != nil {
 		if err.Error() == "agent is busy" {
 			return status.Error(codes.ResourceExhausted, "agent is busy")
 		}
@@ -707,7 +707,7 @@ func (s *Server) SendMessage(_ context.Context, req *pb.SendMessageRequest) (*pb
 		OnApprovalRequestFunc: func(string, string, map[string]any, string) {},
 		OnTitleUpdateFunc: func(string, string) {},
 	}
-	if err := s.api.ChatStream(context.Background(), req.GetSessionId(), req.GetMessage(), delta); err != nil {
+	if err := s.api.ChatStream(context.Background(), req.GetSessionId(), req.GetMessage(), "", delta); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "sent"}, nil

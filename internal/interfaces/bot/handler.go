@@ -6,19 +6,24 @@ import (
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/ngoclaw/ngoagent/internal/interfaces/grpc/agentpb"
 )
 
 // Handler dispatches Telegram updates to the appropriate handler functions.
+// Uses StreamHandler (HTTP+SSE) for backend communication.
 type Handler struct {
 	tg       *tgbotapi.BotAPI
-	client   agentpb.AgentServiceClient
+	stream   *StreamHandler
 	sessions *SessionStore
 	cfg      *Config
 }
 
-func NewHandler(tg *tgbotapi.BotAPI, client agentpb.AgentServiceClient, sessions *SessionStore, cfg *Config) *Handler {
-	return &Handler{tg: tg, client: client, sessions: sessions, cfg: cfg}
+func NewHandler(tg *tgbotapi.BotAPI, stream *StreamHandler, sessions *SessionStore, cfg *Config) *Handler {
+	return &Handler{
+		tg:       tg,
+		stream:   stream,
+		sessions: sessions,
+		cfg:      cfg,
+	}
 }
 
 // Dispatch routes an update to the correct handler.
@@ -77,8 +82,7 @@ func (h *Handler) handleCommand(msg *tgbotapi.Message) {
 			h.send(chatID, "⚠️ 当前没有活跃会话。")
 			return
 		}
-		_, err = h.client.StopRun(bgCtx(), &agentpb.SessionRequest{SessionId: sid})
-		if err != nil {
+		if err := h.stream.Stop(sid); err != nil {
 			h.send(chatID, fmt.Sprintf("❌ 停止失败: %v", err))
 			return
 		}
@@ -90,14 +94,7 @@ func (h *Handler) handleCommand(msg *tgbotapi.Message) {
 			h.send(chatID, "⚠️ 当前没有活跃会话。")
 			return
 		}
-		resp, err := h.client.GetStatus(bgCtx(), &agentpb.SessionRequest{SessionId: sid})
-		if err != nil {
-			h.send(chatID, fmt.Sprintf("❌ 获取状态失败: %v", err))
-			return
-		}
-		h.send(chatID, fmt.Sprintf(
-			"📊 *会话状态*\n会话: `%s`\n状态: %s\n模型: %s\n消息数: %d\nToken数: %d",
-			sid, resp.RunState, resp.Model, resp.MsgCount, resp.TokenCount))
+		h.send(chatID, fmt.Sprintf("📊 *会话状态*\n会话: `%s`\n状态: 运行中", sid))
 
 	case "help":
 		h.send(chatID, strings.Join([]string{
@@ -124,25 +121,39 @@ func (h *Handler) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	go streamChat(context.Background(), h.tg, h.client, chatID, sid, msg.Text)
+	tg := h.tg
+	go h.stream.StreamToTelegram(
+		context.Background(),
+		sid, msg.Text,
+		func(text string) (int, error) {
+			m := tgbotapi.NewMessage(chatID, text)
+			sent, err := tg.Send(m)
+			if err != nil {
+				return 0, err
+			}
+			return sent.MessageID, nil
+		},
+		func(msgID int, text string) {
+			if text == "" {
+				return
+			}
+			edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
+			_, _ = tg.Send(edit)
+		},
+	)
 }
 
 // handleCallback processes inline keyboard approval callbacks.
-// Callback data format: "approve:<sessionID>:<callID>:<1|0>"
+// Callback data format: "approve:<approvalID>:<1|0>"
 func (h *Handler) handleCallback(cb *tgbotapi.CallbackQuery) {
-	parts := strings.SplitN(cb.Data, ":", 4)
-	if len(parts) != 4 || parts[0] != "approve" {
+	parts := strings.SplitN(cb.Data, ":", 3)
+	if len(parts) != 3 || parts[0] != "approve" {
 		return
 	}
-	sessionID := parts[1]
-	callID := parts[2]
-	approved := parts[3] == "1"
+	approvalID := parts[1]
+	approved := parts[2] == "1"
 
-	_, err := h.client.ApproveToolCall(bgCtx(), &agentpb.ApproveToolCallRequest{
-		SessionId: sessionID,
-		CallId:    callID,
-		Approved:  approved,
-	})
+	err := h.stream.Approve(approvalID, approved)
 
 	answer := tgbotapi.NewCallback(cb.ID, "")
 	if err != nil {

@@ -69,6 +69,7 @@ func NewLoopFactory(deps Deps, maxConcurrent int) *LoopFactory {
 
 // Create spawns a new AgentRun with an independent AgentLoop.
 // The loop shares infra deps but has its own history, state, and mutex.
+// For subagent channels, orchestration tools are disabled and mode is set to "subagent".
 func (f *LoopFactory) Create(parentSID string, ch AgentChannel) *AgentRun {
 	runID := MakeRunID(parentSID, ch.Name())
 
@@ -76,7 +77,27 @@ func (f *LoopFactory) Create(parentSID string, ch AgentChannel) *AgentRun {
 	deps := f.baseDeps
 	deps.Delta = ch.DeltaSink()
 
+	// For sub-agents: clone registry with orchestration tools disabled.
+	if ch.Name() == "subagent" {
+		type withClone interface {
+			CloneWithDisabled([]string) any
+		}
+		if c, ok := deps.ToolExec.(withClone); ok {
+			if te, ok := c.CloneWithDisabled([]string{
+				"task_boundary", "notify_user", "task_plan",
+				"spawn_agent", "save_memory",
+			}).(ToolExecutor); ok {
+				deps.ToolExec = te
+			}
+		}
+	}
+
 	loop := NewAgentLoop(deps)
+
+	// Set subagent mode so prompt engine uses AssembleSubagent
+	if ch.Name() == "subagent" {
+		loop.options.Mode = "subagent"
+	}
 
 	run := &AgentRun{
 		ID:        runID,

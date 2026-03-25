@@ -90,12 +90,16 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 	a.history = append(a.history, a.buildUserMessage(userMessage))
 	a.state = StatePrepare
 	a.mu.Unlock()
+
+	// Persist the user message immediately so that UI refreshes during a long LLM generation
+	// will still see the user's prompt in the session history.
+	a.persistHistory()
+
 	a.guard.ResetTurn()
 
 	opts := a.options
 	steps := 0
 	retries := 0
-	maxRetries := 2
 
 	for {
 		select {
@@ -116,15 +120,31 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			if err != nil {
 				a.transition(StateError)
 				if llmErr, ok := err.(*llm.LLMError); ok {
-					if llmErr.Level == llm.ErrorTransient && retries < maxRetries {
-						retries++
-						backoff := time.Duration(1<<retries) * time.Second // 2s, 4s
-						log.Printf("[retry] attempt %d/%d, backoff %v: %s", retries, maxRetries, backoff, llmErr.Code)
-						time.Sleep(backoff)
-						a.transition(StateGenerate)
-						continue
-					}
-					if llmErr.Level == llm.ErrorFatal {
+					switch llmErr.Level {
+					case llm.ErrorTransient, llm.ErrorOverload:
+						base, maxR := llm.BackoffConfig(llmErr.Level)
+						if retries < maxR {
+							retries++
+							backoff := llm.BackoffWithJitter(base, retries-1)
+							log.Printf("[retry] %s attempt %d/%d, backoff %v: %s",
+								llmErr.Level, retries, maxR, backoff, llmErr.Code)
+							time.Sleep(backoff)
+							a.transition(StateGenerate)
+							continue
+						}
+					case llm.ErrorContextOverflow:
+						if retries < 1 {
+							retries++
+							log.Printf("[retry] context overflow → compacting then retry")
+							a.transition(StateCompact)
+							continue
+						}
+					case llm.ErrorBilling:
+						log.Printf("[error] billing/quota exhausted: %s", llmErr.Message)
+						a.transition(StateFatal)
+						a.deps.Delta.OnError(err)
+						return err
+					case llm.ErrorFatal:
 						a.transition(StateFatal)
 						a.deps.Delta.OnError(err)
 						return err
@@ -262,8 +282,26 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			// OnComplete FIRST: release frontend (step_done event) immediately.
 			a.deps.Delta.OnComplete()
 			// Hooks run async: must NOT block runInner return (which releases run lock).
-			// Hooks use snapshot data (RunInfo) so no race with next run.
 			go a.fireHooks(runCtx, steps)
+
+			// ── Pending Wake tail-check (subagent orchestration) ──
+			// If subagent results arrived during this run (barrier called SignalWake),
+			// auto-continue within the same lock to process the injected ephemerals.
+			// This eliminates the "agent is busy" race between ChatStream and auto-wake.
+			if a.pendingWake.CompareAndSwap(true, false) {
+				log.Printf("[loop] pendingWake detected, auto-continuing for subagent results")
+				steps = 0
+				retries = 0
+				// Signal frontend: auto-wake phase starting
+				if a.deps.Delta != nil {
+					a.deps.Delta.OnAutoWakeStart()
+				}
+				a.mu.Lock()
+				a.history = append(a.history, a.buildUserMessage(""))
+				a.mu.Unlock()
+				a.transition(StatePrepare) // Legal: Done→Prepare
+				continue // re-enter the for loop — processes ephemerals in next generate
+			}
 			return nil
 
 		default:
@@ -285,7 +323,12 @@ func (a *AgentLoop) transition(to State) {
 
 // doPrepare detects ephemeral injection needs.
 // Implements Anti's 3-layer ephemeral injection system.
-func (a *AgentLoop) doPrepare(ctx context.Context) {
+func (a *AgentLoop) doPrepare(_ context.Context) {
+	// Sub-agents skip all planning/boundary/agentic injections
+	if a.options.Mode == "subagent" {
+		return
+	}
+
 	a.mu.Lock()
 	lastMsg := ""
 	if len(a.history) > 0 {
@@ -314,9 +357,24 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 	}
 	a.guard.SetModeState(isPlanning, planExists, taskMdExists, boundaryMode)
 
-	// === Layer 1: Planning mode base template ===
-	if isPlanning {
+	// === Layer 1: Planning mode base template (skip in agentic — agent self-manages) ===
+	if isPlanning && a.PlanMode() != "agentic" {
 		a.InjectEphemeral(prompttext.EphPlanningMode)
+	}
+
+	// === Layer 1b: Agentic mode — autonomous decision-making ===
+	if a.PlanMode() == "agentic" {
+		a.InjectEphemeral(
+			"🤖 [AGENTIC MODE] You are operating in fully autonomous mode.\n" +
+				"You have complete decision-making authority:\n" +
+				"- For complex, multi-step, or risky tasks: CREATE a plan first (use task_boundary + implementation_plan), then self-review and execute.\n" +
+				"- For simple, single-step tasks: proceed directly without planning.\n" +
+				"- You do NOT need user approval for plans — review them yourself and proceed.\n" +
+				"- Prioritize thoroughness and correctness over speed.\n" +
+				"- For tasks with 3+ independent components, use spawn_agent to parallelize.\n" +
+				"Make your own judgment call on whether planning is needed.")
+		// Team coordination protocol for sub-agent management
+		a.InjectEphemeral(prompttext.TeamLeadPrompt)
 	}
 
 	a.mu.Lock()
@@ -435,6 +493,11 @@ func (a *AgentLoop) doPrepare(ctx context.Context) {
 // shouldInjectPlanning checks if planning mode should be triggered.
 // Only explicit signals — no heuristic auto-detection.
 func (a *AgentLoop) shouldInjectPlanning(userMessage string) bool {
+	// Runtime plan mode: "plan" forces planning, "auto" defers to heuristics
+	planMode := a.PlanMode()
+	if planMode == "plan" {
+		return true
+	}
 	// Agent self-declared planning mode via task_boundary — strongest signal
 	a.mu.Lock()
 	mode := a.boundaryMode
@@ -443,9 +506,6 @@ func (a *AgentLoop) shouldInjectPlanning(userMessage string) bool {
 		return true
 	}
 	if strings.Contains(userMessage, "/plan") {
-		return true
-	}
-	if a.deps.Config.Agent.PlanningMode {
 		return true
 	}
 	return false
@@ -465,7 +525,12 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 
 	// ═══ Assemble system prompt with ALL data sources ═══
 	promptDeps := a.buildPromptDeps(ctx, model, opts)
-	systemPrompt, _ := a.deps.PromptEngine.Assemble(promptDeps)
+	var systemPrompt string
+	if a.options.Mode == "subagent" {
+		systemPrompt, _ = a.deps.PromptEngine.AssembleSubagent(promptDeps)
+	} else {
+		systemPrompt, _ = a.deps.PromptEngine.Assemble(promptDeps)
+	}
 
 	// Build messages
 	messages := make([]llm.Message, 0, len(a.history)+1)
@@ -497,13 +562,16 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 	// Check if Guard wants to force a specific tool (Anti's force_tool_name mechanism)
 	forceTool := a.guard.ConsumeForceToolName()
 
+	// Resolve per-model parameters (model_config > agent global > fallback)
+	mp := a.deps.Config.ResolveModelParams(model)
+
 	req := &llm.Request{
 		Model:       model,
 		Messages:    messages,
 		Tools:       a.deps.ToolExec.ListDefinitions(),
-		Temperature: DefaultTemperature,
-		TopP:        DefaultTopP,
-		MaxTokens:   DefaultMaxTokens,
+		Temperature: mp.Temperature,
+		TopP:        mp.TopP,
+		MaxTokens:   mp.MaxOutputTokens,
 		Stream:      true,
 		ToolChoice:  forceTool,
 	}
@@ -584,6 +652,20 @@ func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunO
 		deps.ConvSummary = a.deps.KIStore.GenerateKIIndex()
 	}
 
+	// Semantic Memory — retrieve relevant conversation fragments from vector memory.
+	if a.deps.MemoryStore != nil {
+		var query string
+		for i := len(a.history) - 1; i >= 0; i-- {
+			if a.history[i].Role == "user" {
+				query = a.history[i].Content
+				break
+			}
+		}
+		if query != "" {
+			deps.MemoryContent = a.deps.MemoryStore.FormatForPrompt(query, 5, 2000)
+		}
+	}
+
 	// Skills — summaries for prompt injection
 	if a.deps.SkillMgr != nil {
 		skills := a.deps.SkillMgr.List()
@@ -610,22 +692,6 @@ func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunO
 	return deps
 }
 
-// lastUserMessage returns the content of the most recent user message in history.
-func (a *AgentLoop) lastUserMessage() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for i := len(a.history) - 1; i >= 0; i-- {
-		if a.history[i].Role == "user" {
-			content := a.history[i].Content
-			// Truncate for embedding query efficiency
-			if len([]rune(content)) > 200 {
-				content = string([]rune(content)[:200])
-			}
-			return content
-		}
-	}
-	return ""
-}
 
 // buildRuntimeInfo generates runtime context (OS, time, model, workspace).
 func (a *AgentLoop) buildRuntimeInfo(model string) string {
@@ -709,6 +775,15 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 		}
 	}
 
+	// Hook: BeforeTool (Modifying — can alter args or skip)
+	if a.deps.Hooks != nil {
+		var skip bool
+		args, skip = a.deps.Hooks.FireBeforeTool(ctx, tc.Function.Name, args)
+		if skip {
+			return fmt.Sprintf("Tool '%s' skipped by hook", tc.Function.Name), nil
+		}
+	}
+
 	a.deps.Delta.OnToolStart(tc.ID, tc.Function.Name, args)
 	// Inject fully-configured brain store into tool context (single key, carries sessionID + workspaceDir)
 	toolCtx := ctx
@@ -725,6 +800,11 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 
 	a.deps.Delta.OnToolResult(tc.ID, tc.Function.Name, output, err)
 	a.deps.Security.AfterToolCall(ctx, tc.Function.Name, output, err)
+
+	// Hook: AfterTool (Void — logging, audit, stats)
+	if a.deps.Hooks != nil {
+		a.deps.Hooks.FireAfterTool(ctx, tc.Function.Name, output, err)
+	}
 
 	// --- Protocol Dispatch (centralized in protocol.go) ---
 	ps := a.protoState()
@@ -843,6 +923,11 @@ func (a *AgentLoop) doCompact() {
 	firstMsg := a.history[0] // Preserve regardless of role
 	a.mu.Unlock()
 
+	// Hook: BeforeCompact — save to vector memory before content is lost
+	if a.deps.Hooks != nil {
+		a.deps.Hooks.FireBeforeCompact(context.Background(), middle)
+	}
+
 	// Build summarization request
 	var content strings.Builder
 	for _, msg := range middle {
@@ -930,6 +1015,11 @@ CRITICAL: If the conversation contains content inside <preference_knowledge> or 
 	}
 	compacted = append(compacted, tail...)
 	a.history = compacted
+
+	// Hook: AfterCompact — notify of new compacted state
+	if a.deps.Hooks != nil {
+		go a.deps.Hooks.FireAfterCompact(context.Background(), compacted)
+	}
 }
 
 // forceTruncate keeps only system + last N messages.

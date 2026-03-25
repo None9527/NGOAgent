@@ -115,6 +115,13 @@ type Config struct {
 	MCP       MCPConfig       `yaml:"mcp"`
 	Search    SearchConfig    `yaml:"search"`
 	Embedding EmbeddingConfig `yaml:"embedding"`
+	Memory    MemoryConfig    `yaml:"memory"`
+}
+
+// MemoryConfig defines settings for the vector memory and diary subsystem.
+type MemoryConfig struct {
+	HalfLifeDays int `yaml:"half_life_days" json:"half_life_days"` // Time-decay half-life in days (default: 30, 0=no decay)
+	MaxFragments int `yaml:"max_fragments" json:"max_fragments"`   // Capacity limit (default: 0=unlimited)
 }
 
 // SearchConfig defines web search provider settings.
@@ -159,12 +166,17 @@ func (c *Config) LoadLocation() *time.Location {
 	return loc
 }
 
-// AgentConfig controls user-facing agent behavior.
+// AgentConfig controls user-facing agent behavior and LLM hyperparameters.
 type AgentConfig struct {
-	DefaultModel string `yaml:"default_model"`
-	PlanningMode bool   `yaml:"planning_mode"` // true=force plan, false=auto-detect
-	MaxSteps     int    `yaml:"max_steps"`     // Max agent loop steps (default: 200)
-	Workspace    string `yaml:"workspace"`     // Default working directory for shell commands
+	DefaultModel    string  `yaml:"default_model"`
+	PlanningMode    bool    `yaml:"planning_mode"`     // true=force plan, false=auto-detect
+	MaxSteps        int     `yaml:"max_steps"`          // Max agent loop steps (default: 200)
+	Workspace       string  `yaml:"workspace"`          // Default working directory for shell commands
+	Temperature     float64 `yaml:"temperature"`        // LLM sampling temperature, 0.0-2.0 (default: 0.7)
+	TopP            float64 `yaml:"top_p"`              // Nucleus sampling threshold, 0.0-1.0 (default: 0.9)
+	MaxOutputTokens int     `yaml:"max_output_tokens"` // Max tokens per LLM response (default: 8192)
+	ContextWindow   int     `yaml:"context_window"`     // Default context window for unknown models (default: 32768)
+	CompactRatio    float64 `yaml:"compact_ratio"`      // Trigger context compact at this usage ratio (default: 0.7)
 }
 
 // LLMConfig defines LLM provider connections.
@@ -174,11 +186,80 @@ type LLMConfig struct {
 
 // ProviderDef describes one LLM provider endpoint.
 type ProviderDef struct {
-	Name    string   `yaml:"name"`
-	Type    string   `yaml:"type"`
-	BaseURL string   `yaml:"base_url"`
-	APIKey  string   `yaml:"api_key"`
-	Models  []string `yaml:"models"`
+	Name        string                   `yaml:"name"`
+	Type        string                   `yaml:"type"`
+	BaseURL     string                   `yaml:"base_url"`
+	APIKey      string                   `yaml:"api_key"`
+	Models      []string                 `yaml:"models"`
+	ModelConfig map[string]ModelOverride `yaml:"model_config,omitempty"` // Per-model capability overrides
+}
+
+// ModelOverride allows per-model configuration of LLM parameters.
+// Values here take priority over AgentConfig globals and built-in DefaultPolicies.
+// Resolution order: ModelOverride > AgentConfig > hardcoded fallback.
+type ModelOverride struct {
+	ContextWindow   int     `yaml:"context_window" json:"context_window"`
+	MaxOutputTokens int     `yaml:"max_output_tokens" json:"max_output_tokens"`
+	Temperature     float64 `yaml:"temperature" json:"temperature"`
+	TopP            float64 `yaml:"top_p" json:"top_p"`
+}
+
+// ModelParams holds resolved parameters for a specific model.
+type ModelParams struct {
+	Temperature     float64
+	TopP            float64
+	MaxOutputTokens int
+	ContextWindow   int
+	CompactRatio    float64
+}
+
+// ResolveModelParams resolves LLM parameters for a specific model.
+// Priority: model_config[model] > agent global > hardcoded fallback.
+func (c *Config) ResolveModelParams(model string) ModelParams {
+	// Start with agent-level defaults (or hardcoded fallback)
+	p := ModelParams{
+		Temperature:     c.Agent.Temperature,
+		TopP:            c.Agent.TopP,
+		MaxOutputTokens: c.Agent.MaxOutputTokens,
+		ContextWindow:   c.Agent.ContextWindow,
+		CompactRatio:    c.Agent.CompactRatio,
+	}
+	// Apply hardcoded fallbacks for zero values
+	if p.Temperature == 0 {
+		p.Temperature = 0.7
+	}
+	if p.TopP == 0 {
+		p.TopP = 0.9
+	}
+	if p.MaxOutputTokens == 0 {
+		p.MaxOutputTokens = 8192
+	}
+	if p.ContextWindow == 0 {
+		p.ContextWindow = 32768
+	}
+	if p.CompactRatio == 0 {
+		p.CompactRatio = 0.7
+	}
+
+	// Override with per-model config (highest priority)
+	for _, prov := range c.LLM.Providers {
+		if mc, ok := prov.ModelConfig[model]; ok {
+			if mc.Temperature > 0 {
+				p.Temperature = mc.Temperature
+			}
+			if mc.TopP > 0 {
+				p.TopP = mc.TopP
+			}
+			if mc.MaxOutputTokens > 0 {
+				p.MaxOutputTokens = mc.MaxOutputTokens
+			}
+			if mc.ContextWindow > 0 {
+				p.ContextWindow = mc.ContextWindow
+			}
+			break
+		}
+	}
+	return p
 }
 
 // SecurityConfig defines the security policy.

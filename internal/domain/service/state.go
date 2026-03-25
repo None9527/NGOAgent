@@ -78,6 +78,7 @@ var ValidTransitions = []Transition{
 	{StateFatal, StateIdle},          // Reset
 	{StateAborted, StateIdle},        // Reset after abort
 	{StateDone, StateIdle},           // Reset for next turn
+	{StateDone, StatePrepare},        // PendingWake: subagent results continuation
 }
 
 // CanTransition checks if a state transition is valid.

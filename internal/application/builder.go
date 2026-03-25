@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,10 +18,12 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/cron"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/memory"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm/openai"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/mcp"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
@@ -28,6 +31,7 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
 	grpcserver "github.com/ngoclaw/ngoagent/internal/interfaces/grpc"
 	"github.com/ngoclaw/ngoagent/internal/interfaces/server"
+	"github.com/ngoclaw/ngoagent/pkg/ctxutil"
 	"gorm.io/gorm"
 )
 
@@ -49,6 +53,7 @@ type App struct {
 	MCPMgr       *mcp.Manager
 	SkillMgr     *skill.Manager
 	SecurityHook *security.Hook
+	SpawnTool    *tool.SpawnAgentTool // exposed for server-side EventPusher wiring
 	StopCh       chan struct{}
 }
 
@@ -86,6 +91,12 @@ func Build() (*App, error) {
 		}
 	}
 	router := llm.NewRouter(providers)
+	// Apply configured default model (without this, router uses first provider's first model)
+	if cfg.Agent.DefaultModel != "" {
+		if err := router.SetDefault(cfg.Agent.DefaultModel); err != nil {
+			log.Printf("Warning: default_model %q not found in providers, using fallback", cfg.Agent.DefaultModel)
+		}
+	}
 
 	homeDir := config.HomeDir()
 	promptEngine := prompt.NewEngineWithHome(homeDir)
@@ -136,6 +147,32 @@ func Build() (*App, error) {
 			cfg.Embedding.Provider, cfg.Embedding.Model, dims)
 	}
 
+	// Memory store — reuses same embedder as KI for vector conversation memory
+	var memStore *memory.Store
+	if cfg.Embedding.Provider != "" && cfg.Embedding.BaseURL != "" {
+		dims := cfg.Embedding.Dimensions
+		if dims == 0 {
+			dims = 1024
+		}
+		memEmbedder := knowledge.NewDashScopeEmbedder(
+			cfg.Embedding.BaseURL, cfg.Embedding.APIKey,
+			cfg.Embedding.Model, dims,
+		)
+		memDir := filepath.Join(brainDir, "memory_vec")
+		memCfg := memory.StoreConfig{
+			HalfLifeDays: cfg.Memory.HalfLifeDays,
+			MaxFragments: cfg.Memory.MaxFragments,
+		}
+		memStore = memory.NewStore(memEmbedder, memDir, memCfg)
+		log.Printf("[memory] Vector memory active: dir=%s halfLife=%d maxFrag=%d",
+			memDir, memCfg.HalfLifeDays, memCfg.MaxFragments)
+	}
+
+	// Diary store — daily markdown entries under memory/diary/
+	diaryDir := filepath.Join(config.HomeDir(), "memory", "diary")
+	diaryStore := memory.NewDiaryStore(diaryDir)
+	log.Printf("[diary] Diary store active: dir=%s", diaryDir)
+
 	workDir := workspaceDir
 	if workDir == "" {
 		workDir, _ = os.Getwd()
@@ -170,6 +207,7 @@ func Build() (*App, error) {
 	registry.Register(tool.NewNotifyUserTool())
 	registry.Register(&tool.UpdateProjectContextTool{})
 	registry.Register(tool.NewSaveKnowledgeTool(kiStore, kiRetriever, cfg.Embedding.SimilarityThreshold))
+	registry.Register(tool.NewRecallTool(kiRetriever, memStore, diaryStore))
 	registry.Register(tool.NewSendMessageTool(brainDir))
 	registry.Register(tool.NewTaskListTool(brainDir))
 	spawnTool := tool.NewSpawnAgentTool(nil) // Lazy: SpawnFunc set after loop creation
@@ -189,9 +227,15 @@ func Build() (*App, error) {
 	if kiRetriever != nil {
 		dedupChecker = kiRetriever
 	}
-	hookChain := service.NewPostRunHookChain(
-		service.NewKIDistillHook(func() service.KIStore { return kiStore }, kiDistiller, cfg.Embedding.SimilarityThreshold, dedupChecker),
-	)
+	hookChain := service.NewHookManager()
+	hookChain.Add(service.NewKIDistillHook(func() service.KIStore { return kiStore }, kiDistiller, cfg.Embedding.SimilarityThreshold, dedupChecker))
+	hookChain.AddToolHook(service.NewAuditHook())
+	hookChain.AddCompactHook(service.NewCompactAuditHook())
+	if memStore != nil {
+		hookChain.AddCompactHook(service.NewMemoryCompactHook(memStore, sessionID, dedupChecker))
+	}
+	// Diary hook: record run summary to daily diary after each session
+	hookChain.Add(service.NewDiaryHook(&diaryAdapter{store: diaryStore}))
 
 	baseDeps := service.Deps{
 		Config:       cfg,
@@ -209,6 +253,7 @@ func Build() (*App, error) {
 		HistoryStore: &historyAdapter{store: historyStore},
 		FileHistory:  fileHistory,
 		Hooks:        hookChain,
+		MemoryStore:  memStore,
 	}
 	factory := service.NewLoopFactory(baseDeps, 8) // max 8 concurrent runs
 
@@ -217,26 +262,146 @@ func Build() (*App, error) {
 	loop := service.NewAgentLoop(baseDeps)
 	loop.SetDelta(delta)
 
-	// Wire SpawnFunc via factory — creates independent subagent loops
+	// Wire SpawnFunc via factory — creates async subagent loops with barrier coordination
+	// IMPORTANT: loopPool is declared here as a pointer so the SpawnFunc closure can capture it
+	// by reference. It must be assigned BEFORE any SpawnFunc call (which only happens at runtime).
+	var loopPool *service.LoopPool
+
+	var barrierMu sync.Mutex
+	barriers := make(map[string]*service.SubagentBarrier) // keyed by sessionID for correctness
+
 	spawnTool.SetSpawnFunc(func(ctx context.Context, task string) (string, error) {
-		ch := service.NewSubagentChannel(nil) // Sync mode: no announce callback
-		run := factory.Create(sessionID, ch)
-		if err := factory.RunSync(ctx, run, task); err != nil {
-			return ch.Result(), err
+		// Get the RUNTIME session ID from context (injected by ChatStream)
+		// instead of the fixed builder-time sessionID variable.
+		runtimeSID := ctxutil.SessionIDFromContext(ctx)
+		if runtimeSID == "" {
+			runtimeSID = sessionID // fallback for backward compat (CLI mode)
 		}
-		return ch.Result(), nil
+
+		// Get the correct parent loop: the session's loopPool loop, not the single main loop.
+		var parentLoop *service.AgentLoop
+		if loopPool != nil {
+			parentLoop = loopPool.GetIfExists(runtimeSID)
+		}
+		if parentLoop == nil {
+			parentLoop = loop // fallback for backward compat (CLI mode)
+		}
+
+		// Get or create barrier for this parent session's turn (keyed by runtimeSID)
+		barrierMu.Lock()
+		b, exists := barriers[runtimeSID]
+		if !exists || b.Pending() == 0 {
+			// Create new barrier — captures parentLoop and runtimeSID at closure time
+			capturedLoop := parentLoop
+			capturedSID := runtimeSID
+			// Capture EventPusher for auto-wake done notification
+			var wakeEventPusher func(string, string, any)
+			if spawnTool.EventPusher != nil {
+				wakeEventPusher = spawnTool.EventPusher
+			}
+			b = service.NewSubagentBarrier(capturedLoop, func() {
+				// Auto-wake: re-run the parent loop to process subagent results.
+				// The loop's Delta is still the one set by the original ChatStream.
+				// For WS: wsWriter is still valid (no MarkDone), events flow through.
+				go func() {
+					log.Printf("[barrier] Auto-waking parent loop for session %s", capturedSID)
+					var wakeLoop *service.AgentLoop
+					if loopPool != nil {
+						wakeLoop = loopPool.GetIfExists(capturedSID)
+					}
+					if wakeLoop == nil {
+						wakeLoop = capturedLoop
+					}
+					if err := wakeLoop.Run(context.Background(), ""); err != nil {
+						log.Printf("[barrier] Auto-wake failed for session %s: %v (pendingWake likely handled it)", capturedSID, err)
+					} else {
+						// Only signal frontend if fallback Run actually succeeded.
+						// If Run failed ("agent is busy"), pendingWake already handled it
+						// and ChatStream's done event will clean up the frontend state.
+						if wakeEventPusher != nil {
+							wakeEventPusher(capturedSID, "auto_wake_done", map[string]string{"type": "auto_wake_done"})
+						}
+					}
+				}()
+				// Clean up barrier reference
+				barrierMu.Lock()
+				delete(barriers, capturedSID)
+				barrierMu.Unlock()
+			})
+			// Wire SSE/WS progress push if server has configured it
+			if spawnTool.EventPusher != nil {
+				pusher := spawnTool.EventPusher // capture
+				capturedSID2 := runtimeSID
+				b.SetProgressPush(func(runID, taskName, status string, done, total int, errMsg, output string) {
+					pusher(capturedSID2, "subagent_progress", map[string]any{
+						"type":      "subagent_progress",
+						"run_id":    runID,
+						"task_name": taskName,
+						"status":    status,
+						"done":      done,
+						"total":     total,
+						"error":     errMsg,
+						"output":    output,
+					})
+				})
+			}
+			barriers[runtimeSID] = b
+		}
+		barrierMu.Unlock()
+
+		taskName := "sub-agent"
+		// Extract task_name from task string if present
+		if idx := strings.Index(task, "\n"); idx > 0 {
+			firstLine := task[:idx]
+			if len(firstLine) < 60 {
+				taskName = firstLine
+			}
+		}
+
+		ch := service.NewSubagentChannel(func(runID, result string) {
+			// Route completion through barrier instead of direct ephemeral
+			b.OnComplete(runID, result, nil)
+		})
+		run := factory.Create(runtimeSID, ch)
+		run.Loop.InjectEphemeral(prompttext.EphSubAgentContext)
+		// Use Background context — subagent must survive parent loop completion.
+		// Parent context cancellation should NOT kill running subagents.
+		runID := factory.RunAsync(context.Background(), run, task)
+
+		// Register in barrier AFTER RunAsync so runID is known
+		b.Add(runID, taskName)
+
+		// Wire per-tool step push so SubagentDock shows current activity
+		if spawnTool.EventPusher != nil {
+			capturedPusher := spawnTool.EventPusher
+			capturedSID3 := runtimeSID
+			capturedRunID := runID
+			capturedName := taskName
+			ch.Collector().StepPush = func(toolName string) {
+				capturedPusher(capturedSID3, "subagent_progress", map[string]any{
+					"type":         "subagent_progress",
+					"run_id":       capturedRunID,
+					"task_name":    capturedName,
+					"status":       "running",
+					"done":         0,
+					"total":        0,
+					"current_step": toolName,
+				})
+			}
+		}
+		return runID, nil
 	})
 
 	// Per-session loop pool (uses factory baseDeps)
-	loopPool := service.NewLoopPool(func(sid string) *service.AgentLoop {
+	// NOTE: must be assigned AFTER spawnTool.SetSpawnFunc so the closure captures the pointer correctly.
+	loopPool = service.NewLoopPool(func(sid string) *service.AgentLoop {
 		return service.NewAgentLoop(baseDeps)
 	}, brainDir)
 
 	sessMgr := service.NewSessionManager(&sessionRepoAdapter{repo: repo, loc: cfg.LoadLocation()})
-	chatEngine := service.NewChatEngine(loop, sessMgr, &historyAdapter{store: historyStore})
+	chatEngine := service.NewChatEngine(loopPool, sessMgr, &historyAdapter{store: historyStore})
 	modelMgr := service.NewModelManager(router)
 	toolAdmin := service.NewToolAdmin(&toolRegistryAdapter{reg: registry})
-	_ = chatEngine // Used by server routes
 
 	// Register TitleDistillHook after sessMgr is available
 	hookChain.Add(service.NewTitleDistillHook(
@@ -353,11 +518,18 @@ func Build() (*App, error) {
 		// Auto-register MCP-discovered tools into agent registry
 		tool.RegisterMCPTools(registry, mcpMgr)
 	}
-	// Auto-promote executable skills into tool registry
+	// Unified skill activation: single use_skill tool + fallback for direct calls
+	useSkillTool := tool.NewUseSkillTool(skillMgr)
+	registry.Register(useSkillTool)
+	registry.SetSkillFallback(useSkillTool)
+	// Only register executable skills (with run.sh/run.py) as direct tools
 	for _, sk := range skillMgr.AutoPromote() {
-		registry.Register(tool.NewScriptTool(sk))
-		log.Printf("[skill] Auto-promoted: %s", sk.Name)
+		if sk.Type == "executable" || sk.Type == "hybrid" {
+			registry.Register(tool.NewScriptTool(sk))
+			log.Printf("[skill] Registered executable: %s", sk.Name)
+		}
 	}
+	log.Printf("[skill] use_skill tool registered with %d skills available", len(skillMgr.List()))
 
 	// ═══════════════════════════════════════════
 	// Phase 8: Unified API + Server
@@ -403,6 +575,7 @@ func Build() (*App, error) {
 		MCPMgr:       mcpMgr,
 		SkillMgr:     skillMgr,
 		SecurityHook: secHook,
+		SpawnTool:    spawnTool,
 		StopCh:       stopCh,
 	}, nil
 }
@@ -552,4 +725,21 @@ func (h *bootstrapReadyHook) OnRunComplete(_ context.Context, info service.RunIn
 			log.Printf("[bootstrap] System marked as ready after first conversation (session=%s)", info.SessionID)
 		}
 	}
+}
+
+// diaryAdapter bridges service.DiaryAppender → memory.DiaryStore
+// to avoid import cycle (service cannot import memory).
+type diaryAdapter struct {
+	store *memory.DiaryStore
+}
+
+func (a *diaryAdapter) Append(entry service.DiaryEntry) error {
+	return a.store.Append(memory.DiaryEntry{
+		Time:      entry.Time,
+		SessionID: entry.SessionID,
+		Task:      entry.Task,
+		ToolCount: entry.ToolCount,
+		Steps:     entry.Steps,
+		Result:    entry.Result,
+	})
 }

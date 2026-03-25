@@ -65,7 +65,7 @@ func TestEvolution_SecurityChain(t *testing.T) {
 		BlockList:    []string{"rm"},
 		SafeCommands: []string{"ls", "cat"},
 	}
-	hook := security.NewHook(cfg, nil)
+	hook := security.NewHook(cfg)
 
 	// Blocklist deny
 	ctx := context.Background()
@@ -118,7 +118,7 @@ func TestEvolution_SecurityChain(t *testing.T) {
 
 func TestEvolution_SecurityAuditLog(t *testing.T) {
 	cfg := &config.SecurityConfig{Mode: "allow"}
-	hook := security.NewHook(cfg, nil)
+	hook := security.NewHook(cfg)
 
 	// Generate some decisions
 	ctx := context.Background()
@@ -389,6 +389,14 @@ func (m *mockKIStore) SaveDistilled(title, summary, content string, tags, source
 
 func (m *mockKIStore) UpdateMerge(id, appendContent, newSummary string) error {
 	return nil
+}
+
+func (m *mockKIStore) ReplaceMerge(id, newContent, newSummary string) error {
+	return nil
+}
+
+func (m *mockKIStore) GetContent(id string) (string, error) {
+	return "", nil
 }
 
 func waitBrief() {

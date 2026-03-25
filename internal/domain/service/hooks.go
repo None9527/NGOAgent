@@ -4,10 +4,159 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
+
+// ═══════════════════════════════════════════
+// Lifecycle Hook Interfaces
+// ═══════════════════════════════════════════
+
+// ToolHook is called before/after each tool execution.
+// BeforeTool runs in Modifying mode: it can alter args or skip the tool entirely.
+type ToolHook interface {
+	BeforeTool(ctx context.Context, name string, args map[string]any) (newArgs map[string]any, skip bool)
+	AfterTool(ctx context.Context, name string, output string, err error)
+}
+
+// CompactHook is called before/after context compaction (Void mode).
+// BeforeCompact receives the full history before compression — use it to
+// persist important content (e.g., save to vector memory) before it's lost.
+type CompactHook interface {
+	BeforeCompact(ctx context.Context, history []llm.Message)
+	AfterCompact(ctx context.Context, compacted []llm.Message)
+}
+
+// MessageHook is called before sending a message to the user (Modifying mode).
+// It can modify the text or cancel sending entirely.
+type MessageHook interface {
+	OnMessageSending(ctx context.Context, text string) (newText string, cancel bool)
+}
+
+// HookManager is the centralized hook registry for all lifecycle events.
+// It wraps the existing PostRunHookChain and adds tool/compact/message hooks.
+type HookManager struct {
+	PostRun *PostRunHookChain
+	tool    []ToolHook
+	compact []CompactHook
+	message []MessageHook
+}
+
+// NewHookManager creates a HookManager with an empty PostRunHookChain.
+func NewHookManager() *HookManager {
+	return &HookManager{
+		PostRun: NewPostRunHookChain(),
+	}
+}
+
+// AddToolHook registers a tool lifecycle hook.
+func (m *HookManager) AddToolHook(h ToolHook) { m.tool = append(m.tool, h) }
+
+// AddCompactHook registers a compaction lifecycle hook.
+func (m *HookManager) AddCompactHook(h CompactHook) { m.compact = append(m.compact, h) }
+
+// AddMessageHook registers an outbound message hook.
+func (m *HookManager) AddMessageHook(h MessageHook) { m.message = append(m.message, h) }
+
+// FireBeforeTool executes all ToolHook.BeforeTool in order.
+// Returns potentially modified args and skip=true if any hook wants to skip.
+func (m *HookManager) FireBeforeTool(ctx context.Context, name string, args map[string]any) (map[string]any, bool) {
+	for _, h := range m.tool {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[hook] panic in ToolHook.BeforeTool: %v", r)
+				}
+			}()
+			newArgs, skip := h.BeforeTool(ctx, name, args)
+			if skip {
+				args = newArgs
+				return
+			}
+			if newArgs != nil {
+				args = newArgs
+			}
+		}()
+	}
+	return args, false
+}
+
+// FireAfterTool executes all ToolHook.AfterTool in order (void, no return).
+func (m *HookManager) FireAfterTool(ctx context.Context, name string, output string, err error) {
+	for _, h := range m.tool {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[hook] panic in ToolHook.AfterTool: %v", r)
+				}
+			}()
+			h.AfterTool(ctx, name, output, err)
+		}()
+	}
+}
+
+// FireBeforeCompact executes all CompactHook.BeforeCompact.
+func (m *HookManager) FireBeforeCompact(ctx context.Context, history []llm.Message) {
+	for _, h := range m.compact {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[hook] panic in CompactHook.BeforeCompact: %v", r)
+				}
+			}()
+			h.BeforeCompact(ctx, history)
+		}()
+	}
+}
+
+// FireAfterCompact executes all CompactHook.AfterCompact.
+func (m *HookManager) FireAfterCompact(ctx context.Context, compacted []llm.Message) {
+	for _, h := range m.compact {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[hook] panic in CompactHook.AfterCompact: %v", r)
+				}
+			}()
+			h.AfterCompact(ctx, compacted)
+		}()
+	}
+}
+
+// FireMessageSending executes all MessageHook.OnMessageSending in order.
+// Returns the final text and cancel=true if any hook cancels.
+func (m *HookManager) FireMessageSending(ctx context.Context, text string) (string, bool) {
+	for _, h := range m.message {
+		var cancel bool
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[hook] panic in MessageHook.OnMessageSending: %v", r)
+				}
+			}()
+			text, cancel = h.OnMessageSending(ctx, text)
+		}()
+		if cancel {
+			return text, true
+		}
+	}
+	return text, false
+}
+
+// OnRunComplete delegates to the internal PostRunHookChain.
+func (m *HookManager) OnRunComplete(ctx context.Context, info RunInfo) {
+	if m.PostRun != nil {
+		m.PostRun.OnRunComplete(ctx, info)
+	}
+}
+
+// Add delegates to PostRunHookChain.Add for backward compatibility.
+func (m *HookManager) Add(h PostRunHook) {
+	if m.PostRun == nil {
+		m.PostRun = NewPostRunHookChain()
+	}
+	m.PostRun.Add(h)
+}
 
 // PostRunHook is called after each agent run completes.
 type PostRunHook interface {
@@ -90,7 +239,9 @@ type KIDistillHook struct {
 // KIStore is the interface needed by the distillation hook.
 type KIStore interface {
 	SaveDistilled(title, summary, content string, tags, sources []string) error
-	UpdateMerge(id, appendContent, newSummary string) error // Merge content + refresh metadata
+	UpdateMerge(id, appendContent, newSummary string) error // Legacy append merge
+	ReplaceMerge(id, newContent, newSummary string) error   // Full replacement merge
+	GetContent(id string) (string, error)                   // Read existing content
 }
 
 // KIDuplicateChecker detects duplicate KIs using embedding similarity.
@@ -102,6 +253,7 @@ type KIDuplicateChecker interface {
 // KILLMDistiller abstracts the LLM call for knowledge distillation.
 type KILLMDistiller interface {
 	DistillKnowledge(messages []llm.Message) (*llm.KIResult, error)
+	MergeKnowledge(existingContent, newContent string) (*llm.KIResult, error)
 }
 
 // NewKIDistillHook creates the KI distillation hook.
@@ -158,19 +310,38 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		content := fmt.Sprintf("# %s\n\n%s\n\n---\n\n%s",
 			result.Title, result.Summary, result.Content)
 
-		// Dedup check: if a similar KI exists, merge instead of create
+		// Dedup check: if a similar KI exists, merge via LLM instead of concatenation
 		if h.dedup != nil {
 			queryText := result.Title + "\n" + result.Summary
 			dupID, score := h.dedup.FindDuplicate(queryText, h.dedupThreshold)
 			if dupID != "" {
 				log.Printf("[hook] KI dedup: merging into %q (score=%.3f)", dupID, score)
-				appendContent := fmt.Sprintf("\n\n---\n\n## Update from session %s\n\n%s", info.SessionID, result.Content)
-				mergeSummary := fmt.Sprintf("%s (updated: %s)", result.Summary, result.Title)
-				if err := store.UpdateMerge(dupID, appendContent, mergeSummary); err != nil {
-					log.Printf("[hook] KI dedup merge failed: %v", err)
+
+				// Read existing KI content for LLM merge
+				existingContent, err := store.GetContent(dupID)
+				if err != nil {
+					log.Printf("[hook] KI dedup: read existing failed: %v, falling back to append", err)
+					_ = store.UpdateMerge(dupID, "\n\n---\n\n"+result.Content, result.Summary)
+					_ = h.dedup.EmbedAndIndexByID(dupID)
+					return
+				}
+
+				// LLM merge: consolidate old + new into one concise document
+				merged, err := h.llm.MergeKnowledge(existingContent, result.Content)
+				if err != nil {
+					log.Printf("[hook] KI LLM merge failed: %v, falling back to append", err)
+					_ = store.UpdateMerge(dupID, "\n\n---\n\n"+result.Content, result.Summary)
+					_ = h.dedup.EmbedAndIndexByID(dupID)
+					return
+				}
+
+				// Replace (not append) with merged content
+				mergedContent := fmt.Sprintf("# %s\n\n%s\n\n---\n\n%s", merged.Title, merged.Summary, merged.Content)
+				if err := store.ReplaceMerge(dupID, mergedContent, merged.Summary); err != nil {
+					log.Printf("[hook] KI replace merge failed: %v", err)
 				} else {
 					_ = h.dedup.EmbedAndIndexByID(dupID)
-					log.Printf("[hook] KI dedup: merged into %q", dupID)
+					log.Printf("[hook] KI LLM merged into %q: %q", dupID, merged.Title)
 				}
 				return
 			}
@@ -227,10 +398,10 @@ func (h *TitleDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		return
 	}
 
-	// Timeout guard: title distillation must not block run completion indefinitely
-	done := make(chan struct{})
+	// Fire-and-forget: title generation runs in background, never blocks [DONE].
+	// 1. Persist to DB via SetTitle (frontend refreshSessions picks it up)
+	// 2. Best-effort SSE push via Delta.OnTitleUpdate (may miss if stream closed)
 	go func() {
-		defer close(done)
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[hook] panic in TitleDistillHook: %v", r)
@@ -247,12 +418,5 @@ func (h *TitleDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		}
 		log.Printf("[hook] title distilled: session=%s title=%q", info.SessionID, title)
 	}()
-
-	// Wait up to 30s — if LLM is slow, let it finish in background
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		log.Printf("[hook] title distill timed out after 30s for session=%s", info.SessionID)
-	}
 }
 

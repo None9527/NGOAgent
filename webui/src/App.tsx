@@ -1,12 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { ChatViewer } from './renderers/ChatViewer'
 import { InputForm } from './renderers/InputForm'
-import type { FileItem } from './renderers/InputForm'
-import { api, getApiBase, authFetch } from './chat/api'
-import { chatStream, checkActiveRun, reconnectStream } from './chat/streamHandler'
-import { historyToMessages } from './chat/messageMapper'
-import type { ChatMessageData, HealthInfo, SessionListItem, ApprovalRequest } from './chat/types'
-import { useChatScroll } from './hooks/useChatScroll'
+import { api, getApiBase } from './chat/api'
+import { chatStream, checkActiveRun } from './chat/streamHandler'
+import type { ChatMessageData } from './chat/types'
+import { useConfig } from './providers/ConfigProvider'
+import { useSession } from './providers/SessionProvider'
+import { useStream } from './providers/StreamProvider'
+import { useHub } from './providers/HubProvider'
+import { useUIStore } from './stores/uiStore'
 
 // Import new structural components
 import { Sidebar } from './components/Sidebar'
@@ -15,6 +17,7 @@ import { WelcomeScreen } from './components/WelcomeScreen'
 import { IntelligenceHub } from './components/IntelligenceHub/index'
 import { SettingsPage } from './components/SettingsPage'
 import { ConnectPage } from './components/ConnectPage'
+import { SubagentDock } from './components/SubagentDock'
 
 // Import styles
 import './renderers/styles/variables.css'
@@ -22,69 +25,49 @@ import './renderers/styles/timeline.css'
 import './renderers/styles/components.css'
 
 export default function App() {
-  const [inputText, setInputText] = useState('')
-  const [messages, setMessages] = useState<ChatMessageData[]>([])
-  const [isStreaming, setIsStreaming] = useState(false)
-  const [health, setHealth] = useState<HealthInfo | null>(null)
-  
-  // Session management
-  const [sessionId, setSessionId] = useState('')
-  const [sessions, setSessions] = useState<SessionListItem[]>([])
-  
-  // Model management
-  const [availableModels, setAvailableModels] = useState<string[]>([])
-  
-  // Layout state
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true) // Open by default on desktop
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  // ── Providers ──
+  const config = useConfig()
+  const session = useSession()
+  const stream = useStream()
+  const hub = useHub()
+  const { sessionId, sessions, messages, setSessionId, setSessions, setMessages, pendingScrollToEnd, loadHistory } = session
+  const { planMode, availableModels, health } = config
+  const {
+    isStreaming, streamPhase, connectionState, taskProgress, subagentProgress,
+    streamCallbacks, cancelRef,
+    scrollContainerRef, handleScroll, scrollToBottom, resetToBottom,
+    enterStreamingMode, exitStreamingMode,
+    pendingApprovals, setPendingApprovals,
+    planReview, setPlanReview,
+    setIsStreaming, setSubagentProgress,
+  } = stream
+  const subagentStats = subagentProgress.length > 0
+    ? { running: subagentProgress.filter(e => e.status === 'running').length, total: subagentProgress.length }
+    : null
 
-  // Spatial Right Hub State
-  const [isHubOpen, setIsHubOpen] = useState(false)
-  const [hubTab, setHubTab] = useState<'brain' | 'knowledge' | 'cron' | 'skills'>('brain')
-  const [brainRefreshTrigger, setBrainRefreshTrigger] = useState(0)
-  const [brainFocusTrigger, setBrainFocusTrigger] = useState<{ file: string; ts: number } | null>(null)
+  // ── UIStore (replaces 6 scattered useState) ──
+  const {
+    sidebarOpen: isSidebarOpen,
+    setSidebarOpen: setIsSidebarOpen,
+    settingsOpen: isSettingsOpen,
+    setSettingsOpen: setIsSettingsOpen,
+    inputText,
+    setInputText,
+    attachedFiles,
+    setAttachedFiles,
+    planFeedbackInput,
+    setPlanFeedbackInput,
+    showFeedbackInput,
+    setShowFeedbackInput,
+  } = useUIStore()
 
-  // Mode toggles (synced with config)
-  const [planMode, setPlanMode] = useState(false)   // false=Auto, true=Plan
-  const [securityMode, setSecurityMode] = useState('allow') // 'allow' | 'ask'
-
-  // File attachments
-  const [attachedFiles, setAttachedFiles] = useState<FileItem[]>([])
-
-  // Plan review state
-  const [planReview, setPlanReview] = useState<{ message: string; paths: string[] } | null>(null)
-  const [planFeedbackInput, setPlanFeedbackInput] = useState('')
-  const [showFeedbackInput, setShowFeedbackInput] = useState(false)
-
-  // Task progress state (from progress SSE events)
-  const [taskProgress, setTaskProgress] = useState<{
-    taskName: string; status: string; summary: string; mode: string
-  } | null>(null)
-  
-  
   const [connected, setConnected] = useState(() => {
     try {
       const t = localStorage.getItem('AUTH_TOKEN')
       return !!(t && t.trim())
     } catch { return false }
   })
-  const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([])
-  const cancelRef = useRef<(() => void) | null>(null)
   const inputRef = useRef<HTMLDivElement>(null)
-  // P0 perf: Map<uuid, index> for O(1) message lookups during streaming
-  const msgIndexRef = useRef<Map<string, number>>(new Map())
-  // Flag: set to true when loading history so the next messages commit triggers resetToBottom
-  const pendingScrollToEnd = useRef(false)
-  
-  // ── Sticky auto-scroll: all logic lives in the hook ──
-  const { 
-    scrollContainerRef, 
-    handleScroll, 
-    scrollToBottom, 
-    resetToBottom,
-    enterStreamingMode,
-    exitStreamingMode,
-  } = useChatScroll()
 
   // Reactive scroll-to-end: fires after React commits state from loadHistory
   useEffect(() => {
@@ -94,146 +77,36 @@ export default function App() {
     }
   }, [messages, resetToBottom])
 
-  // Helper: refresh session list from backend (throttled)
-  const lastRefreshRef = useRef(0)
-  const refreshSessions = useCallback(async () => {
-    // Throttle: at most once per 3s
-    const now = Date.now()
-    if (now - lastRefreshRef.current < 3000) return
-    lastRefreshRef.current = now
-    try {
-      const data = await api.listSessions()
-      setSessions(data.sessions)
-    } catch (err) {
-      console.error('Failed to fetch sessions', err)
-    }
-  }, [])
-
-  // Helper: load history for a single session (uses shared messageMapper)
-  const loadHistory = useCallback(async (sid: string) => {
-    try {
-      const data = await api.getHistory(sid)
-      setMessages(() => {
-        const msgs = historyToMessages(data.messages, sid)
-        // Rebuild index
-        const idx = new Map<string, number>()
-        msgs.forEach((m, i) => idx.set(m.uuid, i))
-        msgIndexRef.current = idx
-        return msgs
-      })
-      // Signal: next messages useEffect will snap to bottom after React commits
-      pendingScrollToEnd.current = true
-    } catch (err) {
-      console.error('Failed to load history', err)
-      setMessages([])
-    }
-  }, [resetToBottom])
-
   // Initialize: load existing sessions + health after connection is established
   useEffect(() => {
     if (!connected) return
     document.documentElement.classList.add('dark')
     ;(async () => {
       try {
-        // Lazy token validation: verify saved token is still valid
+        // Lazy token validation
         const configRes = await fetch(`${getApiBase()}/v1/config`, {
           headers: { 'Authorization': `Bearer ${localStorage.getItem('AUTH_TOKEN') || ''}` },
           signal: AbortSignal.timeout(5000),
         })
         if (configRes.status === 401) {
-          // Token invalid — kick back to ConnectPage
           localStorage.removeItem('AUTH_TOKEN')
           setConnected(false)
           return
         }
 
-        const h = await api.health()
-        setHealth(h)
-        const data = await api.listSessions()
-        setSessions(data.sessions)
-        if (data.active) {
-          setSessionId(data.active)
-        }
-        // Load available models
-        const modelsData = await api.listModels()
-        setAvailableModels(modelsData.models || [])
-        // Sync mode toggles from config
-        const cfg = await configRes.json()
-        setPlanMode(!!cfg?.agent?.planning_mode)
-        setSecurityMode(cfg?.security?.mode || 'allow')
+        await config.initialize()
+        const { activeSessionId } = await session.initialize()
 
-        // Auto-reconnect: load history first, then reconnect for incremental events
-        const activeSessionId = data.active
         if (activeSessionId) {
-          // Always load DB history first — this gives us the full conversation
           await loadHistory(activeSessionId)
 
           const runStatus = await checkActiveRun(activeSessionId)
           if (runStatus.active && !runStatus.done) {
-            console.log('[App] Active run detected, loading history + reconnecting SSE (lastSeq=%d)...', runStatus.lastSeq)
-            setIsStreaming(true)
-            enterStreamingMode()
-            const handle = reconnectStream(activeSessionId, runStatus.lastSeq, {
-              onMessage: (msg) => setMessages(prev => {
-                if (prev.some(m => m.uuid === msg.uuid)) return prev
-                return [...prev, msg]
-              }),
-              onUpdate: (uuid, patch) => {
-                setMessages(prev => prev.map(m => {
-                  if (m.uuid !== uuid) return m
-                  if (patch.toolCall && m.toolCall) {
-                    return {
-                      ...m, ...patch,
-                      toolCall: {
-                        ...m.toolCall, ...patch.toolCall,
-                        title: patch.toolCall.title || m.toolCall.title,
-                        rawInput: patch.toolCall.rawInput || m.toolCall.rawInput,
-                        content: patch.toolCall.content && patch.toolCall.content.length > 0
-                          ? patch.toolCall.content : m.toolCall.content,
-                      },
-                    }
-                  }
-                  return { ...m, ...patch }
-                }))
-                if (patch.toolCall?.status === 'completed' && patch.toolCall?.kind) {
-                  const kind = patch.toolCall.kind as string
-                  if (['write', 'edit', 'updated_plan'].includes(kind)) {
-                    setBrainRefreshTrigger(prev => prev + 1)
-                  }
-                }
-              },
-              onToolCall: (msg) => setMessages(prev => {
-                if (prev.some(m => m.uuid === msg.uuid)) return prev
-                return [...prev, msg]
-              }),
-              onApproval: (req) => setPendingApprovals(prev => [...prev, req]),
-              onPlanReview: (message, paths) => setPlanReview({ message, paths }),
-              onStepDone: () => refreshSessions(),
-              onTitleUpdate: (sid, title) => {
-                setSessions(prev => prev.map(s => s.id === sid ? { ...s, title } : s))
-              },
-              onProgress: (taskName, status, summary, mode) => setTaskProgress({ taskName, status, summary, mode }),
-              onEnd: () => {
-                setIsStreaming(false)
-                exitStreamingMode()
-                setTaskProgress(null)
-                cancelRef.current = null
-                refreshSessions()
-              },
-              onError: (err) => { 
-                setIsStreaming(false)
-                exitStreamingMode()
-                setTaskProgress(null)
-                cancelRef.current = null
-                console.error('Reconnect error:', err) 
-              },
-            })
-            cancelRef.current = handle.cancel
+            console.log('[App] Active run detected, reconnecting SSE (lastSeq=%d)...', runStatus.lastSeq)
+            stream.reconnect(activeSessionId, runStatus.lastSeq)
           }
         }
       } catch (err: unknown) {
-        // Network error during init — don't kick to ConnectPage, just log
-        // (user might be offline temporarily, token is still saved)
         console.error('Init failed after connect:', err)
       }
     })()
@@ -241,11 +114,7 @@ export default function App() {
 
   const handleNewSession = async () => {
     try {
-      const sess = await api.newSession()
-      setSessionId(sess.session_id)
-      setMessages([])
-      await refreshSessions()
-      // Auto-hide sidebar on mobile if needed
+      await session.newSession()
       if (window.innerWidth < 768) setIsSidebarOpen(false) 
     } catch (err) {
       console.error('Failed to create new session', err)
@@ -253,56 +122,44 @@ export default function App() {
   }
 
   const handleSelectSession = async (id: string) => {
-    // Cancel any active stream before switching sessions
+    // Disconnect current SSE stream before switching — but isolate the cancel
+    // to prevent the old stream's async onEnd from overwriting reconnect state.
     if (cancelRef.current) {
-      cancelRef.current()
+      const oldCancel = cancelRef.current
+      // Clear ref BEFORE canceling so async onEnd can't null our new handler
       cancelRef.current = null
       setIsStreaming(false)
       exitStreamingMode()
-      setTaskProgress(null)
       setPendingApprovals([])
       setPlanReview(null)
+      // Now abort — onEnd will fire asynchronously but cancelRef is already null
+      // so onEnd's `cancelRef.current = null` is harmless
+      oldCancel()
     }
     setSessionId(id)
     await loadHistory(id)
+
+    // Small delay to let the old stream's async onEnd settle before we reconnect
+    await new Promise(r => setTimeout(r, 50))
+
+    // Check if target session has an active run — reconnect if so
+    try {
+      const runStatus = await checkActiveRun(id)
+      if (runStatus.active && !runStatus.done) {
+        console.log('[App] Target session has active run, reconnecting SSE (lastSeq=%d)...', runStatus.lastSeq)
+        stream.reconnect(id, runStatus.lastSeq)
+      }
+    } catch (err) {
+      console.warn('[App] Failed to check active run on session switch:', err)
+    }
+
     if (window.innerWidth < 768) setIsSidebarOpen(false)
   }
 
-  const handleDeleteSession = async (id: string) => {
-    try {
-      await api.deleteSession(id)
-      await refreshSessions()
-      // If deleted the current session, create a new one
-      if (id === sessionId) {
-        const sess = await api.newSession()
-        setSessionId(sess.session_id)
-        setMessages([])
-      }
-    } catch (err) {
-      console.error('Failed to delete session', err)
-    }
-  }
+  const handleDeleteSession = (id: string) => session.deleteSession(id)
+  const handleRenameSession = (id: string, t: string) => session.renameSession(id, t)
 
-  const handleRenameSession = async (id: string, newTitle: string) => {
-    try {
-      await api.setSessionTitle(id, newTitle)
-      await refreshSessions()
-    } catch (err) {
-      console.error('Failed to rename session', err)
-    }
-  }
-
-  const handleModelSwitch = async (modelName: string) => {
-    try {
-      await api.switchModel(modelName)
-      // Refresh health to get updated model
-      const h = await api.health()
-      setHealth(h)
-    } catch (err) {
-      console.error('Failed to switch model', err)
-      console.error('Failed to switch model:', err)
-    }
-  }
+  const handleModelSwitch = (modelName: string) => config.switchModel(modelName)
 
   const handleSuggestionClick = (suggestionText: string) => {
     setInputText(suggestionText)
@@ -310,6 +167,39 @@ export default function App() {
       inputRef.current.focus()
     }
   }
+
+  // Retry — re-generate the last assistant response
+  // Flow: strip backend history → strip UI messages → re-send through normal chat
+  const sendRef = useRef<((e?: React.FormEvent, overrideText?: string) => void) | undefined>(undefined)
+  const handleRetry = useCallback(async () => {
+    if (!sessionId) return
+    try {
+      const { last_message } = await api.retry(sessionId)
+      if (!last_message) return
+      // Strip assistant/tool messages from UI (keep up to last user msg)
+      setMessages(prev => {
+        const lastUserIdx = [...prev].reverse().findIndex(m => m.type === 'user')
+        if (lastUserIdx === -1) return prev
+        return prev.slice(0, prev.length - lastUserIdx)
+      })
+      // Directly re-send: add user message + start stream (bypass handleSend to avoid stale isStreaming closure)
+      const userMsg: ChatMessageData = {
+        uuid: `user-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        message: { role: 'user', parts: [{ text: last_message }] },
+      }
+      setMessages(prev => [...prev, userMsg])
+      setIsStreaming(true)
+      setSubagentProgress([])
+      enterStreamingMode()
+      scrollToBottom('instant')
+      const handle = chatStream(last_message, sessionId, planMode, streamCallbacks)
+      cancelRef.current = handle.cancel
+    } catch (err) {
+      console.error('[retry] failed:', err)
+    }
+  }, [sessionId, planMode, streamCallbacks])
 
   // Send message — overrideText allows direct send from banner buttons
   const handleSend = useCallback(async (e?: React.FormEvent, overrideText?: string) => {
@@ -326,14 +216,17 @@ export default function App() {
         const sess = await api.newSession()
         sid = sess.session_id
         setSessionId(sid)
+        // Immediately add to sidebar before refresh
+        setSessions(prev => [{
+          id: sid, title: '', channel: 'web',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }, ...prev])
       } catch (err) {
         console.error('Failed to create session', err)
         return
       }
     }
-
-    // Refresh session list in background
-    refreshSessions()
 
     // Build message text with file attachments if any
     const uploadedFiles = attachedFiles.filter(f => f.status === 'uploaded' && f.path)
@@ -356,149 +249,18 @@ export default function App() {
     }
     setMessages(prev => [...prev, userMsg])
     setIsStreaming(true)
-    enterStreamingMode()  // 进入流式模式，启用节流优化
+    setSubagentProgress([]) // Clear previous sub-agent data
+    enterStreamingMode()
     scrollToBottom('instant') // User action: snap immediately, no animation
 
-    const handle = chatStream(finalText, sid, {
-      onMessage: (msg) => {
-        setMessages(prev => {
-          if (prev.some(m => m.uuid === msg.uuid)) return prev
-          msgIndexRef.current.set(msg.uuid, prev.length)
-          return [...prev, msg]
-        })
-      },
-      onUpdate: (uuid, patch) => {
-        setMessages(prev => {
-          const idx = msgIndexRef.current.get(uuid)
-          if (idx === undefined) return prev
-          const m = prev[idx]
-          if (!m) return prev
-          const next = [...prev]
-          // Deep merge toolCall
-          if (patch.toolCall && m.toolCall) {
-            next[idx] = {
-              ...m, ...patch,
-              toolCall: {
-                ...m.toolCall,
-                ...patch.toolCall,
-                title: patch.toolCall.title || m.toolCall.title,
-                rawInput: patch.toolCall.rawInput || m.toolCall.rawInput,
-                content: patch.toolCall.content && patch.toolCall.content.length > 0
-                  ? patch.toolCall.content
-                  : m.toolCall.content,
-              },
-            }
-          } else {
-            next[idx] = { ...m, ...patch }
-          }
-          return next
-        })
-        
-        // Reactive Intelligence Hub: Refresh Brain file list when a file/plan operation completes
-        if (patch.toolCall?.status === 'completed' && patch.toolCall?.kind) {
-          const kind = patch.toolCall.kind as string
-          if (['write', 'edit', 'updated_plan'].includes(kind)) {
-            setBrainRefreshTrigger(prev => prev + 1)
-          }
-        }
-      },
-      onToolCall: (msg) => {
-        setMessages(prev => {
-          if (prev.some(m => m.uuid === msg.uuid)) return prev
-          msgIndexRef.current.set(msg.uuid, prev.length)
-          return [...prev, msg]
-        })
-        // Reactive Intelligence Hub: Auto-open Brain tab for file/plan operations
-        if (msg.toolCall && ['write', 'edit', 'updated_plan'].includes(msg.toolCall.kind)) {
-          setHubTab('brain')
-          setIsHubOpen(true)
-          // Auto-focus specific artifact when task_plan starts (rawInput available at tool_start)
-          if (msg.toolCall.kind === 'updated_plan' && msg.toolCall.rawInput) {
-            const planType = (msg.toolCall.rawInput as Record<string, unknown>).type as string
-            const fileMap: Record<string, string> = { plan: 'plan.md', task: 'task.md', walkthrough: 'walkthrough.md' }
-            const targetFile = fileMap[planType]
-            if (targetFile) {
-              // Delay to allow tool execution + refresh to populate the file
-              setTimeout(() => setBrainFocusTrigger({ file: targetFile, ts: Date.now() }), 800)
-            }
-          }
-        }
-      },
-      onApproval: (req) => {
-          setPendingApprovals(prev => [...prev, req])
-        },
-      onPlanReview: (message, paths) => {
-          setPlanReview({ message, paths })
-        },
-      onStepDone: () => {
-          refreshSessions()
-        },
-      onTitleUpdate: (sid, title) => {
-          setSessions(prev => prev.map(s => s.id === sid ? { ...s, title } : s))
-        },
-      onProgress: (taskName, status, summary, mode) => {
-          setTaskProgress({ taskName, status, summary, mode })
-        },
-      onEnd: () => {
-          setIsStreaming(false)
-          exitStreamingMode()
-          setTaskProgress(null)
-          cancelRef.current = null
-          refreshSessions()
-        },
-      onError: (err) => { 
-        setIsStreaming(false)
-        exitStreamingMode()
-        setTaskProgress(null)
-        cancelRef.current = null
-        console.error('Stream error:', err)
-        // Show error to user as a visible message card
-        const errText = err instanceof Error ? err.message : String(err)
-        setMessages(prev => [...prev, {
-          uuid: `err-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          type: 'assistant' as const,
-          message: { role: 'model', parts: [{ text: `⚠️ **Error:** ${errText}` }] },
-        }])
-      },
-    })
+    const handle = chatStream(finalText, sid, planMode, streamCallbacks)
     cancelRef.current = handle.cancel
-  }, [inputText, isStreaming, sessionId, attachedFiles])
-
-  // Stop — signal backend first, then abort SSE stream
-  const handleStop = useCallback(async () => {
-    if (!isStreaming) return
-    // Signal backend to abort the correct session's agent loop
-    try { await api.stop(sessionId) } catch { /* ignore */ }
-    // Abort the SSE connection (triggers onError which also sets isStreaming=false)
-    cancelRef.current?.()
-    cancelRef.current = null
-    setIsStreaming(false)
-    exitStreamingMode()  // 退出流式模式
-    setTaskProgress(null)
-  }, [isStreaming, exitStreamingMode, sessionId])
+  }, [inputText, isStreaming, sessionId, attachedFiles, streamCallbacks])
+  sendRef.current = handleSend
 
   // Gate: show ConnectPage until authenticated
   if (!connected) {
     return <ConnectPage onConnected={() => setConnected(true)} />
-  }
-
-  const handleTogglePlanMode = async () => {
-    const next = !planMode
-    await authFetch('/api/v1/config', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: 'agent.planning_mode', value: next })
-    })
-    setPlanMode(next)
-  }
-
-  const handleToggleSecurityMode = async () => {
-    const next = securityMode === 'allow' ? 'ask' : 'allow'
-    await authFetch('/api/v1/config', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: 'security.mode', value: next })
-    })
-    setSecurityMode(next)
   }
 
   return (
@@ -513,10 +275,7 @@ export default function App() {
         onNewSession={handleNewSession}
         onDeleteSession={handleDeleteSession}
         onRenameSession={handleRenameSession}
-        onOpenHubTab={(tab: 'brain' | 'knowledge' | 'cron' | 'skills') => {
-          setHubTab(tab)
-          setIsHubOpen(true)
-        }}
+        onOpenHubTab={(tab: 'brain' | 'knowledge' | 'cron' | 'skills') => hub.openTab(tab)}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
 
@@ -525,8 +284,11 @@ export default function App() {
         <TopNavbar 
           onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} 
           modelName={health?.model || ''}
-          onToggleHub={() => setIsHubOpen(!isHubOpen)}
-          isHubOpen={isHubOpen}
+          onToggleHub={hub.toggle}
+          isHubOpen={hub.isOpen}
+          connectionState={connectionState}
+          isStreaming={isStreaming}
+          subagentStats={subagentStats}
           availableModels={availableModels}
           currentModel={health?.model || ''}
           onModelSelect={handleModelSwitch}
@@ -658,10 +420,9 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => {
-                    setIsHubOpen(true)
-                    setHubTab('brain')
+                    hub.openTab('brain')
                     if (planReview.paths.length > 0) {
-                      setBrainFocusTrigger({ file: planReview.paths[0].split('/').pop() || 'plan.md', ts: Date.now() })
+                      hub.focusFile(planReview.paths[0].split('/').pop() || 'plan.md')
                     }
                   }}
                   className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 transition-all hover:scale-105"
@@ -701,20 +462,20 @@ export default function App() {
               </div>
             ) : (
             <div className="w-full flex flex-col relative">
-              <ChatViewer messages={messages} theme="dark" sessionId={sessionId} />
+              <ChatViewer
+                messages={messages}
+                theme="dark"
+                sessionId={sessionId}
+                onRetry={handleRetry}
+                customScrollParent={scrollContainerRef.current}
+                isStreaming={streamPhase === 'streaming' || streamPhase === 'auto_waking'}
+              />
 
-              {/* Thinking indicator: visible after user sends, before first token */}
-              {isStreaming && messages.length > 0 && messages[messages.length - 1].type === 'user' && (
-                <div className="flex items-center gap-1.5 px-2 py-4">
-                  <span className="w-1.5 h-1.5 rounded-full bg-white/20 animate-pulse" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-white/20 animate-pulse [animation-delay:0.3s]" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-white/20 animate-pulse [animation-delay:0.6s]" />
-                </div>
-              )}
+
 
               {/* Live Task Progress Card */}
               {taskProgress && (
-                <div className="w-full rounded-xl border border-white/[0.06] bg-[#1a1a1a] px-4 py-3 mb-2 animate-in fade-in">
+                <div className="w-full rounded-xl border border-white/[0.06] bg-[#1a1a1a] px-4 py-3 mt-3 mb-2 relative z-[1] transition-all duration-200">
                   <div className="flex items-center gap-2 mb-1.5">
                     <span className={`inline-block w-2 h-2 rounded-full animate-pulse ${
                       taskProgress.mode === 'planning' ? 'bg-blue-400' :
@@ -735,48 +496,20 @@ export default function App() {
               )}
             </div>
             )}
-            {/* Bottom spacer: prevents floating composer from covering last message */}
-            <div className="h-[200px] md:h-[250px] w-full flex-shrink-0 pointer-events-none" aria-hidden="true" />
           </div>
         </div>
         {/* Floating Composer Container (Anchored to main bounds, compensated for 6px custom scrollbar width) */}
         <div className="absolute bottom-0 left-0 w-full pointer-events-none z-10 pr-[6px]" 
              style={{ background: 'linear-gradient(to bottom, transparent, rgba(0,0,0,0.5) 40%, rgba(0,0,0,0.95) 100%)' }}>
           <div className="w-full max-w-4xl mx-auto px-1 md:px-4 pb-2 md:pb-8 pt-10 md:pt-24 pointer-events-auto">
+            <SubagentDock />
             <InputForm
               inputText={inputText}
+              inputFieldRef={inputRef as React.RefObject<HTMLDivElement>}
               onInputChange={setInputText}
               onSubmit={handleSend}
-              onCancel={handleStop}
-              onCompositionStart={() => {}}
-              onCompositionEnd={() => {}}
-              onKeyDown={() => {}}
-              onToggleEditMode={handleTogglePlanMode}
-              onToggleThinking={() => {}}
-              onToggleSkipAutoActiveContext={() => {}}
               attachedFiles={attachedFiles}
-              onFilesChange={(filesOrUpdater) => {
-                if (typeof filesOrUpdater === 'function') {
-                  setAttachedFiles(filesOrUpdater)
-                } else {
-                  setAttachedFiles(filesOrUpdater)
-                }
-              }}
-
-              onToggleSecurityMode={handleToggleSecurityMode}
-              securityModeLabel={securityMode === 'allow' ? 'Allow' : 'Ask'}
-              inputFieldRef={inputRef as React.RefObject<HTMLDivElement>}
-              isStreaming={isStreaming}
-              isWaitingForResponse={isStreaming}
-              isComposing={false}
-              editModeInfo={{ label: planMode ? 'Plan' : 'Auto', title: planMode ? 'Planning mode' : 'Auto mode', icon: null }}
-              thinkingEnabled={true}
-              activeFileName={null}
-              activeSelection={null}
-              skipAutoActiveContext={false}
-              contextUsage={null}
-              completionIsOpen={false}
-              placeholder={isStreaming ? 'Agent is thinking...' : 'Message NGOAgent...'}
+              onFilesChange={setAttachedFiles}
             />
             
             <div className="text-center text-xs mt-2 text-gray-600">
@@ -787,14 +520,14 @@ export default function App() {
       </main>
 
       {/* ═══ The Unified Intelligence Hub (Right Pane) ═══ */}
-      {isHubOpen && (
+      {hub.isOpen && (
         <IntelligenceHub 
           sessionId={sessionId}
-          activeTab={hubTab}
-          onTabChange={setHubTab}
-          onClose={() => setIsHubOpen(false)}
-          refreshTrigger={brainRefreshTrigger}
-          brainFocusTrigger={brainFocusTrigger}
+          activeTab={hub.tab}
+          onTabChange={hub.setTab}
+          onClose={hub.close}
+          refreshTrigger={hub.brainRefreshTrigger}
+          brainFocusTrigger={hub.brainFocusTrigger}
         />
       )}
 

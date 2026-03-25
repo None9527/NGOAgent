@@ -11,6 +11,7 @@ export default defineConfig({
       '/v1': {
         target: 'http://127.0.0.1:19997',
         changeOrigin: true,
+        ws: true,
       },
       '/api': {
         target: 'http://127.0.0.1:19997',

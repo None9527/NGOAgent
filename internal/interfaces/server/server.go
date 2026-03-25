@@ -24,9 +24,10 @@ import (
 // application.AgentAPI satisfies this interface implicitly.
 type API interface {
 	// Chat — unified streaming entry point
-	ChatStream(ctx context.Context, sessionID, message string, delta *service.Delta) error
+	ChatStream(ctx context.Context, sessionID, message, mode string, delta *service.Delta) error
 	SessionID(sessionID string) string
 	StopRun(sessionID string)
+	RetryRun(ctx context.Context, sessionID string) (string, error)
 	Approve(approvalID string, approved bool) error
 
 	// Session
@@ -102,6 +103,7 @@ type Server struct {
 	authToken  string // Bearer token for API auth (empty = no auth)
 	mu         sync.Mutex
 	runTracker *service.RunTracker
+	wsTracker  sync.Map // sessionID → *wsConn (active WebSocket connections)
 }
 
 // NewServer creates an HTTP server with the unified API.
@@ -112,6 +114,24 @@ func NewServer(api API, addr string, authToken string) *Server {
 		authToken:  authToken,
 		runTracker: service.NewRunTracker(),
 	}
+}
+
+// PushEvent sends a custom event to the specified session's stream.
+// Checks WebSocket connections first, falls back to SSE RunTracker.
+func (s *Server) PushEvent(sessionID, eventType string, data any) {
+	// Try WS path first
+	if ws, ok := s.wsTracker.Load(sessionID); ok {
+		log.Printf("[push] %s → WS for session %s", eventType, sessionID)
+		ws.(*wsConn).pushEvent(eventType, data)
+		return
+	}
+	// Fallback to SSE RunTracker
+	run, ok := s.runTracker.Get(sessionID)
+	if !ok {
+		log.Printf("[push] %s → NO target for session %s (no WS, no SSE)", eventType, sessionID)
+		return
+	}
+	run.Buffer.EmitDirect(eventType, data)
 }
 
 // authMiddleware validates Bearer token on all requests except exempted paths.
@@ -133,8 +153,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		if auth != "" && strings.HasPrefix(auth, "Bearer ") {
 			token = auth[7:]
 		}
-		// Fallback: allow ?token= query param for /v1/file (img/media tags can't send headers)
-		if token == "" && r.URL.Path == "/v1/file" {
+		// Fallback: allow ?token= query param for /v1/file and /v1/ws
+		if token == "" && (r.URL.Path == "/v1/file" || r.URL.Path == "/v1/ws") {
 			token = r.URL.Query().Get("token")
 		}
 		if token != s.authToken {
@@ -157,6 +177,10 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/v1/chat/status", s.handleRunStatus)
 	mux.HandleFunc("/v1/approve", s.handleApprove)
 	mux.HandleFunc("/v1/stop", s.handleStop)
+	mux.HandleFunc("/v1/retry", s.handleRetry)
+
+	// ─── WebSocket ───
+	mux.HandleFunc("/v1/ws", s.handleWS)
 
 	// ─── Health / Models / Config (read) ───
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +257,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		Message   string `json:"message"`
 		Stream    bool   `json:"stream"`
 		SessionID string `json:"session_id"`
+		Mode      string `json:"mode"` // "auto" | "plan" | "agentic"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -288,7 +313,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			disconnected = true
 			return false
 		}
-		flusher.Flush()
+		// Flush may panic if the underlying connection is already closed
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					disconnected = true
+				}
+			}()
+			flusher.Flush()
+		}()
+		if disconnected {
+			return false
+		}
 		return true
 	}
 
@@ -307,7 +343,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := s.api.ChatStream(runCtx, req.SessionID, req.Message, delta); err != nil {
+		if err := s.api.ChatStream(runCtx, req.SessionID, req.Message, req.Mode, delta); err != nil {
 			if err.Error() == "agent is busy" {
 				data, _ := json.Marshal(map[string]string{"type": "error", "message": "agent is busy"})
 				buf.MakeDelta().OnError(fmt.Errorf("%s", string(data)))
@@ -483,6 +519,29 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
 }
 
+// handleRetry strips the last assistant turn from history and returns
+// the last user message so the frontend can re-send via the normal chat flow.
+func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, `{"error":"session_id required"}`, http.StatusBadRequest)
+		return
+	}
+	lastMsg, err := s.api.RetryRun(context.Background(), req.SessionID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "last_message": lastMsg})
+}
+
 // handleSlash processes slash commands via HTTP.
 func (s *Server) handleSlash(w http.ResponseWriter, r *http.Request) {
 	cmd := strings.TrimPrefix(r.URL.Path, "/v1/slash/")
@@ -526,17 +585,7 @@ func (s *Server) execSlash(input string) string {
 		return "Forge mode activated. Use the forge tool to begin."
 
 	case "/plan":
-		c := s.api.GetConfig()
-		agent, _ := c["agent"].(map[string]any)
-		planMode, _ := agent["planning_mode"].(bool)
-		newMode := !planMode
-		if err := s.api.SetConfig("agent.planning_mode", newMode); err != nil {
-			return fmt.Sprintf("Failed to toggle planning mode: %v", err)
-		}
-		if newMode {
-			return "Planning mode: ON — 复杂任务将先制定计划再执行"
-		}
-		return "Planning mode: OFF — 自动判断是否需要计划"
+		return "请使用输入框旁的模式切换 pill（⭐ Auto / 📋 Plan / 🤖 Agentic）"
 
 	case "/status":
 		stats := s.api.GetContextStats()

@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,6 +34,11 @@ type BufferedDelta struct {
 	done     bool      // true after OnComplete/OnError
 	expireAt time.Time // auto-cleanup deadline after done
 	doneCh   chan struct{} // closed when done=true, for select-based waiters
+
+	// Text throttling: merge high-frequency token deltas into 150ms batches
+	throttleMu    sync.Mutex
+	throttleBuf   strings.Builder
+	throttleTimer *time.Timer
 }
 
 // NewBufferedDelta creates a buffer, optionally with an initial live writer.
@@ -141,17 +147,54 @@ func (bd *BufferedDelta) LastSeqID() int {
 	return bd.seqID
 }
 
+// EmitDirect pushes a custom event into the SSE stream.
+// Used by external components (e.g., SubagentBarrier) to send progress events
+// to the parent session without going through the DeltaSink interface.
+func (bd *BufferedDelta) EmitDirect(eventType string, data any) {
+	bd.emit(eventType, data)
+}
+
 // MakeDelta returns a *Delta that routes all callbacks through this BufferedDelta.
 // The server creates this once and binds it to the AgentLoop.
+// flushThrottledText emits any buffered text delta as a single merged event.
+// Called by the throttle timer and on complete/error to ensure no data is lost.
+func (bd *BufferedDelta) flushThrottledText() {
+	bd.throttleMu.Lock()
+	if bd.throttleBuf.Len() == 0 {
+		bd.throttleMu.Unlock()
+		return
+	}
+	text := bd.throttleBuf.String()
+	bd.throttleBuf.Reset()
+	if bd.throttleTimer != nil {
+		bd.throttleTimer.Stop()
+		bd.throttleTimer = nil
+	}
+	bd.throttleMu.Unlock()
+
+	bd.emit("text_delta", map[string]string{"type": "text_delta", "content": text})
+}
+
+// MakeDelta returns a *Delta that routes all callbacks through this BufferedDelta.
+// The server creates this once and binds it to the AgentLoop.
+// Text deltas are throttled at 150ms intervals to reduce SSE event frequency.
 func (bd *BufferedDelta) MakeDelta() *Delta {
 	return &Delta{
 		OnTextFunc: func(text string) {
-			bd.emit("text_delta", map[string]string{"type": "text_delta", "content": text})
+			bd.throttleMu.Lock()
+			bd.throttleBuf.WriteString(text)
+			if bd.throttleTimer == nil {
+				bd.throttleTimer = time.AfterFunc(150*time.Millisecond, func() {
+					bd.flushThrottledText()
+				})
+			}
+			bd.throttleMu.Unlock()
 		},
 		OnReasoningFunc: func(text string) {
 			bd.emit("thinking", map[string]string{"type": "thinking", "content": text})
 		},
 		OnToolStartFunc: func(callID, name string, args map[string]any) {
+			bd.flushThrottledText() // flush text before tool event
 			bd.emit("tool_start", map[string]any{"type": "tool_start", "call_id": callID, "name": name, "args": args})
 		},
 		OnToolResultFunc: func(callID, name, output string, err error) {
@@ -173,13 +216,19 @@ func (bd *BufferedDelta) MakeDelta() *Delta {
 		OnTitleUpdateFunc: func(sessionID, title string) {
 			bd.emit("title_updated", map[string]string{"type": "title_updated", "session_id": sessionID, "title": title})
 		},
+		OnAutoWakeStartFunc: func() {
+			bd.flushThrottledText()
+			bd.emit("auto_wake_start", map[string]string{"type": "auto_wake_start"})
+		},
 		OnCompleteFunc: func() {
+			bd.flushThrottledText() // flush remaining text before done signal
 			bd.emit("step_done", map[string]string{"type": "step_done"})
 			bd.MarkDone()
 		},
 		OnErrorFunc: func(err error) {
+			bd.flushThrottledText() // flush remaining text before error
 			bd.emit("error", map[string]string{"type": "error", "message": err.Error()})
-			bd.MarkDone() // Mark done on error so RunTracker cleans up this run
+			bd.MarkDone()
 		},
 	}
 }

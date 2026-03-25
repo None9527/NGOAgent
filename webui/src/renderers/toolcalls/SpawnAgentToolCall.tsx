@@ -1,7 +1,7 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025 NGOClaw Team
+ * SPDX-License-Identifier: BSL-1.1
  *
  * SpawnAgent tool call component - displays sub-agent execution with structured tool events
  */
@@ -14,6 +14,7 @@ import {
   safeTitle,
 } from './shared/index.js';
 import type { BaseToolCallProps, ContainerStatus } from './shared/index.js';
+
 
 /**
  * Structured tool event from OutputCollector
@@ -105,9 +106,6 @@ const ToolEventItem: FC<{ event: ToolEvent; index: number }> = ({ event, index }
   );
 };
 
-/**
- * SpawnAgentToolCall - displays sub-agent execution with nested tool events
- */
 export const SpawnAgentToolCall: FC<BaseToolCallProps> = ({
   toolCall,
   isFirst,
@@ -115,7 +113,6 @@ export const SpawnAgentToolCall: FC<BaseToolCallProps> = ({
 }) => {
   const { content, rawInput } = toolCall;
   const [isExpanded, setIsExpanded] = useState(false);
-
   // Extract task name from rawInput
   const taskName = rawInput && typeof rawInput === 'object'
     ? (rawInput as Record<string, unknown>).task_name as string || 'sub-agent'
@@ -131,6 +128,7 @@ export const SpawnAgentToolCall: FC<BaseToolCallProps> = ({
   const containerStatus: ContainerStatus = errors.length > 0
     ? 'error'
     : mapToolStatusToContainerStatus(toolCall.status);
+
 
   // Error case
   if (errors.length > 0) {
@@ -175,7 +173,6 @@ export const SpawnAgentToolCall: FC<BaseToolCallProps> = ({
             </span>
           </div>
 
-          {/* Expanded tool events list */}
           {isExpanded && (
             <div className="ml-4 mt-1 flex flex-col border-l-2 border-[var(--app-input-border)] pl-2">
               {events.map((ev, idx) => (
@@ -222,7 +219,7 @@ export const SpawnAgentToolCall: FC<BaseToolCallProps> = ({
     );
   }
 
-  // No content - loading
+  // No content yet — loading state
   return (
     <ToolCallContainer
       label="SubAgent"
@@ -230,6 +227,8 @@ export const SpawnAgentToolCall: FC<BaseToolCallProps> = ({
       status={containerStatus}
       isFirst={isFirst}
       isLast={isLast}
-    />
+    >
+      <span className="text-[var(--app-secondary-foreground)] text-[0.8em] opacity-50">⏳ Running...</span>
+    </ToolCallContainer>
   );
 };

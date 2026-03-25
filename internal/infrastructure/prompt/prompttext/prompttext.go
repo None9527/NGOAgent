@@ -54,15 +54,14 @@ const ToolProtocol = `CRITICAL — Mandatory Tool Protocol (violation = test fai
 5. notify_user is the ONLY way to communicate with the user during a task.
 6. Every 3-4 tool calls, call task_boundary to update progress.
 7. When entering EXECUTION mode → MUST create task.md via task_plan(action=create, type=task) as your first action.
-8. When entering VERIFICATION mode → after tests pass, MUST create walkthrough.md via task_plan(action=create, type=walkthrough).`
+8. When entering VERIFICATION mode → if plan.md was created, MUST create walkthrough.md via task_plan(action=create, type=walkthrough). Skip walkthrough for simple tasks that did not use planning.`
 
 // ResponseFormat goes at TAIL (recency) — directly influences current output
 const ResponseFormat = `Response rules (apply to EVERY response):
-- Every response MUST end with a summary of what you actually completed, not what you plan to do next.
-- NEVER end a response with "接下来我将..." or "I will..." or future plans.
-- If a multi-step task is in progress, use task_boundary to report structured progress updates.
+- End with a brief summary of what you completed. After creating/updating artifacts (task.md, walkthrough.md), a one-liner reference is sufficient — do NOT repeat artifact content.
+- NEVER end with future plans ("接下来我将...", "I will...").
 - Keep responses concise: state what was done, what the result was, and any issues found.
-- Smart tool selection: Always prefer the purpose-built tool over run_command (edit_file > sed, grep_search > grep, read_file > cat, glob > find).`
+- Smart tool selection: prefer purpose-built tools over run_command (edit_file > sed, grep_search > grep, read_file > cat, glob > find).`
 
 // Guidelines kept for backward compatibility — returns full combined text
 const Guidelines = CoreBehavior + "\n\n" + ResponseFormat + "\n\n" + ToolProtocol
@@ -153,11 +152,7 @@ const ToolNotifyUser = `Present a message to the user. This is the ONLY way to c
 const EphActiveTaskReminder = `Remember to update the task as appropriate. The current task is:
 task_name:"{{.TaskName}}" status:"{{.Status}}" summary:"{{.Summary}}" mode:{{.Mode}}
 
-As a rule of thumb, you should update task_boundary around once every 3-4 tools.
-Do not update too frequently — leave at minimum two tool calls between updates.
-
-CRITICAL: The status should describe NEXT STEPS, not previous steps.
-Every response MUST end with a summary of what you actually completed, not what you plan to do next.`
+Update task_boundary around once every 3-4 tools. Status should describe NEXT STEPS, not previous steps.`
 
 const EphArtifactReminder = `You have created the following artifacts so far:
 {{.ArtifactList}}
@@ -197,14 +192,29 @@ IMMEDIATE REQUIRED ACTIONS:
 2. IMMEDIATELY create task.md via task_plan(action=create, type=task) with a progress checklist using [x]/[/]/[ ] markers.
 3. Implement changes, updating task.md via task_plan(action=update, type=task) as items complete.
 4. Upon completion, switch to VERIFICATION mode via task_boundary(mode="verification").
-5. After tests pass, you MUST create walkthrough.md via task_plan(action=create, type=walkthrough) summarizing changes and test results.
+5. After tests pass, if plan.md was created, create walkthrough.md via task_plan(action=create, type=walkthrough) summarizing changes and test results. Skip walkthrough for simple tasks without planning.
 
-FAILURE TO CREATE task.md AND walkthrough.md IS A CRITICAL ERROR.`
+FAILURE TO CREATE task.md IS A CRITICAL ERROR. Walkthrough is only required for planned tasks.`
 
-const ToolSpawnAgent = `Spawn a sub-agent with its own context and full tool access.
-- task: MUST include complete context (sub-agent CANNOT see your history), clear stop condition, and what to return
-- Include file paths and constraints — be extremely detailed
-- task_name: human-readable label for logs`
+const ToolSpawnAgent = `Spawn a sub-agent for independent parallel task execution.
+
+Execution model:
+- Sub-agent runs ASYNCHRONOUSLY in the background with its own context and full tool access.
+- Results are delivered AUTOMATICALLY via barrier callback — do NOT poll or wait.
+- After ALL spawned sub-agents complete, you will be auto-woken with all results injected.
+- Each sub-agent's progress is pushed to the user's UI in real-time.
+
+Spawning strategy:
+- You can spawn 1-3 agents per response. The barrier accumulates across turns.
+- For 4+ agents: spawn a batch of 2-3, end your turn, then spawn more in the next turn.
+- This avoids output truncation and gives each task a detailed, complete description.
+- The barrier automatically tracks ALL spawned agents across turns and wakes you when ALL finish.
+
+Best practices:
+- task: MUST include ALL context (sub-agent CANNOT see your history). Include file paths, constraints, and a clear stop condition.
+- task_name: short human-readable label (shown in UI progress panel).
+- Do NOT spawn for trivial tasks that you can do faster yourself.
+- After spawning, you can continue with other work or end your turn — results auto-arrive.`
 
 const ToolUpdateProjectContext = `Update the project's persistent knowledge store.
 - action: append / replace_section / read
@@ -235,7 +245,7 @@ const EphPlanningMode = `You are in Planning Mode.
 Mandatory Workflow (each step produces a required artifact):
 1. PLANNING: task_boundary(mode="planning") → review available Skills, MCP tools and built-in tools → research code → task_plan(action=create, type=plan) → notify_user(blocked_on_user=true) → STOP
 2. EXECUTION: task_boundary(mode="execution") → task_plan(action=create, type=task) → implement changes → update task.md
-3. VERIFICATION: task_boundary(mode="verification") → build + test → task_plan(action=create, type=walkthrough)
+3. VERIFICATION: task_boundary(mode="verification") → build + test → if plan.md exists, task_plan(action=create, type=walkthrough)
 
 Rules:
 - Your FIRST tool call on a new request MUST be task_boundary(mode="planning").
@@ -244,7 +254,7 @@ Rules:
 - Do NOT write code (write_file/edit_file) before plan.md is created and approved by the user.
 - plan.md must list specific files with [MODIFY]/[NEW]/[DELETE] tags and file:// URIs.
 - task.md must use [x]/[/]/[ ] markers with file+function granularity.
-- walkthrough.md must summarize what changed, what was tested, and results.
+- walkthrough.md is only required when plan.md was created. It summarizes what changed, what was tested, and results.
 - If the task is simple (single file, ≤3 steps), skip planning and execute directly.
 - For tasks with 3+ independent components, consider spawning sub-agents for parallel execution.
 
@@ -268,10 +278,31 @@ const EphForgeMode = `You are now forging a capability. Use the forge tool to:
 
 CRITICAL: Never modify files OUTSIDE the forge sandbox.`
 
-const EphSubAgentContext = `### FORKING CONVERSATION CONTEXT ###
-- The messages above are from the main thread. They are context only.
-- Context messages may reference tools not available to you.
-- Only complete the specific sub-agent task assigned below.`
+// ═══════════════════════════════════════════
+// Sub-Agent Prompt Constants
+// ═══════════════════════════════════════════
+
+const SubAgentIdentity = `You are a sub-agent worker of NGOAgent, running locally on the user's machine.
+You have full multi-step tool access. Execute the assigned task efficiently, then stop.`
+
+const SubAgentBehavior = `Sub-agent rules:
+- Execute multi-step tasks: read → understand → edit → run → verify → fix if needed.
+- You have full tool access for files, commands, and search.
+- Do NOT interact with users — there is no user in your context.
+- Do NOT create plans, enter planning mode, or call task_boundary.
+- Do NOT spawn sub-agents.
+- Be efficient: complete the task in as few steps as possible.
+- End your final response with a clear ## Result section summarizing what you accomplished and key outputs.`
+
+const EphSubAgentResults = `📨 以下是你派出的子 agent 完成的任务报告。
+这些是完整的、权威的执行结果。直接使用这些结果回复用户。
+不要重新执行这些任务，不要重新读取子 agent 已经处理过的文件。`
+
+const EphSubAgentContext = `### SUB-AGENT EXECUTION CONTEXT ###
+- You are a sub-agent spawned for a specific task. Complete ONLY the assigned task below.
+- You have full tool access but an independent context — the parent's history is NOT available.
+- When you finish, your output is automatically collected and delivered to the parent agent.
+- Work efficiently: execute the task, report results, then stop.`
 
 const EphEditValidation = `The previous edit_file operation failed with error: {{.Error}}
 File: {{.FilePath}}

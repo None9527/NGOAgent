@@ -52,16 +52,18 @@ type DeltaSink interface {
 // LoopState is a mutable bag of state the dispatcher writes back.
 // The agent loop provides a concrete implementation.
 type LoopState struct {
-	PreviousMode     string
-	BoundaryTaskName string
-	BoundaryMode     string
-	BoundaryStatus   string
-	BoundarySummary  string
-	StepsSinceUpdate int
-	YieldRequested   bool
-	ForceNextTool    string // Force next LLM call to use this tool (via tool_choice)
-	SkillLoaded      string // L2: skill name just loaded via SKILL.md read
-	SkillPath        string // L2: skill directory path
+	PlanMode          string   // "auto" | "plan" | "agentic" — from chat request
+	PendingEphemerals []string // Ephemeral messages to inject for next LLM turn
+	PreviousMode      string
+	BoundaryTaskName  string
+	BoundaryMode      string
+	BoundaryStatus    string
+	BoundarySummary   string
+	StepsSinceUpdate  int
+	YieldRequested    bool
+	ForceNextTool     string // Force next LLM call to use this tool (via tool_choice)
+	SkillLoaded       string // L2: skill name just loaded via SKILL.md read
+	SkillPath         string // L2: skill directory path
 }
 
 // ─── Signal Handlers ─────────────────────────────────────────
@@ -101,6 +103,20 @@ func handleProgress(result ToolResult, sink DeltaSink, state *LoopState) {
 func handleYield(result ToolResult, sink DeltaSink, state *LoopState) {
 	msg, _ := result.Payload["message"].(string)
 	paths := extractStringSlice(result.Payload["paths_to_review"])
+
+	// Agentic mode: agent self-reviews plan, don't stop loop or show banner
+	if state.PlanMode == "agentic" {
+		state.PendingEphemerals = append(state.PendingEphemerals,
+			"🤖 [AGENTIC MODE] You have created an execution plan. "+
+			"Review it yourself for completeness and correctness. "+
+			"If satisfactory, proceed with execution immediately. "+
+			"If issues found, revise the plan first then execute. "+
+			"Do NOT wait for user approval.")
+		// YieldRequested stays false → loop continues
+		return
+	}
+
+	// Auto / Plan: normal yield → banner for user approval
 	if len(paths) > 0 {
 		sink.OnPlanReview(msg, paths)
 	} else if msg != "" {

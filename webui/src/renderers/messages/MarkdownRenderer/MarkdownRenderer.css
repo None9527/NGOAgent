@@ -1,26 +1,25 @@
 /**
- * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
+ * MarkdownRenderer.css — Premium dark-theme Markdown styles.
  *
- * Styles for MarkdownRenderer component
+ * Root selector: .markdown-content
+ * Covers: headings, paragraphs, lists, tables, blockquotes, code blocks,
+ *         inline code, links, images, hr, GitHub-style alerts.
  */
 
+/* ─── Base ─────────────────────────────────────────────────── */
+
 .markdown-content {
-  line-height: 1.6;
-  font-size: 15px;
-  color: var(--app-primary-foreground);
+  line-height: 1.7;
+  font-size: 14.5px;
+  color: rgba(229, 231, 235, 0.95);
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
-/* Global image constraint — catches ALL images in markdown */
-.markdown-content img {
-  max-width: 100% !important;
-  max-height: 380px !important;
-  height: auto !important;
-  border-radius: 12px;
-  cursor: zoom-in;
-  display: block;
-}
+.markdown-content > *:first-child { margin-top: 0; }
+.markdown-content > *:last-child  { margin-bottom: 0; }
+
+/* ─── Headings ─────────────────────────────────────────────── */
 
 .markdown-content h1,
 .markdown-content h2,
@@ -28,404 +27,361 @@
 .markdown-content h4,
 .markdown-content h5,
 .markdown-content h6 {
-  margin-top: 1.5em;
-  margin-bottom: 0.5em;
   font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 1.6em;
+  margin-bottom: 0.6em;
+  color: rgba(255, 255, 255, 0.95);
 }
 
 .markdown-content h1 {
-  font-size: 1.75em;
-  border-bottom: 1px solid var(--app-primary-border-color);
-  padding-bottom: 0.3em;
+  font-size: 1.6em;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  padding-bottom: 0.35em;
 }
 
 .markdown-content h2 {
-  font-size: 1.5em;
-  border-bottom: 1px solid var(--app-primary-border-color);
+  font-size: 1.35em;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
   padding-bottom: 0.3em;
 }
 
-.markdown-content h3 {
-  font-size: 1.25em;
-}
-
-.markdown-content h4 {
-  font-size: 1.1em;
-}
-
+.markdown-content h3 { font-size: 1.15em; }
+.markdown-content h4 { font-size: 1.05em; }
 .markdown-content h5,
-.markdown-content h6 {
-  font-size: 1em;
-}
+.markdown-content h6 { font-size: 0.95em; color: rgba(255,255,255,0.75); }
+
+/* ─── Paragraphs ───────────────────────────────────────────── */
 
 .markdown-content p {
-  margin-top: 0;
+  margin: 0.6em 0;
 }
+
+/* ─── Lists ────────────────────────────────────────────────── */
 
 .markdown-content ul,
 .markdown-content ol {
-  margin-top: 1em;
-  margin-bottom: 1em;
-  padding-left: 2em;
+  margin: 0.6em 0;
+  padding-left: 1.6em;
 }
 
-/* Ensure list markers are visible even with global CSS resets */
 .markdown-content ul {
   list-style-type: disc;
-  list-style-position: outside;
 }
 
 .markdown-content ol {
   list-style-type: decimal;
-  list-style-position: outside;
 }
 
-/* Nested list styles */
-.markdown-content ul ul {
-  list-style-type: circle;
-}
-
-.markdown-content ul ul ul {
-  list-style-type: square;
-}
-
-.markdown-content ol ol {
-  list-style-type: lower-alpha;
-}
-
-.markdown-content ol ol ol {
-  list-style-type: lower-roman;
-}
-
-/* Style the marker explicitly so themes don't hide it */
-.markdown-content li::marker {
-  color: var(--app-secondary-foreground);
-}
+.markdown-content ul ul  { list-style-type: circle; }
+.markdown-content ul ul ul { list-style-type: square; }
+.markdown-content ol ol  { list-style-type: lower-alpha; }
 
 .markdown-content li {
   margin-bottom: 0.25em;
+  color: rgba(209, 213, 219, 0.95);
+}
+
+.markdown-content li::marker {
+  color: rgba(99, 179, 237, 0.7);
 }
 
 .markdown-content li > p {
-  margin-top: 0.5em;
-  margin-bottom: 0.5em;
+  margin: 0.3em 0;
 }
 
-.markdown-content blockquote {
-  margin: 0 0 1em;
-  padding: 0 1em;
-  border-left: 0.25em solid var(--app-primary-border-color);
-  color: var(--app-secondary-foreground);
+/* ─── Inline Code ──────────────────────────────────────────── */
+
+.markdown-content .md-inline-code,
+.markdown-content code:not(pre code) {
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-size: 0.87em;
+  background: rgba(30, 30, 40, 0.9);
+  color: #e2b96f;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 5px;
+  padding: 0.15em 0.45em;
+  white-space: pre-wrap;
 }
 
-.markdown-content a {
-  color: var(--app-link-foreground, #007acc);
-  text-decoration: none;
+/* ─── Code Block (CodeBlockRenderer) ──────────────────────── */
+
+.markdown-content .code-block-renderer {
+  margin: 0.9em 0;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.07);
+  background: #161b22;
 }
 
-.markdown-content a:hover {
-  color: var(--app-link-active-foreground, #005a9e);
-  text-decoration: underline;
+.markdown-content .code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 14px;
+  background: rgba(255,255,255,0.04);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
 }
 
-.markdown-content code {
-  font-family: var(
-    --app-monospace-font-family,
-    'SF Mono',
-    Monaco,
-    'Cascadia Code',
-    'Roboto Mono',
-    Consolas,
-    'Courier New',
-    monospace
-  );
-  font-size: 0.9em;
-  background-color: var(--app-code-background, rgba(0, 0, 0, 0.05));
-  border: 1px solid var(--app-primary-border-color);
-  border-radius: var(--corner-radius-small, 4px);
-  padding: 0.2em 0.4em;
-  white-space: pre-wrap; /* Support automatic line wrapping */
-  word-break: break-word; /* Break words when necessary */
+.markdown-content .code-block-lang {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: lowercase;
+  color: rgba(148, 163, 184, 0.7);
+  letter-spacing: 0.04em;
 }
 
-.markdown-content pre {
-  margin: 1em 0;
-  padding: 1em;
-  background-color: var(--app-code-background, rgba(0, 0, 0, 0.05));
-  border: 1px solid var(--app-primary-border-color);
-  border-radius: var(--corner-radius-small, 4px);
-  font-family: var(
-    --app-monospace-font-family,
-    'SF Mono',
-    Monaco,
-    'Cascadia Code',
-    'Roboto Mono',
-    Consolas,
-    'Courier New',
-    monospace
-  );
-  font-size: 0.9em;
-  line-height: 1.5;
+.markdown-content .code-block-copy {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(148, 163, 184, 0.5);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 5px;
+  padding: 2px 10px;
+  cursor: pointer;
+  transition: all 0.15s;
 }
 
-.markdown-content pre code {
+.markdown-content .code-block-copy:hover {
+  color: rgba(255,255,255,0.9);
+  background: rgba(255,255,255,0.1);
+  border-color: rgba(255,255,255,0.15);
+}
+
+.markdown-content .code-block-content {
+  overflow-x: auto;
+}
+
+/* Shiki output — ensure monospace + proper line heights */
+.markdown-content .code-block-content pre {
+  margin: 0;
+  padding: 14px 16px;
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  background: transparent !important;
+}
+
+.markdown-content .code-block-content code {
+  font-family: inherit;
+  font-size: inherit;
   background: none;
   border: none;
   padding: 0;
-  white-space: pre-wrap; /* Support automatic line wrapping */
-  word-break: break-word; /* Break words when necessary */
+  color: inherit;
 }
 
-.markdown-content .file-path-link {
-  background: transparent;
-  border: none;
-  padding: 0;
-  font-family: var(
-    --app-monospace-font-family,
-    'SF Mono',
-    Monaco,
-    'Cascadia Code',
-    'Roboto Mono',
-    Consolas,
-    'Courier New',
-    monospace
-  );
-  font-size: 0.95em;
-  color: var(--app-link-foreground, #007acc);
-  text-decoration: underline;
-  cursor: pointer;
-  transition: color 0.1s ease;
+/* Fallback pre when Shiki not yet loaded */
+.markdown-content pre:not(.code-block-content pre) {
+  margin: 0.9em 0;
+  padding: 14px 16px;
+  background: #161b22;
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 10px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-x: auto;
 }
 
-.markdown-content .file-path-link:hover {
-  color: var(--app-link-active-foreground, #005a9e);
+/* ─── Blockquotes ──────────────────────────────────────────── */
+
+.markdown-content blockquote {
+  margin: 0.8em 0;
+  padding: 0.6em 1.1em;
+  border-left: 3px solid rgba(99, 179, 237, 0.5);
+  background: rgba(99, 179, 237, 0.04);
+  border-radius: 0 6px 6px 0;
+  color: rgba(203, 213, 224, 0.85);
+  font-style: italic;
 }
 
-.markdown-content hr {
-  border: none;
-  border-top: 1px solid var(--app-primary-border-color);
-  margin: 1.5em 0;
+.markdown-content blockquote > p { margin: 0; }
+
+/* ─── GitHub Alerts (remark-github-blockquote-alert) ──────── */
+
+.markdown-content .markdown-alert {
+  margin: 0.8em 0;
+  padding: 0.7em 1.1em;
+  border-radius: 8px;
+  border-left-width: 3px;
+  border-left-style: solid;
 }
 
-.markdown-content img {
-  max-width: 100%;
-  max-height: 380px;
-  height: auto;
-  object-fit: contain;
+.markdown-content .markdown-alert-note {
+  border-color: #58a6ff;
+  background: rgba(88, 166, 255, 0.07);
+}
+
+.markdown-content .markdown-alert-tip {
+  border-color: #3fb950;
+  background: rgba(63, 185, 80, 0.06);
+}
+
+.markdown-content .markdown-alert-important {
+  border-color: #d2a8ff;
+  background: rgba(210, 168, 255, 0.06);
+}
+
+.markdown-content .markdown-alert-warning {
+  border-color: #d29922;
+  background: rgba(210, 153, 34, 0.07);
+}
+
+.markdown-content .markdown-alert-caution {
+  border-color: #f85149;
+  background: rgba(248, 81, 73, 0.06);
+}
+
+.markdown-content .markdown-alert-title {
+  font-weight: 600;
+  font-size: 0.88em;
+  letter-spacing: 0.02em;
+  margin-bottom: 0.35em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ─── Tables ───────────────────────────────────────────────── */
+
+.markdown-content .md-table-wrapper {
+  overflow-x: auto;
+  margin: 0.9em 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.08);
 }
 
 .markdown-content table {
   width: 100%;
   border-collapse: collapse;
-  margin: 1em 0;
-  display: block;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
+  font-size: 13.5px;
 }
 
-.markdown-content th,
-.markdown-content td {
-  padding: 0.5em 1em;
-  border: 1px solid var(--app-primary-border-color);
-  text-align: left;
+.markdown-content thead {
+  background: rgba(255,255,255,0.04);
 }
 
 .markdown-content th {
-  background-color: var(--app-secondary-background);
+  padding: 9px 14px;
   font-weight: 600;
-}
-
-/* ── Standalone images (no card, like open-webui) ── */
-.markdown-content .media-img {
-  display: block;
-  max-width: 100%;
-  max-height: 380px;
-  height: auto;
-  border-radius: 12px;
-  cursor: zoom-in;
-  margin: 8px 0;
-  transition: opacity 0.2s;
-}
-
-.markdown-content .media-img:hover {
-  opacity: 0.92;
-}
-
-/* Safety net: any img without .media-img class gets same treatment */
-.markdown-content img:not(.media-img) {
-  max-width: 100%;
-  max-height: 380px;
-  height: auto;
-  border-radius: 12px;
-  cursor: zoom-in;
-  display: block;
-  margin: 8px 0;
-}
-
-/* Hide empty blocks left by dedup removal */
-.markdown-content p:empty,
-.markdown-content li:empty,
-.markdown-content div:empty:not(.media-block) {
-  display: none;
-  margin: 0;
-  padding: 0;
-}
-
-/* ── Media Block Cards (video/audio/pdf only) ── */
-.markdown-content .media-block {
-  margin: 10px 0;
-  border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  display: inline-block;
-  width: fit-content;
-  max-width: 100%;
-  transition: border-color 0.2s;
-}
-
-.markdown-content .media-block:hover {
-  border-color: rgba(255, 255, 255, 0.2);
-}
-
-.markdown-content .media-block img {
-  max-width: min(480px, 100%);
-  max-height: 24rem;
-  height: auto;
-  display: block;
-  border-radius: 12px 12px 0 0;
-  cursor: zoom-in;
-}
-
-.markdown-content .media-block video {
-  max-width: 100%;
-  display: block;
-  border-radius: 12px 12px 0 0;
-}
-
-.markdown-content .media-block .media-caption {
-  padding: 5px 12px;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.3);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  overflow: hidden;
-  background: rgba(0, 0, 0, 0.1);
-}
-
-.markdown-content .media-block.media-audio {
-  padding: 12px 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.markdown-content .media-block.media-audio .audio-icon {
-  font-size: 24px;
-  flex-shrink: 0;
-}
-
-.markdown-content .media-block.media-audio .audio-body {
-  flex: 1;
-  min-width: 0;
-}
-
-.markdown-content .media-block.media-audio .audio-name {
-  font-size: 12px;
-  color: #aaa;
-  margin-bottom: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  text-align: left;
+  color: rgba(255,255,255,0.9);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
   white-space: nowrap;
 }
 
-.markdown-content .media-block.media-audio audio {
-  width: 100%;
-  height: 32px;
+.markdown-content td {
+  padding: 8px 14px;
+  color: rgba(209, 213, 219, 0.9);
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  vertical-align: top;
 }
 
-.markdown-content .media-block.media-pdf {
-  padding: 14px 16px;
+.markdown-content tr:last-child td {
+  border-bottom: none;
 }
 
-.markdown-content .media-block.media-pdf a {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: #93c5fd;
+.markdown-content tbody tr:hover {
+  background: rgba(255,255,255,0.025);
+}
+
+/* ─── Links ────────────────────────────────────────────────── */
+
+.markdown-content a {
+  color: #63b3ed;
   text-decoration: none;
-  font-size: 13px;
+  transition: color 0.15s;
 }
 
-.markdown-content .media-block.media-pdf a:hover {
-  color: #bdd8ff;
-}
-
-.markdown-content .media-block.media-pdf .pdf-icon {
-  font-size: 22px;
-  flex-shrink: 0;
-}
-
-.markdown-content .media-block.media-pdf .pdf-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-
-.markdown-content .media-block.media-pdf .pdf-badge {
-  color: rgba(255, 255, 255, 0.3);
-  font-size: 11px;
-  flex-shrink: 0;
-}
-
-/* Compact inline file chip (for deduplicated paths) */
-.markdown-content .media-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: transparent;
-  border: none;
-  color: #93c5fd;
-  text-decoration: none;
-  font-size: 12px;
-  vertical-align: middle;
-  max-width: 200px;
-}
-
-.markdown-content .media-chip:hover {
+.markdown-content a:hover {
+  color: #90cdf4;
   text-decoration: underline;
 }
 
-.markdown-content .media-chip .chip-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.markdown-content a.md-file-link {
+  color: #a5b4fc;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.88em;
+  background: rgba(165, 180, 252, 0.07);
+  border: 1px solid rgba(165, 180, 252, 0.15);
+  border-radius: 4px;
+  padding: 0 5px;
 }
 
-/* ═══ Mobile adaptations ═══ */
+/* ─── Horizontal Rule ──────────────────────────────────────── */
+
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  margin: 1.4em 0;
+}
+
+/* ─── Images ───────────────────────────────────────────────── */
+
+.markdown-content img {
+  max-width: 100%;
+  max-height: 420px;
+  height: auto;
+  border-radius: 10px;
+  display: block;
+  margin: 8px 0;
+  cursor: zoom-in;
+  border: 1px solid rgba(255,255,255,0.06);
+}
+
+/* ─── Strong / Em ──────────────────────────────────────────── */
+
+.markdown-content strong {
+  color: rgba(255,255,255,0.97);
+  font-weight: 600;
+}
+
+.markdown-content em {
+  color: rgba(203, 213, 224, 0.9);
+  font-style: italic;
+}
+
+/* ─── Strikethrough ────────────────────────────────────────── */
+
+.markdown-content del {
+  color: rgba(156, 163, 175, 0.6);
+}
+
+/* ─── Task List (GFM) ──────────────────────────────────────── */
+
+.markdown-content input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 3px;
+  background: transparent;
+  vertical-align: -2px;
+  margin-right: 6px;
+  cursor: default;
+}
+
+.markdown-content input[type="checkbox"]:checked {
+  background: #3fb950;
+  border-color: #3fb950;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath fill='white' d='M2 6l3 3 5-5'/%3E%3C/svg%3E");
+  background-size: 11px;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+/* ─── Mobile ───────────────────────────────────────────────── */
+
 @media (max-width: 639px) {
-  .markdown-content {
-    font-size: 14px;
-  }
-  .markdown-content h1 { font-size: 1.4em; }
-  .markdown-content h2 { font-size: 1.25em; }
-  .markdown-content h3 { font-size: 1.1em; }
-  .markdown-content ul,
-  .markdown-content ol {
-    padding-left: 1.5em;
-  }
-  .markdown-content pre {
-    padding: 0.75em;
-    font-size: 0.85em;
-  }
+  .markdown-content { font-size: 14px; }
+  .markdown-content h1 { font-size: 1.35em; }
+  .markdown-content h2 { font-size: 1.2em; }
+  .markdown-content h3 { font-size: 1.08em; }
   .markdown-content th,
-  .markdown-content td {
-    padding: 0.35em 0.6em;
-    font-size: 0.9em;
-  }
-  .markdown-content .media-chip {
-    max-width: 150px;
-  }
+  .markdown-content td { padding: 6px 10px; font-size: 12.5px; }
+  .markdown-content .code-block-content pre { font-size: 12px; padding: 10px 12px; }
 }

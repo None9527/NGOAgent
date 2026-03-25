@@ -201,8 +201,25 @@ export function historyToMessages(
     if (m.role === 'tool') {
       const toolName = m.tool_name || 'unknown'
 
-      // Suppress task_boundary from rendering as tool card in history
-      if (toolName === 'task_boundary') continue
+      // task_boundary → inject as section delimiter for Progress Updates grouping
+      if (toolName === 'task_boundary') {
+        let parsedArgs: Record<string, unknown> = {}
+        if (m.tool_args) {
+          try { parsedArgs = JSON.parse(m.tool_args) } catch { /* ignore */ }
+        }
+        result.push({
+          uuid: uid(),
+          timestamp: new Date().toISOString(),
+          type: 'task_section',
+          taskSection: {
+            taskName: (parsedArgs.task_name as string) || '',
+            status: (parsedArgs.status as string) || '',
+            summary: (parsedArgs.summary as string) || '',
+            mode: (parsedArgs.mode as string) || '',
+          },
+        })
+        continue
+      }
 
       const kind = mapToolKind(toolName)
 

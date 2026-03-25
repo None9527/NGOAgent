@@ -19,7 +19,8 @@ type SpawnFunc func(ctx context.Context, task string) (string, error)
 
 // SpawnAgentTool creates a sub-agent for independent task execution.
 type SpawnAgentTool struct {
-	spawnFn SpawnFunc
+	spawnFn      SpawnFunc
+	EventPusher  func(sessionID, eventType string, data any) // wire by server for SSE progress push
 }
 
 // NewSpawnAgentTool creates a spawn tool with a factory function.
@@ -30,6 +31,11 @@ func NewSpawnAgentTool(fn SpawnFunc) *SpawnAgentTool {
 // SetSpawnFunc sets the factory function (used for lazy init from builder).
 func (t *SpawnAgentTool) SetSpawnFunc(fn SpawnFunc) {
 	t.spawnFn = fn
+}
+
+// SetEventPusher wires the event-push function so progress events reach the parent SSE stream.
+func (t *SpawnAgentTool) SetEventPusher(fn func(sessionID, eventType string, data any)) {
+	t.EventPusher = fn
 }
 
 func (t *SpawnAgentTool) Name() string        { return "spawn_agent" }
@@ -74,18 +80,17 @@ func (t *SpawnAgentTool) Execute(ctx context.Context, args map[string]any) (dtoo
 
 	fmt.Printf("[spawn] Starting sub-agent: %s\n", taskName)
 
-	// 5 minute timeout for sub-agent
-	subCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-
-	result, err := t.spawnFn(subCtx, task)
+	// Non-blocking: RunAsync returns runID immediately
+	runID, err := t.spawnFn(ctx, task)
 	if err != nil {
-		fmt.Printf("[spawn] Sub-agent '%s' failed: %v\n", taskName, err)
-		return dtool.ToolResult{Output: fmt.Sprintf("Sub-agent '%s' failed: %v", taskName, err)}, nil
+		fmt.Printf("[spawn] Sub-agent '%s' failed to start: %v\n", taskName, err)
+		return dtool.ToolResult{Output: fmt.Sprintf("Sub-agent '%s' failed to start: %v", taskName, err)}, nil
 	}
 
-	fmt.Printf("[spawn] Sub-agent '%s' completed\n", taskName)
-	return dtool.ToolResult{Output: fmt.Sprintf("[Sub-agent '%s' completed]\n%s", taskName, result)}, nil
+	fmt.Printf("[spawn] Sub-agent '%s' spawned → %s\n", taskName, runID)
+	return dtool.ToolResult{Output: fmt.Sprintf(
+		"[Sub-agent '%s' spawned → %s] Running asynchronously. Result will be delivered automatically when complete.",
+		taskName, runID)}, nil
 }
 
 // ForgeTool constructs, executes, and validates structured task environments.
