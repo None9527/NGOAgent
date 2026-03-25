@@ -24,6 +24,7 @@
     "react-dom": "^19.2.0",
     "react-error-boundary": "^6.1.1",
     "react-markdown": "^10.1.0",
+    "react-photo-album": "^3.5.1",
     "react-virtuoso": "^4.18.3",
     "rehype-highlight": "^7.0.2",
     "rehype-raw": "^7.0.0",

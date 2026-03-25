@@ -115,7 +115,7 @@ export const AssistantMessage: FC<AssistantMessageProps> = memo(({
         <MessageContent
           content={content}
           onFileClick={onFileClick}
-          enableFileLinks={false}
+          enableFileLinks={true}
         />
       </div>
 

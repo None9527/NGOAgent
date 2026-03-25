@@ -321,7 +321,70 @@
 
 /* ─── Images ───────────────────────────────────────────────── */
 
-.markdown-content img {
+.markdown-content .md-media-img {
+  max-width: 420px;
+  max-height: 420px;
+  height: auto;
+  border-radius: 10px;
+  display: block;
+  cursor: zoom-in;
+  transition: transform 0.15s ease, filter 0.15s ease;
+}
+
+.markdown-content .md-media-img:hover {
+  transform: scale(1.015);
+  filter: brightness(1.06);
+}
+
+/* ─── Gallery Grid ─────────────────────────────────────────── */
+
+/* Unified: 2-column grid (宫格) */
+.md-gallery {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 10px 0;
+  max-width: 580px;
+}
+
+/* Gallery cell: auto height, preserve aspect ratio */
+.md-gallery-cell {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+/* Gallery images: preserve aspect ratio, fill width */
+.md-gallery .md-media-img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 0;
+  max-width: none;
+  max-height: none;
+  cursor: zoom-in;
+}
+
+/* Overflow counter */
+.md-gallery-overflow {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  color: white;
+  font-size: 22px;
+  font-weight: 600;
+  backdrop-filter: blur(2px);
+  cursor: pointer;
+  border-radius: 10px;
+}
+
+/* Non-gallery standalone images */
+.markdown-content img:not(.md-media-img) {
   max-width: 100%;
   max-height: 420px;
   height: auto;
@@ -329,7 +392,14 @@
   display: block;
   margin: 8px 0;
   cursor: zoom-in;
-  border: 1px solid rgba(255,255,255,0.06);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ─── Gallery Mobile ───────────────────────────────────────── */
+
+@media (max-width: 639px) {
+  .md-gallery { max-width: 100%; }
+  .md-gallery-cell { width: 120px; height: 120px; }
 }
 
 /* ─── Strong / Em ──────────────────────────────────────────── */
