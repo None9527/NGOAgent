@@ -7,6 +7,7 @@
 import {
   forwardRef,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -188,6 +189,39 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
       }),
       [renderItems.length],
     );
+
+    // ── Streaming auto-scroll ─────────────────────────────────
+    // Two scroll triggers exist; they MUST NOT fire simultaneously:
+    //
+    // 1. New item added → data.length changes → Virtuoso followOutput handles it
+    // 2. Content grows (streaming text) → data.length unchanged → we handle it
+    //
+    // Previous bug: both fired on the same render, setting different scroll
+    // positions → visual bounce. Fix: track length and skip when it changes.
+    const prevItemCountRef = useRef(renderItems.length);
+    useEffect(() => {
+      const lengthChanged = renderItems.length !== prevItemCountRef.current;
+      prevItemCountRef.current = renderItems.length;
+
+      // Length changed → Virtuoso followOutput will scroll. Do nothing.
+      if (lengthChanged) return;
+
+      // Content growth (same length) during streaming → manually scroll.
+      if (
+        !isStreaming ||
+        userScrolledUpRef?.current ||
+        renderItems.length === 0
+      ) return;
+
+      const el = customScrollParent;
+      if (!el) return;
+
+      // Max scroll position = bottom of content including footer spacer.
+      // Footer spacer (280/340px) provides breathing room above the
+      // floating composer. No conflict with Virtuoso because followOutput
+      // does NOT fire for same-length data updates.
+      el.scrollTop = el.scrollHeight - el.clientHeight;
+    }, [renderItems, isStreaming, userScrolledUpRef, customScrollParent]);
 
     // Render a single non-grouped message
     const renderSingleMessage = useCallback((
