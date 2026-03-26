@@ -8,7 +8,7 @@
  * - Max 50vh height with internal scrolling
  */
 
-import { useState, useMemo, memo } from 'react'
+import { useState, useMemo, memo, useCallback } from 'react'
 import type { FC } from 'react'
 import type { ChatMessageData } from '../../chat/types'
 import { getToolRenderer } from './toolRegistry.js'
@@ -38,7 +38,7 @@ interface StepRowProps {
   index: number
   msg: ChatMessageData
   isExpanded: boolean
-  onToggle: () => void
+  onToggle: (index: number) => void
   sessionId?: string
 }
 
@@ -88,6 +88,9 @@ const StepRow: FC<StepRowProps> = memo(({
   const title = getStepTitle(tc)
   const isLoading = tc.status === 'in_progress' || tc.status === 'pending'
 
+  // Stable per-row toggle — calls parent with index
+  const handleClick = useCallback(() => onToggle(index), [onToggle, index])
+
   // Get the full renderer for expanded view
   const config = getToolRenderer(tc)
   const ToolCallComponent = config?.component
@@ -95,7 +98,7 @@ const StepRow: FC<StepRowProps> = memo(({
   return (
     <div className="tgp-step" data-expanded={isExpanded}>
       {/* Collapsed header row */}
-      <div className="tgp-step-header group" onClick={onToggle}>
+      <div className="tgp-step-header group" onClick={handleClick}>
         <span className="tgp-step-index">{index + 1}</span>
 
         {/* Status bullet / hover chevron */}
@@ -170,6 +173,32 @@ export const ToolGroupPanel: FC<ToolGroupPanelProps> = memo(({
     [items],
   )
 
+  // Force Virtuoso to recalculate item heights after expand/collapse
+  const notifyResize = useCallback(() => {
+    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
+  }, [])
+
+  // Stable toggle callback — StepRow calls this with its index
+  const toggleStep = useCallback((idx: number) => {
+    setExpandedSet((prev) => {
+      const next = new Set(prev)
+      if (next.has(idx)) next.delete(idx)
+      else next.add(idx)
+      return next
+    })
+    notifyResize()
+  }, [notifyResize])
+
+  const toggleAll = useCallback(() => {
+    if (allExpanded) {
+      setAllExpanded(false)
+      setExpandedSet(new Set())
+    } else {
+      setAllExpanded(true)
+    }
+    notifyResize()
+  }, [allExpanded, notifyResize])
+
   if (visibleItems.length === 0) return null
 
   // Single tool call → don't wrap in panel, render directly
@@ -188,32 +217,7 @@ export const ToolGroupPanel: FC<ToolGroupPanelProps> = memo(({
     )
   }
 
-  // Force Virtuoso to recalculate item heights after expand/collapse
-  const notifyResize = () => {
-    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
-  }
-
   const isStepExpanded = (idx: number) => allExpanded || expandedSet.has(idx)
-
-  const toggleStep = (idx: number) => {
-    setExpandedSet((prev) => {
-      const next = new Set(prev)
-      if (next.has(idx)) next.delete(idx)
-      else next.add(idx)
-      return next
-    })
-    notifyResize()
-  }
-
-  const toggleAll = () => {
-    if (allExpanded) {
-      setAllExpanded(false)
-      setExpandedSet(new Set())
-    } else {
-      setAllExpanded(true)
-    }
-    notifyResize()
-  }
 
   const headerLabel = sectionTitle || 'Progress Updates'
 
@@ -249,7 +253,7 @@ export const ToolGroupPanel: FC<ToolGroupPanelProps> = memo(({
             index={idx}
             msg={msg}
             isExpanded={isStepExpanded(idx)}
-            onToggle={() => toggleStep(idx)}
+            onToggle={toggleStep}
             sessionId={sessionId}
           />
         ))}

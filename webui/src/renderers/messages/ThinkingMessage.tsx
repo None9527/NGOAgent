@@ -5,7 +5,7 @@
  */
 
 import type { FC } from 'react';
-import { useState } from 'react';
+import { memo, useState, useCallback } from 'react';
 import { MessageContent } from './MessageContent.js';
 import { ChevronIcon } from '../icons/index.js';
 import './ThinkingMessage.css';
@@ -35,7 +35,7 @@ export interface ThinkingMessageProps {
  * - Expanded: solid dot + "Thinking" + up arrow + thinking content
  * - Aligned with other message items, with status icon and connector line
  */
-export const ThinkingMessage: FC<ThinkingMessageProps> = ({
+export const ThinkingMessage: FC<ThinkingMessageProps> = memo(({
   content,
   timestamp: _timestamp,
   onFileClick,
@@ -44,9 +44,9 @@ export const ThinkingMessage: FC<ThinkingMessageProps> = ({
 }) => {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
 
-  const handleToggle = () => {
-    setIsExpanded(!isExpanded);
-  };
+  const handleToggle = useCallback(() => {
+    setIsExpanded(prev => !prev);
+  }, []);
 
   return (
     <div
@@ -80,4 +80,6 @@ export const ThinkingMessage: FC<ThinkingMessageProps> = ({
       </div>
     </div>
   );
-};
+});
+
+ThinkingMessage.displayName = 'ThinkingMessage';

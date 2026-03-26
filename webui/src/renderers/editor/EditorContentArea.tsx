@@ -171,6 +171,11 @@ export const EditorContentArea = forwardRef<EditorHandle, EditorContentAreaProps
             contentEditable={
               <ContentEditable
                 className="editor-input"
+                placeholder={
+                  <div className="editor-placeholder" aria-hidden="true">
+                    {placeholder}
+                  </div>
+                }
                 aria-placeholder={placeholder}
                 aria-multiline="true"
                 aria-label="Chat input"

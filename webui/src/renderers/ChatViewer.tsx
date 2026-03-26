@@ -178,7 +178,7 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
     );
 
     // Render a single non-grouped message
-    const renderSingleMessage = (
+    const renderSingleMessage = useCallback((
       index: number,
       msg: ChatMessageData,
     ) => {
@@ -254,10 +254,10 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
           {element}
         </MessageErrorBoundary>
       );
-    };
+    }, [renderItems, sessionId, onFileClick, lastAssistantIndex, onRetry]);
 
     // Render a RenderItem (single message or tool group panel)
-    const renderItem = (
+    const renderItem = useCallback((
       index: number,
       item: RenderItem,
     ) => {
@@ -274,7 +274,7 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
         );
       }
       return renderSingleMessage(index, item.data);
-    };
+    }, [renderSingleMessage, sessionId]);
 
     const containerClasses = [
       'chat-viewer-container',

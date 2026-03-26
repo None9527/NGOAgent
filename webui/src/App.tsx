@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react'
 import { ChatViewer } from './renderers/ChatViewer'
 import { InputForm } from './renderers/InputForm'
 import { api, getApiBase } from './chat/api'
@@ -14,9 +14,10 @@ import { useUIStore } from './stores/uiStore'
 import { Sidebar } from './components/Sidebar'
 import { TopNavbar } from './components/TopNavbar'
 import { WelcomeScreen } from './components/WelcomeScreen'
-import { IntelligenceHub } from './components/IntelligenceHub/index'
-import { SettingsPage } from './components/SettingsPage'
-import { ConnectPage } from './components/ConnectPage'
+// Lazy-load heavy components not needed on initial render
+const IntelligenceHub = lazy(() => import('./components/IntelligenceHub/index').then(m => ({ default: m.IntelligenceHub })))
+const SettingsPage = lazy(() => import('./components/SettingsPage').then(m => ({ default: m.SettingsPage })))
+const ConnectPage = lazy(() => import('./components/ConnectPage').then(m => ({ default: m.ConnectPage })))
 import { SubagentDock } from './components/SubagentDock'
 
 // Import styles
@@ -116,16 +117,16 @@ export default function App() {
     })()
   }, [connected])
 
-  const handleNewSession = async () => {
+  const handleNewSession = useCallback(async () => {
     try {
       await session.newSession()
       if (window.innerWidth < 768) setIsSidebarOpen(false) 
     } catch (err) {
       console.error('Failed to create new session', err)
     }
-  }
+  }, [session, setIsSidebarOpen])
 
-  const handleSelectSession = async (id: string) => {
+  const handleSelectSession = useCallback(async (id: string) => {
     // Disconnect current SSE stream before switching — but isolate the cancel
     // to prevent the old stream's async onEnd from overwriting reconnect state.
     if (cancelRef.current) {
@@ -158,19 +159,19 @@ export default function App() {
     }
 
     if (window.innerWidth < 768) setIsSidebarOpen(false)
-  }
+  }, [cancelRef, setIsStreaming, exitStreamingMode, setPendingApprovals, setPlanReview, setSessionId, loadHistory, stream, setIsSidebarOpen])
 
-  const handleDeleteSession = (id: string) => session.deleteSession(id)
-  const handleRenameSession = (id: string, t: string) => session.renameSession(id, t)
+  const handleDeleteSession = useCallback((id: string) => session.deleteSession(id), [session])
+  const handleRenameSession = useCallback((id: string, t: string) => session.renameSession(id, t), [session])
 
-  const handleModelSwitch = (modelName: string) => config.switchModel(modelName)
+  const handleModelSwitch = useCallback((modelName: string) => config.switchModel(modelName), [config])
 
-  const handleSuggestionClick = (suggestionText: string) => {
+  const handleSuggestionClick = useCallback((suggestionText: string) => {
     setInputText(suggestionText)
     if (inputRef.current) {
       inputRef.current.focus()
     }
-  }
+  }, [setInputText])
 
   // Retry — re-generate the last assistant response
   // Flow: strip backend history → strip UI messages → re-send through normal chat
@@ -264,7 +265,7 @@ export default function App() {
 
   // Gate: show ConnectPage until authenticated
   if (!connected) {
-    return <ConnectPage onConnected={() => setConnected(true)} />
+    return <Suspense fallback={<div className="flex h-screen items-center justify-center"><span className="animate-pulse text-white/40">Loading...</span></div>}><ConnectPage onConnected={() => setConnected(true)} /></Suspense>
   }
 
   return (
@@ -521,18 +522,22 @@ export default function App() {
 
       {/* ═══ The Unified Intelligence Hub (Right Pane) ═══ */}
       {hub.isOpen && (
-        <IntelligenceHub 
-          sessionId={sessionId}
-          activeTab={hub.tab}
-          onTabChange={hub.setTab}
-          onClose={hub.close}
-          refreshTrigger={hub.brainRefreshTrigger}
-          brainFocusTrigger={hub.brainFocusTrigger}
-        />
+        <Suspense fallback={null}>
+          <IntelligenceHub 
+            sessionId={sessionId}
+            activeTab={hub.tab}
+            onTabChange={hub.setTab}
+            onClose={hub.close}
+            refreshTrigger={hub.brainRefreshTrigger}
+            brainFocusTrigger={hub.brainFocusTrigger}
+          />
+        </Suspense>
       )}
 
       {/* Settings Modal (kept distinct as it's an app-level overlay) */}
-      <SettingsPage isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      <Suspense fallback={null}>
+        <SettingsPage isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      </Suspense>
     </div>
   )
 }
