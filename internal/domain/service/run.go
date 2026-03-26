@@ -513,20 +513,15 @@ func (a *AgentLoop) doPrepare(_ context.Context) {
 }
 
 // shouldInjectPlanning checks if planning mode should be triggered.
-// Only explicit signals — no heuristic auto-detection.
+// In "auto" mode, task_boundary.mode is a UI label only — no planning injection.
+// Only explicit "plan" mode or user /plan command triggers the full planning framework.
 func (a *AgentLoop) shouldInjectPlanning(userMessage string) bool {
-	// Runtime plan mode: "plan" forces planning, "auto" defers to heuristics
 	planMode := a.PlanMode()
 	if planMode == "plan" {
 		return true
 	}
-	// Agent self-declared planning mode via task_boundary — strongest signal
-	a.mu.Lock()
-	mode := a.boundaryMode
-	a.mu.Unlock()
-	if mode == "planning" {
-		return true
-	}
+	// In "auto"/"agentic" mode, boundaryMode is purely informational for the UI.
+	// Do NOT inject EphPlanningMode based on LLM's self-declared mode.
 	if strings.Contains(userMessage, "/plan") {
 		return true
 	}
@@ -563,7 +558,55 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 	// Drain ephemerals
 	ephemerals := a.ephemerals
 	a.ephemerals = nil
+	// Drain pending media
+	mediaItems := a.pendingMedia
+	a.pendingMedia = nil
 	a.mu.Unlock()
+
+	// ═══ Multimodal: inject pending media as ContentParts ═══
+	// Media loaded via view_media tool becomes visible to the VLM in the next call.
+	if len(mediaItems) > 0 {
+		var parts []llm.ContentPart
+		var pathList []string
+		for _, item := range mediaItems {
+			switch item["type"] {
+			case "image_url":
+				parts = append(parts, llm.ContentPart{
+					Type:     "image_url",
+					ImageURL: &llm.ImageURL{URL: item["url"]},
+				})
+			case "video":
+				parts = append(parts, llm.ContentPart{
+					Type:  "video",
+					Video: item["url"],
+				})
+			case "input_audio":
+				parts = append(parts, llm.ContentPart{
+					Type: "input_audio",
+					InputAudio: &llm.InputAudio{
+						Data:   item["data"],
+						Format: item["format"],
+					},
+				})
+			}
+			if p := item["path"]; p != "" {
+				pathList = append(pathList, p)
+			}
+		}
+		if len(parts) > 0 {
+			// Prepend a text part identifying the media
+			textPart := llm.ContentPart{
+				Type: "text",
+				Text: fmt.Sprintf("[Media loaded: %s] Describe what you see/hear.", strings.Join(pathList, ", ")),
+			}
+			parts = append([]llm.ContentPart{textPart}, parts...)
+			messages = append(messages, llm.Message{
+				Role:         "user",
+				Content:      fmt.Sprintf("[Media: %s]", strings.Join(pathList, ", ")),
+				ContentParts: parts,
+			})
+		}
+	}
 
 	// Inject ephemerals as a system-level hint (not user, to avoid consecutive user merging)
 	if len(ephemerals) > 0 {

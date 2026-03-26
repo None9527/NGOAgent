@@ -47,14 +47,13 @@ Core rules:
 
 // ToolProtocol goes at MID (near tooling) — procedural reference, looked up when needed
 const ToolProtocol = `CRITICAL — Mandatory Tool Protocol (violation = test failure):
-1. Starting work on a complex request (multi-file, multi-step, or architectural changes) → FIRST call task_boundary(mode="planning"). For simple tasks (single file, ≤3 steps), skip planning and execute directly.
-2. Create plan.md using task_plan(action=create, type=plan) — NEVER use write_file for plan.md, task.md, or walkthrough.md.
-3. After creating plan.md → MUST call notify_user(blocked_on_user=true) and STOP immediately. Do not call any other tools.
-4. Do NOT write code (write_file/edit_file) before plan.md is created and approved by the user.
-5. notify_user is the ONLY way to communicate with the user during a task.
-6. Every 3-4 tool calls, call task_boundary to update progress.
-7. When entering EXECUTION mode → MUST create task.md via task_plan(action=create, type=task) as your first action.
-8. When entering VERIFICATION mode → if plan.md was created, MUST create walkthrough.md via task_plan(action=create, type=walkthrough). Skip walkthrough for simple tasks that did not use planning.`
+1. Use task_boundary to report progress on multi-step tasks. Set mode to describe your current phase ("planning" / "execution" / "verification") — this is a UI label for progress tracking.
+2. If planning mode is active (you will see EphPlanningMode instructions), follow the full planning framework: create plan.md → notify_user → wait for approval → execute. Otherwise, execute directly.
+3. Use task_plan(action=create, type=plan|task|walkthrough) for plan.md, task.md, walkthrough.md — NEVER use write_file for these.
+4. notify_user is the ONLY way to communicate with the user during a task.
+5. Every 3-4 tool calls, call task_boundary to update progress.
+6. When starting execution on a multi-step task → create task.md via task_plan(action=create, type=task).
+7. After completing a planned task → create walkthrough.md via task_plan(action=create, type=walkthrough). Skip for simple tasks.`
 
 // ResponseFormat goes at TAIL (recency) — directly influences current output
 const ResponseFormat = `Response rules (apply to EVERY response):
@@ -235,6 +234,18 @@ Actions:
 - cleanup: Remove the sandbox directory.
 
 FORGE LOOP: setup → execute in sandbox → assert → (if failed: diagnose → fix → retry) → cleanup`
+
+const ToolViewMedia = `Load media files for native multimodal perception. Images, videos, and audio are injected directly into the next LLM call.
+
+Supports:
+- Images (.png, .jpg, .webp, .gif, .svg, etc.) → base64 encoded, resized to ≤1024px
+- Videos (.mp4, .mov, .webm, .avi, etc.) → native video understanding via URL
+- Audio (.mp3, .wav, .ogg, .flac, etc.) → base64 encoded for native audio understanding
+
+Usage:
+- paths: array of absolute file paths (max 8)
+- If you are a vision-capable model (VLM), use this tool to SEE images/videos directly instead of calling external skills.
+- Media becomes visible in your NEXT response — describe what you see after calling this tool.`
 
 // ═══════════════════════════════════════════
 // Ephemeral Messages

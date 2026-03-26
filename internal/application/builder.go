@@ -216,6 +216,12 @@ func Build() (*App, error) {
 	brainArtifactTool := tool.NewBrainArtifactTool(nil) // Lazy: Brain set per-session
 	registry.Register(brainArtifactTool)
 	registry.Register(tool.NewUndoEditTool(fileHistory))
+	// Multimodal: view_media tool for native VLM perception
+	viewMediaAddr := fmt.Sprintf("http://localhost:%d", cfg.Server.HTTPPort)
+	if cfg.Server.HTTPPort == 0 {
+		viewMediaAddr = "http://localhost:19996"
+	}
+	registry.Register(tool.NewViewMediaTool(viewMediaAddr))
 	// manage_cron tool is registered after CronManager creation (Phase 7)
 
 	// ═══════════════════════════════════════════

@@ -27,7 +27,7 @@
   border-radius: 10px;
   background: var(--tgp-bg);
   overflow: hidden;
-  backdrop-filter: blur(8px);
+  /* backdrop-filter removed: blur leaks across Virtuoso virtual list items */
   max-height: 60vh;
   overflow-y: auto;
   scrollbar-width: thin;

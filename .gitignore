@@ -1,6 +1,8 @@
-# ── Build output ──
+# ── Build output & binaries ──
 /ngoagent
+/bot
 *.exe
+*.bin
 
 # ── Go ──
 vendor/
@@ -16,11 +18,17 @@ venv/
 webui/node_modules/
 webui/dist/
 cli/node_modules/
+package-lock.json
+webui/package-lock.json
+
+# ── Capacitor / Mobile (generated) ──
+webui/android/
+webui/ios/
 
 # ── Logs ──
 *.log
 
-# ── Runtime data (user-specific, root-level only) ──
+# ── Runtime data (user-specific) ──
 /.ngoagent/
 /workspace/
 /uploads/
@@ -29,22 +37,12 @@ cli/node_modules/
 config.yaml
 config.yml
 
-# ── Test / Forge scripts ──
+# ── Reference / Research (not source) ──
+.antigravity-ref/
+
+# ── Test / Forge / Debug ──
 forge_*.py
 heartbeat.py
-
-# ── IDE ──
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# ── OS ──
-.DS_Store
-Thumbs.db
-
-# ── Debug artifacts ──
 debug_*
 pw_debug*
 dom.html
@@ -53,8 +51,23 @@ test.mjs
 test.ts
 test_pw.py
 
+# ── IDE ──
+.idea/
+.vscode/
+vscode/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
 # ── Database ──
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+
+# ── Third-party notices ──
+ThirdPartyNotices.txt

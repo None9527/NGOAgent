@@ -106,81 +106,128 @@
 
 /* ─── Code Block (CodeBlockRenderer) ──────────────────────── */
 
-.markdown-content .code-block-renderer {
+.markdown-content .cb {
   margin: 0.9em 0;
   border-radius: 10px;
   overflow: hidden;
-  border: 1px solid rgba(255,255,255,0.07);
-  background: #161b22;
+  border: 1px solid var(--color-border, rgba(255,255,255,0.07));
+  background: var(--color-code-bg, #171717);
 }
 
-.markdown-content .code-block-header {
+/* ── Header bar ── */
+.markdown-content .cb-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 14px;
-  background: rgba(255,255,255,0.04);
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  padding: 0 12px;
+  height: 34px;
+  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid var(--color-border-subtle, rgba(255,255,255,0.04));
 }
 
-.markdown-content .code-block-lang {
-  font-family: 'JetBrains Mono', monospace;
+.markdown-content .cb-lang {
+  font-family: var(--app-font-mono, 'JetBrains Mono', monospace);
   font-size: 11px;
   font-weight: 500;
   text-transform: lowercase;
-  color: rgba(148, 163, 184, 0.7);
-  letter-spacing: 0.04em;
+  color: var(--color-text-muted, rgba(148, 163, 184, 0.6));
+  letter-spacing: 0.03em;
+  user-select: none;
 }
 
-.markdown-content .code-block-copy {
+.markdown-content .cb-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--app-font-sans, system-ui, sans-serif);
   font-size: 11px;
   font-weight: 500;
-  color: rgba(148, 163, 184, 0.5);
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
+  color: var(--color-text-muted, rgba(148, 163, 184, 0.5));
+  background: transparent;
+  border: none;
   border-radius: 5px;
-  padding: 2px 10px;
+  padding: 3px 8px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: color 0.15s, background 0.15s;
 }
 
-.markdown-content .code-block-copy:hover {
-  color: rgba(255,255,255,0.9);
-  background: rgba(255,255,255,0.1);
-  border-color: rgba(255,255,255,0.15);
+.markdown-content .cb-copy:hover {
+  color: var(--color-text, rgba(255,255,255,0.9));
+  background: rgba(255,255,255,0.08);
 }
 
-.markdown-content .code-block-content {
+.markdown-content .cb-copy.cb-copied {
+  color: var(--color-success, #059669);
+}
+
+/* ── Code body (lines + code side by side) ── */
+.markdown-content .cb-body {
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Line numbers gutter */
+.markdown-content .cb-lines {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  padding: 14px 0 14px 14px;
+  text-align: right;
+  user-select: none;
+  pointer-events: none;
+  border-right: 1px solid var(--color-border-subtle, rgba(255,255,255,0.04));
+  min-width: 38px;
+}
+
+.markdown-content .cb-lines span {
+  font-family: var(--app-font-mono, 'JetBrains Mono', monospace);
+  font-size: 12px;
+  line-height: 1.65;
+  color: rgba(115, 115, 115, 0.5);
+  padding-right: 12px;
+}
+
+/* Code area */
+.markdown-content .cb-code {
+  flex: 1;
+  min-width: 0;
   overflow-x: auto;
 }
 
-/* Shiki output — ensure monospace + proper line heights */
-.markdown-content .code-block-content pre {
+/* Shiki output: pre/code reset — strip ALL inline backgrounds */
+.markdown-content .cb-code pre {
   margin: 0;
   padding: 14px 16px;
-  font-family: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--app-font-mono, 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace);
   font-size: 13px;
   line-height: 1.65;
   background: transparent !important;
 }
 
-.markdown-content .code-block-content code {
+.markdown-content .cb-code code {
   font-family: inherit;
   font-size: inherit;
-  background: none;
+  background: none !important;
   border: none;
   padding: 0;
   color: inherit;
 }
 
-/* Fallback pre when Shiki not yet loaded */
-.markdown-content pre:not(.code-block-content pre) {
+/* Kill Shiki per-token background (github-dark theme sets bg on spans) */
+.markdown-content .cb-code span {
+  background: none !important;
+  background-color: transparent !important;
+}
+
+/* Fallback pre (outside CodeBlockRenderer) */
+.markdown-content pre:not(.cb-code pre) {
   margin: 0.9em 0;
   padding: 14px 16px;
-  background: #161b22;
-  border: 1px solid rgba(255,255,255,0.07);
+  background: var(--color-code-bg, #171717);
+  border: 1px solid var(--color-border, rgba(255,255,255,0.07));
   border-radius: 10px;
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-family: var(--app-font-mono, 'JetBrains Mono', Consolas, monospace);
   font-size: 13px;
   line-height: 1.65;
   overflow-x: auto;
@@ -378,7 +425,7 @@
   color: white;
   font-size: 22px;
   font-weight: 600;
-  backdrop-filter: blur(2px);
+  /* backdrop-filter removed: blur() bleeds outside overflow:hidden and covers entire message */
   cursor: pointer;
   border-radius: 10px;
 }
@@ -453,5 +500,6 @@
   .markdown-content h3 { font-size: 1.08em; }
   .markdown-content th,
   .markdown-content td { padding: 6px 10px; font-size: 12.5px; }
-  .markdown-content .code-block-content pre { font-size: 12px; padding: 10px 12px; }
+  .markdown-content .cb-code pre { font-size: 12px; padding: 10px 12px; }
+  .markdown-content .cb-lines { display: none; }
 }

@@ -70,10 +70,16 @@ export async function highlight(
       ? normalizedLang
       : 'text'
 
-    return hl.codeToHtml(code, {
+    let html = hl.codeToHtml(code, {
       lang: supportedLang,
       theme,
     })
+
+    // Strip all inline background-color from Shiki output
+    // (prevents bg leaking through — container provides the bg)
+    html = html.replace(/background-color:[^;"}]+;?/g, '')
+
+    return html
   } catch (e) {
     console.warn('[shikiHighlight] fallback for lang:', lang, e)
     return `<pre><code>${escapeHtml(code)}</code></pre>`

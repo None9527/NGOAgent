@@ -94,24 +94,12 @@ export function processEvent(
     case 'tool_start': {
       const toolName = (event.name as string) || 'unknown'
 
-      // task_boundary → inject as section delimiter, not as regular tool card
+      // task_boundary → reset assistant state only; section injection happens via progress event
       if (toolName === 'task_boundary') {
-        const rawArgs = (event.args || {}) as Record<string, unknown>
         state.currentAssistantId = null
         state.currentAssistantText = ''
         state.currentThinkingId = null
         state.currentThinkingText = ''
-        cb.onMessage({
-          uuid: uid(),
-          timestamp: new Date().toISOString(),
-          type: 'task_section',
-          taskSection: {
-            taskName: (rawArgs.task_name as string) || '',
-            status: (rawArgs.status as string) || '',
-            summary: (rawArgs.summary as string) || '',
-            mode: (rawArgs.mode as string) || '',
-          },
-        })
         break
       }
 

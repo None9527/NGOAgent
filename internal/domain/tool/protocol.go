@@ -15,6 +15,7 @@ const (
 	SignalProgress                  // State update (task_boundary)
 	SignalYield                     // Yield control to user (notify_user)
 	SignalSkillLoaded               // SKILL.md was read by agent (L2 trigger)
+	SignalMediaLoaded               // Media content loaded for VLM injection
 )
 
 // ─── Terminal Step Configuration (declarative, like Anti) ─────
@@ -52,8 +53,9 @@ type DeltaSink interface {
 // LoopState is a mutable bag of state the dispatcher writes back.
 // The agent loop provides a concrete implementation.
 type LoopState struct {
-	PlanMode          string   // "auto" | "plan" | "agentic" — from chat request
-	PendingEphemerals []string // Ephemeral messages to inject for next LLM turn
+	PlanMode          string              // "auto" | "plan" | "agentic" — from chat request
+	PendingEphemerals []string            // Ephemeral messages to inject for next LLM turn
+	PendingMedia      []map[string]string // Multimodal: media items to inject {"type", "url"/"data", "path", "format"}
 	PreviousMode      string
 	BoundaryTaskName  string
 	BoundaryMode      string
@@ -77,6 +79,7 @@ var handlers = map[Signal]SignalHandler{
 	SignalProgress:    handleProgress,
 	SignalYield:       handleYield,
 	SignalSkillLoaded: handleSkillLoaded,
+	SignalMediaLoaded: handleMediaLoaded,
 }
 
 func handleProgress(result ToolResult, sink DeltaSink, state *LoopState) {
@@ -151,6 +154,14 @@ func handleSkillLoaded(result ToolResult, _ DeltaSink, state *LoopState) {
 	state.SkillPath, _ = result.Payload["skill_path"].(string)
 }
 
+func handleMediaLoaded(result ToolResult, _ DeltaSink, state *LoopState) {
+	media, ok := result.Payload["media"].([]map[string]string)
+	if !ok {
+		return
+	}
+	state.PendingMedia = append(state.PendingMedia, media...)
+}
+
 // ─── Dispatcher ──────────────────────────────────────────────
 
 // Dispatch processes the signal in a ToolResult.
@@ -188,6 +199,14 @@ func SkillLoadedResult(output, skillName, skillPath string) (ToolResult, error) 
 			"skill_name": skillName,
 			"skill_path": skillPath,
 		},
+	}, nil
+}
+
+func MediaLoadedResult(output string, media []map[string]string) (ToolResult, error) {
+	return ToolResult{
+		Output:  output,
+		Signal:  SignalMediaLoaded,
+		Payload: map[string]any{"media": media},
 	}, nil
 }
 

@@ -116,6 +116,7 @@ type AgentLoop struct {
 	yieldRequested   bool   // set true by notify_user(blocked_on_user=true)
 	skillLoaded      string // L2: skill name loaded via SKILL.md read (one-shot)
 	skillPath        string // L2: skill directory path
+	pendingMedia     []map[string]string // Multimodal: media items pending injection into next LLM call
 
 	// Artifact staleness tracking (Anti-style: steps since last interaction)
 	artifactLastStep map[string]int // artifact name → last step that touched it
@@ -378,5 +379,10 @@ func (a *AgentLoop) syncLoopState(ps *dtool.LoopState) {
 	// Skip in agentic mode — agent self-reviews, no forced yield
 	if ps.ForceNextTool != "" && ps.PlanMode != "agentic" {
 		a.guard.SetForceToolName(ps.ForceNextTool)
+	}
+	// Multimodal: transfer pending media from protocol dispatcher
+	if len(ps.PendingMedia) > 0 {
+		a.pendingMedia = append(a.pendingMedia, ps.PendingMedia...)
+		ps.PendingMedia = nil
 	}
 }

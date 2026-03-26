@@ -6,6 +6,7 @@
 
 import {
   forwardRef,
+  useCallback,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -194,7 +195,7 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
       if (msg.type === 'tool_call' && msg.toolCall) {
         // Single tool_call not in a group (shouldn't happen with groupMessages, but fallback)
         const config = getToolRenderer(msg.toolCall);
-        if (!config) return null;
+        if (!config) return <div style={{ height: 1, overflow: 'hidden' }} />;
         const ToolCallComponent = config.component;
         element = (
           <ToolCallComponent
@@ -207,7 +208,7 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
         );
       } else {
         const content = extractContent(msg.message);
-        if (!content.trim()) return null;
+        if (!content.trim()) return <div style={{ height: 1, overflow: 'hidden' }} />;
         const timestamp = parseTimestamp(msg.timestamp);
 
         if (msg.type === 'user') {
@@ -246,7 +247,7 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
         }
       }
 
-      if (!element) return null;
+      if (!element) return <div style={{ height: 1, overflow: 'hidden' }} />;
 
       return (
         <MessageErrorBoundary key={key}>
@@ -300,25 +301,25 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
     }
 
     // Footer: thinking dots (before first response) + spacer for floating composer
-    const Footer = () => {
-      if (!isStreaming || renderItems.length === 0) return (
-        <div className="h-[200px] md:h-[250px] pointer-events-none" aria-hidden="true" />
-      );
-      const last = renderItems[renderItems.length - 1];
-      const showDots = last.type === 'message' && last.data.type === 'user';
-      return (
-        <>
-          {showDots && (
-            <div className="flex items-center gap-[6px] pl-[10px] py-4">
-              <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" />
-              <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" style={{ animationDelay: '0.3s' }} />
-              <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" style={{ animationDelay: '0.6s' }} />
-            </div>
-          )}
-          <div className="h-[200px] md:h-[250px] pointer-events-none" aria-hidden="true" />
-        </>
-      );
-    };
+    // MUST be a stable reference — inline functions cause Virtuoso to remount on every render → scroll jank.
+    const lastItemType = renderItems.length > 0 ? renderItems[renderItems.length - 1] : null;
+    const showThinkingDots = isStreaming && lastItemType?.type === 'message' && lastItemType.data.type === 'user';
+
+    const FooterComponent = useCallback(() => (
+      <>
+        {showThinkingDots && (
+          <div className="flex items-center gap-[6px] pl-[10px] py-4">
+            <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" />
+            <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" style={{ animationDelay: '0.3s' }} />
+            <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" style={{ animationDelay: '0.6s' }} />
+          </div>
+        )}
+        <div className="h-[280px] md:h-[340px] pointer-events-none" aria-hidden="true" />
+      </>
+    ), [showThinkingDots]);
+
+    // Stable components object — only recreated when Footer reference changes
+    const virtuosoComponents = useMemo(() => ({ Footer: FooterComponent }), [FooterComponent]);
 
     return (
       <div className={containerClasses} ref={scrollContainerRef}
@@ -328,9 +329,10 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
           data={renderItems}
           itemContent={renderItem}
           style={customScrollParent ? undefined : { height: '100%' }}
-          increaseViewportBy={{ top: 400, bottom: 400 }}
+          increaseViewportBy={{ top: 600, bottom: 600 }}
           customScrollParent={customScrollParent ?? undefined}
-          components={{ Footer }}
+          components={virtuosoComponents}
+          defaultItemHeight={80}
         />
       </div>
     );

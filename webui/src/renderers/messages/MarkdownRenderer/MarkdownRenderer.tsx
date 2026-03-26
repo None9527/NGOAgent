@@ -25,10 +25,10 @@ import './MarkdownRenderer.css'
 // ─── Constants ───────────────────────────────────────────────
 
 const FILE_PATH_REGEX =
-  /(?:[a-zA-Z]:)?[/\\](?:[\w\-. ]+[/\\])+[\w\-. ]+\.(tsx?|jsx?|css|scss|json|md|py|java|go|rs|c|cpp|h|hpp|sh|yaml|yml|toml|xml|html|vue|svelte)/gi
+  /(?:[a-zA-Z]:)?[/\\](?:[\w\p{L}\p{N}\-. ]+[/\\])+[\w\p{L}\p{N}\-. ]+\.(tsx?|jsx?|css|scss|json|md|py|java|go|rs|c|cpp|h|hpp|sh|yaml|yml|toml|xml|html|vue|svelte)/giu
 
 const MEDIA_PATH_REGEX =
-  /(?:file:\/\/)?(\/(?:[\w\-. ]+\/)*[\w\-. ]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))(?=[\s"',;)\]|]|$)/g
+  /(?:file:\/\/)?(\/(?:[\w\p{L}\p{N}\-. ]+\/)*[\w\p{L}\p{N}\-. ]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v|mp3|wav|ogg|flac|aac|m4a|wma|pdf))(?=[\s"',;)\]|]|$)/gu
 
 const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?)$/i
 const IMAGE_MD_RE = /^!\[.*?\]\(.*?\)$/
@@ -77,6 +77,10 @@ function preprocessContent(content: string, enableFileLinks: boolean): string {
     if (/!\[.*?\]\(.*?\)/.test(line)) return line
 
     MEDIA_PATH_REGEX.lastIndex = 0
+    // Strip backticks around media paths so they render as images, not inline code
+    // e.g. `path.png` → path.png (only for known media extensions)
+    line = line.replace(/`(\/(?:[\w\p{L}\p{N}\-. ]+\/)*[\w\p{L}\p{N}\-. ]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v))`/gu, '$1')
+    MEDIA_PATH_REGEX.lastIndex = 0
     line = line.replace(MEDIA_PATH_REGEX, (_match, filePath) => {
       if (seenMedia.has(filePath)) return ''
       seenMedia.add(filePath)
@@ -113,13 +117,24 @@ function preprocessContent(content: string, enableFileLinks: boolean): string {
         return `<img src="${m[2]}" alt="${m[1]}" loading="lazy" draggable="false" class="md-media-img" />`
       }
 
-      const cells = imageGroup.slice(0, 4).map(img =>
-        `<div class="md-gallery-cell">${mdToImg(img)}</div>`
-      ).join('\n')
-      const overflow = count > 4
-        ? `<div class="md-gallery-overflow">+${count - 4}</div>`
+      // Build cells; if overflow, put the +N counter INSIDE the 4th cell
+      const visible = imageGroup.slice(0, 4)
+      const cells = visible.map((img, i) => {
+        const imgHtml = mdToImg(img)
+        if (count > 4 && i === 3) {
+          // Last visible cell gets the overflow overlay inside it
+          return `<div class="md-gallery-cell">${imgHtml}<div class="md-gallery-overflow">+${count - 4}</div></div>`
+        }
+        return `<div class="md-gallery-cell">${imgHtml}</div>`
+      }).join('\n')
+      // Hidden imgs for overflow images — invisible but scanned by allImageUrls for lightbox
+      const hiddenImgs = count > 4
+        ? imageGroup.slice(4).map(img => {
+            const m = img.match(/^!\[([^\]]*)\]\(([^)]+)\)$/)
+            return m ? `<img src="${m[2]}" alt="${m[1]}" style="display:none" class="md-media-img" />` : ''
+          }).join('')
         : ''
-      merged.push(`\n<div class="md-gallery ${cls}">\n${cells}\n${overflow}\n</div>\n`)
+      merged.push(`\n<div class="md-gallery ${cls}">\n${cells}\n${hiddenImgs}\n</div>\n`)
     }
     imageGroup = []
   }
@@ -238,14 +253,31 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
   }, [allImageUrls])
 
   // Delegated click handler for raw HTML img elements (gallery images)
+  // Also handles .md-gallery-overflow clicks → opens lightbox at first hidden image
   const containerRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const node = containerRef.current
     if (!node) return
     const handler = (e: MouseEvent) => {
       const target = e.target as HTMLElement
+      // Direct image click
       if (target.tagName === 'IMG' && target.classList.contains('md-media-img')) {
         handleImageClick((target as HTMLImageElement).src)
+        return
+      }
+      // +N overflow click → open lightbox at 5th image (index 4)
+      const overflow = target.closest('.md-gallery-overflow') as HTMLElement | null
+      if (overflow) {
+        // Find the 4th visible image's src to get correct lightbox offset
+        const cell = overflow.closest('.md-gallery-cell')
+        const img = cell?.querySelector('img.md-media-img') as HTMLImageElement | null
+        if (img) {
+          handleImageClick(img.src)
+        } else {
+          // fallback: open at index 4
+          setLightboxIndex(4)
+          setLightboxOpen(true)
+        }
       }
     }
     node.addEventListener('click', handler)
@@ -257,11 +289,15 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
   const components: Components = useMemo(
     () => ({
       code({ node: _node, className, children, ...props }) {
-        const isInline = !className?.startsWith('language-')
         const lang = className?.replace('language-', '') ?? ''
         const code = String(children).replace(/\n$/, '')
 
-        if (isInline || !lang) {
+        // Detect block vs inline: fenced code blocks (even without a language)
+        // always contain newlines or have a language class.
+        // Single-line, no-class = inline code.
+        const isBlock = !!className?.startsWith('language-') || code.includes('\n')
+
+        if (!isBlock) {
           return <code className="md-inline-code" {...props}>{children}</code>
         }
 

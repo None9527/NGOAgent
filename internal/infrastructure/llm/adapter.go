@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -154,6 +155,27 @@ func minInt(a, b int) int {
 	return b
 }
 
+// rawTokenRe matches LLM raw token markers that sometimes leak into tool call fields.
+// Example: <|tool_call_argument_begin|>, <|im_end|>, etc.
+var rawTokenRe = regexp.MustCompile(`<\|[^|]*\|>`)
+
+// sanitizeToolName strips raw token markers and anything after them from a tool name.
+// When an LLM hallucinates, a tool name like "command_status" can become
+// "toolu_01Y5y5kU9cYb1o2jW6gHjQpE<|tool_call_argument_begin|>{\"command_id\"".
+// This function extracts just the valid tool name or returns "" if unrecoverable.
+func sanitizeToolName(name string) string {
+	// Fast path: no markers
+	if !strings.Contains(name, "<|") {
+		return name
+	}
+	// Strip everything from the first raw token marker onward
+	loc := rawTokenRe.FindStringIndex(name)
+	if loc != nil {
+		name = strings.TrimSpace(name[:loc[0]])
+	}
+	return name
+}
+
 // StreamAdapter processes an SSE stream using a ChunkMapper and emits unified StreamChunks.
 // This encapsulates all generic logic: SSE line parsing, tool_call argument buffering,
 // chunk assembly, and Response aggregation.
@@ -246,7 +268,7 @@ func (a *StreamAdapter) Process(body io.Reader, ch chan<- StreamChunk) (*Respons
 					ID:   tc.ID,
 					Type: "function",
 					Function: ToolCallFunc{
-						Name: tc.Name,
+						Name: sanitizeToolName(tc.Name),
 					},
 				})
 				toolCallArgs[idx] = &strings.Builder{}

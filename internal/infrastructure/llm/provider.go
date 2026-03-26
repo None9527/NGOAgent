@@ -39,15 +39,23 @@ type Message struct {
 
 // ContentPart is a single part of a multimodal message (OpenAI Vision format).
 type ContentPart struct {
-	Type     string    `json:"type"`                // "text" or "image_url"
-	Text     string    `json:"text,omitempty"`      // for type="text"
-	ImageURL *ImageURL `json:"image_url,omitempty"` // for type="image_url"
+	Type       string      `json:"type"`                  // "text" | "image_url" | "video" | "input_audio"
+	Text       string      `json:"text,omitempty"`        // for type="text"
+	ImageURL   *ImageURL   `json:"image_url,omitempty"`   // for type="image_url"
+	Video      any         `json:"video,omitempty"`       // for type="video": string URL or []string frame URLs
+	InputAudio *InputAudio `json:"input_audio,omitempty"` // for type="input_audio"
 }
 
 // ImageURL holds the image data URL or HTTP URL.
 type ImageURL struct {
 	URL    string `json:"url"`              // "data:image/png;base64,..." or https://...
 	Detail string `json:"detail,omitempty"` // "auto", "low", "high"
+}
+
+// InputAudio holds base64-encoded audio data for native audio understanding.
+type InputAudio struct {
+	Data   string `json:"data"`   // base64 encoded audio
+	Format string `json:"format"` // "wav", "mp3", "ogg", "flac"
 }
 
 // MarshalJSON custom-serializes Message for OpenAI Vision compatibility.

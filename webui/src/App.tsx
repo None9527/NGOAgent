@@ -68,6 +68,10 @@ export default function App() {
     } catch { return false }
   })
   const inputRef = useRef<HTMLDivElement>(null)
+  // scrollEl: the mounted DOM node — used as Virtuoso's customScrollParent.
+  // Must be state (not ref.current) so Virtuoso re-renders after mount with real element.
+  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null)
+  useEffect(() => { setScrollEl(scrollContainerRef.current) }, [scrollContainerRef])
 
   // Reactive scroll-to-end: fires after React commits state from loadHistory
   useEffect(() => {
@@ -348,107 +352,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Plan Review Banner */}
-        {planReview && (
-          <div className="absolute left-1/2 -translate-x-1/2 z-40 flex flex-col gap-2 w-full max-w-4xl px-4 pointer-events-none"
-            style={{ 
-              top: pendingApprovals.length > 0 ? '12rem' : '5rem',
-              animation: 'slideDown 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
-            }}>
-            <div className="w-full rounded-2xl border border-blue-500/30 bg-black/60 backdrop-blur-[40px] px-5 py-4 flex flex-col gap-3 shadow-[0_20px_40px_-10px_rgba(0,0,0,0.8)] pointer-events-auto">
-              <div className="flex items-start gap-4">
-                <span className="text-blue-400 text-xl mt-0.5 opacity-90 leading-none">📋</span>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold tracking-wide text-blue-200">计划执行审批</div>
-                  <div className="text-[13px] text-blue-100/60 mt-1.5 leading-relaxed">{planReview.message}</div>
-                  {planReview.paths.length > 0 && (
-                    <div className="text-[11px] text-gray-500 mt-2 font-mono flex flex-wrap gap-1">
-                      {planReview.paths.map(p => (
-                        <span key={p} className="bg-black/40 px-2 py-0.5 rounded-md border border-white/5">{p.split('/').pop()}</span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {showFeedbackInput && (
-                <div className="flex gap-2 mt-1">
-                  <input
-                    type="text"
-                    value={planFeedbackInput}
-                    onChange={(e) => setPlanFeedbackInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && planFeedbackInput.trim()) {
-                        const text = planFeedbackInput.trim()
-                        setShowFeedbackInput(false)
-                        setPlanReview(null)
-                        setPlanFeedbackInput('')
-                        handleSend(undefined, text)
-                      }
-                    }}
-                    placeholder="输入修改意见..."
-                    className="flex-1 bg-black/30 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder:text-gray-600 focus:outline-none focus:border-blue-500/40"
-                    autoFocus
-                  />
-                  <button
-                    onClick={() => {
-                      if (planFeedbackInput.trim()) {
-                        const text = planFeedbackInput.trim()
-                        setShowFeedbackInput(false)
-                        setPlanReview(null)
-                        setPlanFeedbackInput('')
-                        handleSend(undefined, text)
-                      }
-                    }}
-                    className="px-3 py-1.5 rounded-lg text-sm font-medium bg-blue-900/60 hover:bg-blue-800/80 text-blue-200 border border-blue-700/40 transition-colors"
-                  >
-                    发送
-                  </button>
-                </div>
-              )}
-
-              <div className="flex gap-2 justify-end flex-wrap mt-2">
-                <button
-                  onClick={() => {
-                    setPlanReview(null)
-                    setShowFeedbackInput(false)
-                    handleSend(undefined, 'rejected')
-                  }}
-                  className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 transition-all hover:scale-105"
-                >
-                  拒绝并关闭
-                </button>
-                <button
-                  onClick={() => {
-                    hub.openTab('brain')
-                    if (planReview.paths.length > 0) {
-                      hub.focusFile(planReview.paths[0].split('/').pop() || 'plan.md')
-                    }
-                  }}
-                  className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 transition-all hover:scale-105"
-                >
-                  检视大纲
-                </button>
-                <button
-                  onClick={() => setShowFeedbackInput(true)}
-                  className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition-all hover:scale-105"
-                >
-                  修改计划
-                </button>
-                <button
-                  onClick={() => {
-                    setPlanReview(null)
-                    setShowFeedbackInput(false)
-                    handleSend(undefined, 'approved')
-                  }}
-                  className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-all hover:scale-105"
-                >
-                  批准执行
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
         {/* ── Scrollable Chat Area ── */}
         {/* The hook's MutationObserver + ResizeObserver watches this container */}
         {/* NOTE: Do NOT add CSS scroll-smooth here — it overrides scrollTop assignments and causes */}
@@ -461,39 +364,18 @@ export default function App() {
                 <WelcomeScreen onSuggestionClick={handleSuggestionClick} />
               </div>
             ) : (
-            <div className="w-full flex flex-col relative">
+            <div className="w-full flex flex-col relative min-h-full">
               <ChatViewer
                 messages={messages}
                 theme="dark"
                 sessionId={sessionId}
                 onRetry={handleRetry}
-                customScrollParent={scrollContainerRef.current}
+                customScrollParent={scrollEl}
                 isStreaming={streamPhase === 'streaming' || streamPhase === 'auto_waking'}
               />
 
 
 
-              {/* Live Task Progress Card */}
-              {taskProgress && (
-                <div className="w-full rounded-xl border border-white/[0.06] bg-[#1a1a1a] px-4 py-3 mt-3 mb-2 relative z-[1] transition-all duration-200">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <span className={`inline-block w-2 h-2 rounded-full animate-pulse ${
-                      taskProgress.mode === 'planning' ? 'bg-blue-400' :
-                      taskProgress.mode === 'verification' ? 'bg-emerald-400' : 'bg-amber-400'
-                    }`} />
-                    <span className="text-sm font-medium text-gray-200">{taskProgress.taskName}</span>
-                    <span className={`ml-auto text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded ${
-                      taskProgress.mode === 'planning' ? 'bg-blue-900/50 text-blue-300' :
-                      taskProgress.mode === 'verification' ? 'bg-emerald-900/50 text-emerald-300' :
-                      'bg-amber-900/50 text-amber-300'
-                    }`}>{taskProgress.mode}</span>
-                  </div>
-                  <div className="text-xs text-gray-400">{taskProgress.status}</div>
-                  {taskProgress.summary && (
-                    <div className="text-[11px] text-gray-500 mt-1 line-clamp-2">{taskProgress.summary}</div>
-                  )}
-                </div>
-              )}
             </div>
             )}
           </div>
@@ -502,7 +384,125 @@ export default function App() {
         <div className="absolute bottom-0 left-0 w-full pointer-events-none z-10 pr-[6px]" 
              style={{ background: 'linear-gradient(to bottom, transparent, rgba(0,0,0,0.5) 40%, rgba(0,0,0,0.95) 100%)' }}>
           <div className="w-full max-w-4xl mx-auto px-1 md:px-4 pb-2 md:pb-8 pt-10 md:pt-24 pointer-events-auto">
+            {/* Task Progress Banner — fixed above input, appears/disappears with task_boundary events */}
+            {taskProgress && (
+              <div className="px-1 mb-2">
+              <div className="w-full rounded-xl border border-white/[0.08] bg-[#1c1c1c] px-4 py-2.5 flex items-center gap-3 transition-all duration-200">
+                <span className={`shrink-0 inline-block w-2 h-2 rounded-full animate-pulse ${
+                  taskProgress.mode === 'planning' ? 'bg-blue-400' :
+                  taskProgress.mode === 'verification' ? 'bg-emerald-400' : 'bg-amber-400'
+                }`} />
+                <span className="text-sm font-medium text-gray-200 truncate flex-1">{taskProgress.taskName}</span>
+                <span className={`shrink-0 text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded ${
+                  taskProgress.mode === 'planning' ? 'bg-blue-900/50 text-blue-300' :
+                  taskProgress.mode === 'verification' ? 'bg-emerald-900/50 text-emerald-300' :
+                  'bg-amber-900/50 text-amber-300'
+                }`}>{taskProgress.mode}</span>
+                {taskProgress.status && (
+                  <span className="shrink-0 text-[11px] text-gray-500 hidden sm:block truncate max-w-[140px]">{taskProgress.status}</span>
+                )}
+              </div>
+              </div>
+            )}
             <SubagentDock />
+            {/* Plan Review Banner — width aligned with InputForm */}
+            {planReview && (
+              <div className="px-1 mb-2">
+              <div className="w-full rounded-2xl border border-blue-500/30 bg-black/60 backdrop-blur-[40px] px-5 py-4 flex flex-col gap-3 shadow-[0_20px_40px_-10px_rgba(0,0,0,0.8)]"
+                style={{ animation: 'slideDown 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}>
+                <div className="flex items-start gap-4">
+                  <span className="text-blue-400 text-xl mt-0.5 opacity-90 leading-none">📋</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold tracking-wide text-blue-200">计划执行审批</div>
+                    <div className="text-[13px] text-blue-100/60 mt-1.5 leading-relaxed">{planReview.message}</div>
+                    {planReview.paths.length > 0 && (
+                      <div className="text-[11px] text-gray-500 mt-2 font-mono flex flex-wrap gap-1">
+                        {planReview.paths.map(p => (
+                          <span key={p} className="bg-black/40 px-2 py-0.5 rounded-md border border-white/5">{p.split('/').pop()}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {showFeedbackInput && (
+                  <div className="flex gap-2 mt-1">
+                    <input
+                      type="text"
+                      value={planFeedbackInput}
+                      onChange={(e) => setPlanFeedbackInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && planFeedbackInput.trim()) {
+                          const text = planFeedbackInput.trim()
+                          setShowFeedbackInput(false)
+                          setPlanReview(null)
+                          setPlanFeedbackInput('')
+                          handleSend(undefined, text)
+                        }
+                      }}
+                      placeholder="输入修改意见..."
+                      className="flex-1 bg-black/30 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder:text-gray-600 focus:outline-none focus:border-blue-500/40"
+                      autoFocus
+                    />
+                    <button
+                      onClick={() => {
+                        if (planFeedbackInput.trim()) {
+                          const text = planFeedbackInput.trim()
+                          setShowFeedbackInput(false)
+                          setPlanReview(null)
+                          setPlanFeedbackInput('')
+                          handleSend(undefined, text)
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-lg text-sm font-medium bg-blue-900/60 hover:bg-blue-800/80 text-blue-200 border border-blue-700/40 transition-colors"
+                    >
+                      发送
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex gap-2 justify-end flex-wrap mt-2">
+                  <button
+                    onClick={() => {
+                      setPlanReview(null)
+                      setShowFeedbackInput(false)
+                      handleSend(undefined, 'rejected')
+                    }}
+                    className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 transition-all hover:scale-105"
+                  >
+                    拒绝并关闭
+                  </button>
+                  <button
+                    onClick={() => {
+                      hub.openTab('brain')
+                      if (planReview.paths.length > 0) {
+                        hub.focusFile(planReview.paths[0].split('/').pop() || 'plan.md')
+                      }
+                    }}
+                    className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 transition-all hover:scale-105"
+                  >
+                    检视大纲
+                  </button>
+                  <button
+                    onClick={() => setShowFeedbackInput(true)}
+                    className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition-all hover:scale-105"
+                  >
+                    修改计划
+                  </button>
+                  <button
+                    onClick={() => {
+                      setPlanReview(null)
+                      setShowFeedbackInput(false)
+                      handleSend(undefined, 'approved')
+                    }}
+                    className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-all hover:scale-105"
+                  >
+                    批准执行
+                  </button>
+                </div>
+              </div>
+              </div>
+            )}
             <InputForm
               inputText={inputText}
               inputFieldRef={inputRef as React.RefObject<HTMLDivElement>}

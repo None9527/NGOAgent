@@ -89,8 +89,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.60);
+  /* No backdrop-filter: blur — it bleeds outside overflow:hidden and covers sibling messages */
 }
 .gallery-overflow span {
   font-size: 28px;

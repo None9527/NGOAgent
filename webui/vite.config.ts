@@ -12,6 +12,12 @@ export default defineConfig({
         target: 'http://127.0.0.1:19997',
         changeOrigin: true,
         ws: true,
+        // Ensure WS upgrades work from any origin (LAN IP access)
+        configure: (proxy) => {
+          proxy.on('error', (err) => {
+            console.log('[vite proxy] error', err.message)
+          })
+        },
       },
       '/api': {
         target: 'http://127.0.0.1:19997',
@@ -20,3 +26,4 @@ export default defineConfig({
     },
   },
 })
+

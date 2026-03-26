@@ -4,7 +4,8 @@
  */
 
 import { createContext, useContext, useState, useCallback, useRef, useMemo, useEffect, type ReactNode } from 'react'
-import { reconnectStream, getSharedWSClient, closeSharedWSClient, onWSStateChange } from '../chat/streamHandler'
+import { reconnectStream, getSharedWSClient, onWSStateChange } from '../chat/streamHandler'
+import { uid } from '../chat/messageMapper'
 import { useChatScroll } from '../hooks/useChatScroll'
 import { useSession } from './SessionProvider'
 import { useHub } from './HubProvider'
@@ -86,6 +87,8 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   const [planReview, setPlanReview] = useState<{ message: string; paths: string[] } | null>(null)
   const cancelRef = useRef<(() => void) | null>(null)
   const reconnectingRef = useRef(false) // Track reconnecting state for instant transition
+  // Track the task_section msg id — only inject once per task, update in-place thereafter
+  const currentTaskSectionIdRef = useRef<string | null>(null)
 
   const {
     scrollContainerRef, handleScroll, scrollToBottom, resetToBottom,
@@ -94,6 +97,8 @@ export function StreamProvider({ children }: { children: ReactNode }) {
 
   // Pre-initialize WebSocket connection on mount so it's ready before first message.
   // Wire WS connection state → connectionState for accurate TopNavbar status.
+  // NOTE: Do NOT close the WS on cleanup — it's a session-level singleton that must
+  // survive React StrictMode's mount→unmount→remount cycle in dev.
   useEffect(() => {
     getSharedWSClient()
     const unsub = onWSStateChange((wsState: string) => {
@@ -101,7 +106,7 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       else if (wsState === 'reconnecting' || wsState === 'connecting') setConnectionState('reconnecting')
       else if (wsState === 'closed') setConnectionState('disconnected')
     })
-    return () => { unsub(); closeSharedWSClient() }
+    return () => { unsub() } // Do NOT closeSharedWSClient() here — survives remounts
   }, [])
 
   // ── SSE Callbacks ──
@@ -196,6 +201,7 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     setStreamPhase('idle')
     exitStreamingMode()
     setTaskProgress(null)
+    currentTaskSectionIdRef.current = null
     setConnectionState('connected')
     cancelRef.current = null
     refreshSessions(true)
@@ -207,6 +213,7 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     setStreamPhase('idle')
     exitStreamingMode()
     setTaskProgress(null)
+    currentTaskSectionIdRef.current = null
     // Do NOT set connectionState to 'disconnected' here —
     // stream errors are transient; WS connection may still be alive.
     // connectionState should only reflect actual WS state.
@@ -238,6 +245,23 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     },
     onProgress: (taskName: string, status: string, summary: string, mode: string) => {
       setTaskProgress({ taskName, status, summary, mode })
+      // task_section dedup: inject once, then update in-place
+      if (!currentTaskSectionIdRef.current) {
+        // First progress event → create new task_section message
+        const sectionId = uid()
+        currentTaskSectionIdRef.current = sectionId
+        onMessage({
+          uuid: sectionId,
+          timestamp: new Date().toISOString(),
+          type: 'task_section',
+          taskSection: { taskName, status, summary, mode },
+        })
+      } else {
+        // Subsequent updates → patch the existing task_section in-place
+        onUpdate(currentTaskSectionIdRef.current, {
+          taskSection: { taskName, status, summary, mode },
+        })
+      }
     },
     onSubagentProgress: (runID: string, taskName: string, status: string, done: number, total: number, error?: string, output?: string, currentStep?: string) => {
       setSubagentProgress(prev => {
@@ -270,6 +294,7 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     setStreamPhase('idle')
     exitStreamingMode()
     setTaskProgress(null)
+    currentTaskSectionIdRef.current = null
   }, [streamPhase, exitStreamingMode])
 
   const reconnect = useCallback((sessionId: string, lastSeq: number) => {
