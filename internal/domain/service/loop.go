@@ -117,6 +117,8 @@ type AgentLoop struct {
 	skillLoaded      string // L2: skill name loaded via SKILL.md read (one-shot)
 	skillPath        string // L2: skill directory path
 	pendingMedia     []map[string]string // Multimodal: media items pending injection into next LLM call
+	historicyDirty   bool                // True after compact/truncate — triggers sanitize in doGenerate
+	cachedToolDefs   []llm.ToolDef       // Cached tool definitions (rebuilt only when tools change)
 
 	// Artifact staleness tracking (Anti-style: steps since last interaction)
 	artifactLastStep map[string]int // artifact name → last step that touched it
@@ -176,6 +178,7 @@ func (a *AgentLoop) SetHistory(msgs []llm.Message) {
 	defer a.mu.Unlock()
 	a.history = msgs
 	a.persistedCount = len(msgs)
+	a.historicyDirty = true // loaded history may need sanitization
 }
 
 // AppendMessage adds a message to the history.

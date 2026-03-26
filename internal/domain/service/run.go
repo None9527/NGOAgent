@@ -399,10 +399,16 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 		messages = append(messages, llm.Message{Role: "system", Content: ephContent.String()})
 	}
 
-	// Sanitize: enforce turn ordering first, THEN fix orphan tool_calls/results
-	// (ordering can merge messages and create new orphans, so sanitize must come last)
-	messages = enforceTurnOrdering(messages)
-	messages = sanitizeMessages(messages)
+	// Sanitize only when history was restructured (compact/truncate).
+	// Normal flow produces well-ordered messages, so this is unnecessary overhead.
+	a.mu.Lock()
+	dirty := a.historicyDirty
+	a.historicyDirty = false
+	a.mu.Unlock()
+	if dirty {
+		messages = enforceTurnOrdering(messages)
+		messages = sanitizeMessages(messages)
+	}
 
 	// Check if Guard wants to force a specific tool (Anti's force_tool_name mechanism)
 	forceTool := a.guard.ConsumeForceToolName()
@@ -410,10 +416,18 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 	// Resolve per-model parameters (model_config > agent global > fallback)
 	mp := a.deps.Config.ResolveModelParams(model)
 
+	// Cache tool definitions — tools don't change during a session
+	a.mu.Lock()
+	if a.cachedToolDefs == nil {
+		a.cachedToolDefs = a.deps.ToolExec.ListDefinitions()
+	}
+	toolDefs := a.cachedToolDefs
+	a.mu.Unlock()
+
 	req := &llm.Request{
 		Model:       model,
 		Messages:    messages,
-		Tools:       a.deps.ToolExec.ListDefinitions(),
+		Tools:       toolDefs,
 		Temperature: mp.Temperature,
 		TopP:        mp.TopP,
 		MaxTokens:   mp.MaxOutputTokens,
@@ -877,6 +891,7 @@ CRITICAL: If the conversation contains content inside <preference_knowledge> or 
 	}
 	compacted = append(compacted, tail...)
 	a.history = compacted
+	a.historicyDirty = true // triggers sanitize in next doGenerate
 
 	// Hook: AfterCompact — notify of new compacted state
 	if a.deps.Hooks != nil {
@@ -898,6 +913,7 @@ func (a *AgentLoop) forceTruncate(keep int) {
 	truncated = append(truncated, a.history[len(a.history)-keep:]...)
 	a.history = truncated
 	a.persistedCount = 0 // history restructured, next persist must be full replace
+	a.historicyDirty = true // triggers sanitize in next doGenerate
 }
 
 // persistHistory saves NEW messages incrementally (append-only).
@@ -920,11 +936,15 @@ func (a *AgentLoop) persistHistory() {
 	newMsgs := a.history[baseline:]
 	exports := make([]HistoryExport, len(newMsgs))
 	for i, m := range newMsgs {
-		tc, _ := json.Marshal(m.ToolCalls)
+		var tcStr string
+		if len(m.ToolCalls) > 0 {
+			tc, _ := json.Marshal(m.ToolCalls)
+			tcStr = string(tc)
+		}
 		exports[i] = HistoryExport{
 			Role:       m.Role,
 			Content:    m.Content,
-			ToolCalls:  string(tc),
+			ToolCalls:  tcStr,
 			ToolCallID: m.ToolCallID,
 			Reasoning:  m.Reasoning,
 		}

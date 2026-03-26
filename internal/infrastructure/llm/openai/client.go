@@ -46,25 +46,44 @@ func (c *Client) Models() []string { return c.models }
 func (c *Client) GenerateStream(ctx context.Context, req *llm.Request, ch chan<- llm.StreamChunk) (*llm.Response, error) {
 	defer close(ch)
 
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+	// Build request body — single marshal pass.
+	// If tool_choice is needed, construct map directly to avoid double serialization.
+	var body []byte
+	var err error
+	needsToolChoice := req.ToolChoice != "" && len(req.Tools) > 0
+	if needsToolChoice {
+		policy := llm.GetPolicy(req.Model)
+		needsToolChoice = !policy.SupportsThinking
 	}
 
-	// Inject tool_choice if force_tool_name is set (Anti's force_tool_name mechanism)
-	// Skip for thinking-mode models where tool_choice is not supported
-	if req.ToolChoice != "" && len(req.Tools) > 0 {
-		policy := llm.GetPolicy(req.Model)
-		if !policy.SupportsThinking {
-			var bodyMap map[string]any
-			if json.Unmarshal(body, &bodyMap) == nil {
-				bodyMap["tool_choice"] = map[string]any{
-					"type":     "function",
-					"function": map[string]any{"name": req.ToolChoice},
-				}
-				body, _ = json.Marshal(bodyMap)
-			}
+	if needsToolChoice {
+		bodyMap := map[string]any{
+			"model":    req.Model,
+			"messages": req.Messages,
+			"stream":   req.Stream,
 		}
+		if len(req.Tools) > 0 {
+			bodyMap["tools"] = req.Tools
+		}
+		if req.Temperature > 0 {
+			bodyMap["temperature"] = req.Temperature
+		}
+		if req.TopP > 0 {
+			bodyMap["top_p"] = req.TopP
+		}
+		if req.MaxTokens > 0 {
+			bodyMap["max_tokens"] = req.MaxTokens
+		}
+		bodyMap["tool_choice"] = map[string]any{
+			"type":     "function",
+			"function": map[string]any{"name": req.ToolChoice},
+		}
+		body, err = json.Marshal(bodyMap)
+	} else {
+		body, err = json.Marshal(req)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewReader(body))
