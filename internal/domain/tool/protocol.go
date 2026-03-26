@@ -11,11 +11,11 @@ package tool
 type Signal int
 
 const (
-	SignalNone        Signal = iota // No special side-effect
-	SignalProgress                  // State update (task_boundary)
-	SignalYield                     // Yield control to user (notify_user)
-	SignalSkillLoaded               // SKILL.md was read by agent (L2 trigger)
-	SignalMediaLoaded               // Media content loaded for VLM injection
+	SignalNone        Signal = 0 // No special side-effect
+	SignalProgress    Signal = 1 // State update (task_boundary)
+	SignalYield       Signal = 2 // Yield control to user (notify_user)
+	SignalSkillLoaded Signal = 3 // SKILL.md was read by agent (L2 trigger)
+	SignalMediaLoaded Signal = 4 // Media content loaded for VLM injection
 )
 
 // ─── Terminal Step Configuration (declarative, like Anti) ─────

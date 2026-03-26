@@ -1,27 +1,15 @@
 package service
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image"
-	"image/jpeg"
-	_ "image/gif"
-	_ "image/png"
 	"log"
-	"mime"
 	"os"
-	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
-
-	"golang.org/x/image/draw"
-	_ "golang.org/x/image/webp"
 
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
@@ -240,13 +228,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 		case StateGuardCheck:
 			steps++
 
-			// Hard max_steps enforcement (safety net above BehaviorGuard)
-			maxSteps := a.deps.Config.Agent.MaxSteps
-			if maxSteps > 0 && steps >= maxSteps {
-				a.transition(StateDone)
-				a.deps.Delta.OnText("\n\n[Max steps reached: safety limit]")
-				continue
-			}
+			// maxSteps enforcement is handled by BehaviorGuard.Check() — no duplication here
 
 			tokenEstimate := a.estimateTokens()
 			policy := llm.GetPolicy(a.deps.LLMRouter.CurrentModel())
@@ -318,215 +300,13 @@ loopEnd:
 func (a *AgentLoop) transition(to State) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if !CanTransition(a.state, to) {
+		log.Printf("[WARN] invalid state transition: %s → %s", a.state, to)
+	}
 	a.state = to
 }
 
-// doPrepare detects ephemeral injection needs.
-// Implements Anti's 3-layer ephemeral injection system.
-func (a *AgentLoop) doPrepare(_ context.Context) {
-	// Sub-agents skip all planning/boundary/agentic injections
-	if a.options.Mode == "subagent" {
-		return
-	}
-
-	a.mu.Lock()
-	lastMsg := ""
-	if len(a.history) > 0 {
-		lastMsg = a.history[len(a.history)-1].Content
-	}
-	boundaryName := a.boundaryTaskName
-	boundaryMode := a.boundaryMode
-	boundaryStatus := a.boundaryStatus
-	boundarySummary := a.boundarySummary
-	planMod := a.planModified
-	a.mu.Unlock()
-
-	isPlanning := a.shouldInjectPlanning(lastMsg)
-
-	// Sync planning state to Guard for step-level enforcement
-	// Cache Brain.Read results — reused in Layer 3b below (same doPrepare invocation, no writes in between)
-	planExists := false
-	taskMdExists := false
-	if a.deps.Brain != nil {
-		if _, err := a.deps.Brain.Read("plan.md"); err == nil {
-			planExists = true
-		}
-		if _, err := a.deps.Brain.Read("task.md"); err == nil {
-			taskMdExists = true
-		}
-	}
-	a.guard.SetModeState(isPlanning, planExists, taskMdExists, boundaryMode)
-
-	// === Layer 1: Planning mode base template (skip in agentic — agent self-manages) ===
-	if isPlanning && a.PlanMode() != "agentic" {
-		a.InjectEphemeral(prompttext.EphPlanningMode)
-	}
-
-	// === Layer 1b: Agentic mode — autonomous decision-making ===
-	if a.PlanMode() == "agentic" {
-		a.InjectEphemeral(
-			"🤖 [AGENTIC MODE] You are operating in fully autonomous mode.\n" +
-				"You have complete decision-making authority:\n" +
-				"- For complex, multi-step, or risky tasks: CREATE a plan first (use task_boundary + implementation_plan), then self-review and execute.\n" +
-				"- For simple, single-step tasks: proceed directly without planning.\n" +
-				"- You do NOT need user approval for plans — review them yourself and proceed.\n" +
-				"- Prioritize thoroughness and correctness over speed.\n" +
-				"- For tasks with 3+ independent components, use spawn_agent to parallelize.\n" +
-				"Make your own judgment call on whether planning is needed.")
-		// Team coordination protocol for sub-agent management
-		a.InjectEphemeral(prompttext.TeamLeadPrompt)
-	}
-
-	a.mu.Lock()
-	steps := a.stepsSinceUpdate
-	a.mu.Unlock()
-
-	// === Layer 2: Active task boundary reminder (frequency gated: every 3 steps) ===
-	if boundaryName != "" {
-		if steps == 0 || steps%3 == 0 {
-			msg := prompttext.Render(prompttext.EphActiveTaskReminder, map[string]any{
-				"TaskName": boundaryName,
-				"Status":   boundaryStatus,
-				"Summary":  boundarySummary,
-				"Mode":     boundaryMode,
-			})
-			a.InjectEphemeral(msg)
-		}
-	}
-
-	// === Layer 2b: Boundary frequency nudge (Anti's num_steps pattern) ===
-	if ssb := a.guard.StepsSinceBoundary(); ssb >= 5 {
-		a.InjectEphemeral(fmt.Sprintf(
-			"<ephemeral_message>You have made %d tool calls without updating task progress. "+
-				"Call task_boundary to report your current status when you reach a natural pause point.</ephemeral_message>", ssb))
-	}
-
-	// === Layer 3a: Artifact staleness reminder (Anti-style: steps since last interaction) ===
-	a.mu.Lock()
-	curStep := a.currentStep
-	a.mu.Unlock()
-	if a.deps.Brain != nil {
-		checks := map[string]int{
-			"task.md": 8,  // 8 steps without touching → remind
-			"plan.md": 15, // plan is less frequently updated
-		}
-		for name, threshold := range checks {
-			a.mu.Lock()
-			lastStep, tracked := a.artifactLastStep[name]
-			a.mu.Unlock()
-			if !tracked {
-				continue // not created yet — handled by mode-switch check below
-			}
-			if gap := curStep - lastStep; gap >= threshold {
-				a.InjectEphemeral(fmt.Sprintf(
-					"You have not updated %s in %d steps. Review and update it if needed.", name, gap))
-			}
-		}
-	}
-
-	// === Layer 3b: Planning mode + no plan.md → force reminder ===
-	// Uses cached planExists from above (no disk IO needed)
-	if isPlanning && !planExists {
-		a.InjectEphemeral(prompttext.EphPlanningNoPlanReminder)
-	}
-
-	// === Layer 3c: Plan modified but not reviewed by user ===
-	if planMod && boundaryMode == "planning" {
-		a.InjectEphemeral(prompttext.EphPlanModifiedReminder)
-	}
-
-	// === Layer 3d: Mode transitions (entering/exiting planning) ===
-	a.mu.Lock()
-	prevMode := a.previousMode
-	a.mu.Unlock()
-	if boundaryMode != "" && prevMode != "" && boundaryMode != prevMode {
-		if boundaryMode == "planning" {
-			a.InjectEphemeral(prompttext.EphEnteringPlanningMode)
-		} else if prevMode == "planning" {
-			a.InjectEphemeral(prompttext.EphExitingPlanningMode)
-		}
-		// Fix 3: Mode switch artifact existence check
-		if boundaryMode == "execution" && a.deps.Brain != nil {
-			if _, err := a.deps.Brain.Read("task.md"); err != nil {
-				a.InjectEphemeral("You switched to EXECUTION mode but task.md doesn't exist. " +
-					"Create it via task_plan(action=create, type=task) IMMEDIATELY.")
-			}
-		}
-	}
-
-	// Context usage warning
-	tokenEst := a.estimateTokens()
-	policy := llm.GetPolicy(a.deps.LLMRouter.CurrentModel())
-	pct := int(float64(tokenEst) / float64(policy.ContextWindow) * 100)
-	if pct > 60 {
-		msg := prompttext.Render(prompttext.EphContextStatus, map[string]any{
-			"Percent": pct,
-			"Used":    tokenEst,
-			"Total":   policy.ContextWindow,
-		})
-		a.InjectEphemeral(msg)
-	}
-
-	// === Layer 4: Skill trigger auto-injection (heavy skills) ===
-	// When user message matches a heavy skill's trigger words, inject a quick hint
-	// so LLM can use run_command directly without reading full SKILL.md.
-	if a.deps.SkillMgr != nil && lastMsg != "" && a.currentStep < 2 {
-		matches := a.deps.SkillMgr.MatchTriggers(lastMsg)
-		for _, m := range matches {
-			usage := m.Skill.Command
-			if usage == "" {
-				usage = "<subcommand> [args]"
-			}
-			a.InjectEphemeral(fmt.Sprintf(
-				"	Skill available: %s\n"+
-					"Entry: %s/run.sh\n"+
-					"Quick usage via run_command: cd %s && ./run.sh %s\n"+
-					"For full guide: use_skill(name='%s')",
-				m.Skill.Name, m.Skill.Path,
-				m.Skill.Path, usage,
-				m.Skill.Name,
-			))
-		}
-	}
-
-	// L2 Progressive Disclosure: inject skill instruction after SKILL.md read
-	a.mu.Lock()
-	skillName := a.skillLoaded
-	a.skillLoaded = "" // one-shot: clear after injection
-	a.skillPath = ""
-	a.mu.Unlock()
-	if skillName != "" {
-		msg := prompttext.Render(prompttext.EphSkillInstruction, map[string]any{
-			"SkillName": skillName,
-		})
-		a.InjectEphemeral(msg)
-	}
-
-	// === Layer 4: KI index re-injection (every 8 steps) ===
-	// As conversation grows, re-inject KI index as ephemeral reminder.
-	if a.deps.KIStore != nil && steps > 0 && steps%8 == 0 {
-		kiIndex := a.deps.KIStore.GenerateKIIndex()
-		if kiIndex != "" {
-			a.InjectEphemeral("<knowledge_reminder>\n你有以下知识可用，需要时用 read_file 查看完整内容：\n" + kiIndex + "</knowledge_reminder>")
-		}
-	}
-}
-
-// shouldInjectPlanning checks if planning mode should be triggered.
-// In "auto" mode, task_boundary.mode is a UI label only — no planning injection.
-// Only explicit "plan" mode or user /plan command triggers the full planning framework.
-func (a *AgentLoop) shouldInjectPlanning(userMessage string) bool {
-	planMode := a.PlanMode()
-	if planMode == "plan" {
-		return true
-	}
-	// In "auto"/"agentic" mode, boundaryMode is purely informational for the UI.
-	// Do NOT inject EphPlanningMode based on LLM's self-declared mode.
-	if strings.Contains(userMessage, "/plan") {
-		return true
-	}
-	return false
-}
+// doPrepare and shouldInjectPlanning are in prepare.go
 
 // doGenerate calls the LLM with the fully assembled system prompt.
 func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Response, error) {
@@ -938,6 +718,7 @@ func (a *AgentLoop) buildToolDescs() []prompt.ToolDesc {
 }
 
 // estimateTokens returns a rough token count of the current history.
+// Uses unicode-aware counting: CJK characters ≈ 1.5 tokens each, ASCII ≈ 0.25.
 func (a *AgentLoop) estimateTokens() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -945,14 +726,29 @@ func (a *AgentLoop) estimateTokens() int {
 	// Baseline: system prompt is assembled separately in doGenerate (~3000 tokens)
 	total := 3000
 	for _, msg := range a.history {
-		total += len(msg.Content) / 4
-		total += len(msg.Reasoning) / 4
+		total += estimateStringTokens(msg.Content)
+		total += estimateStringTokens(msg.Reasoning)
 		for _, tc := range msg.ToolCalls {
-			total += len(tc.Function.Name) / 4
-			total += len(tc.Function.Arguments) / 4
+			total += len(tc.Function.Name)/4 + len(tc.Function.Arguments)/4
 		}
 	}
 	return total
+}
+
+// estimateStringTokens counts tokens with CJK awareness.
+func estimateStringTokens(s string) int {
+	if len(s) == 0 {
+		return 0
+	}
+	var tokens float64
+	for _, r := range s {
+		if r >= 0x2E80 { // CJK Radicals Supplement and beyond
+			tokens += 1.5
+		} else {
+			tokens += 0.25
+		}
+	}
+	return int(tokens)
 }
 
 // doCompact performs LLM-based history compaction.
@@ -1204,165 +1000,4 @@ func (a *AgentLoop) fireHooks(ctx context.Context, steps int) {
 // Ensure ctxutil is used
 var _ = ctxutil.SessionIDFromContext
 
-// ═══════════════════════════════════════════════════════
-//  Multimodal: parse user attachments and build vision message
-// ═══════════════════════════════════════════════════════
-
-// attachmentRe extracts <user_attachments>...</user_attachments> blocks.
-var attachmentRe = regexp.MustCompile(`(?s)<user_attachments>\s*(.*?)\s*</user_attachments>`)
-
-// fileTagRe extracts individual <file ... /> tags.
-// NOTE: [^>]*? (not [^/]*?) because attribute values contain '/' in file paths.
-var fileTagRe = regexp.MustCompile(`<file\s+([^>]*?)\s*/>`)
-
-// attrRe extracts key="value" pairs from a tag.
-var attrRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
-
-// buildUserMessage parses the raw user text for <user_attachments> XML.
-// If image attachments are found, it builds a multimodal Message with ContentParts.
-// Otherwise returns a plain text Message.
-func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
-	match := attachmentRe.FindStringSubmatch(raw)
-	if match == nil {
-		// No attachments — plain text
-		return llm.Message{Role: "user", Content: raw}
-	}
-
-	// Extract text outside the attachment block
-	textOnly := strings.TrimSpace(attachmentRe.ReplaceAllString(raw, ""))
-
-	// Parse each <file .../> tag
-	var parts []llm.ContentPart
-	var nonImageFiles []string
-	var imageFiles []string // track image paths so Agent knows where they are
-
-	fileTags := fileTagRe.FindAllStringSubmatch(match[1], -1)
-	for _, ft := range fileTags {
-		attrs := make(map[string]string)
-		for _, a := range attrRe.FindAllStringSubmatch(ft[1], -1) {
-			attrs[a[1]] = a[2]
-		}
-
-		filePath := attrs["path"]
-		fileRole := attrs["role"] // reference_image or reference_file
-
-		if fileRole == "reference_image" && filePath != "" {
-			// Read and base64-encode the image
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				log.Printf("[multimodal] failed to read image %s: %v", filePath, err)
-				nonImageFiles = append(nonImageFiles, filePath)
-				continue
-			}
-
-			// Detect MIME type robustly
-			ext := strings.ToLower(filepath.Ext(filePath))
-			mimeType := mime.TypeByExtension(ext)
-			if mimeType == "" {
-				// Fallback map for OS missing mime.types
-				switch ext {
-				case ".webp":
-					mimeType = "image/webp"
-				case ".jpg", ".jpeg":
-					mimeType = "image/jpeg"
-				case ".gif":
-					mimeType = "image/gif"
-				case ".svg":
-					mimeType = "image/svg+xml"
-				default:
-					mimeType = "image/png"
-				}
-			}
-
-			// Resize or compress image if it is too large
-			if mimeType != "image/svg+xml" && mimeType != "image/gif" {
-				data, mimeType = resizeImageIfLarge(data, mimeType, 1024)
-			}
-
-			dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
-			parts = append(parts, llm.ContentPart{
-				Type:     "image_url",
-				ImageURL: &llm.ImageURL{URL: dataURL},
-			})
-			imageFiles = append(imageFiles, filePath)
-			log.Printf("[multimodal] attached image: %s (%s, %d bytes)", attrs["name"], mimeType, len(data))
-		} else {
-			// Non-image: keep path reference in text
-			nonImageFiles = append(nonImageFiles, filePath)
-		}
-	}
-
-	// No images found — return plain text with file references
-	if len(parts) == 0 {
-		return llm.Message{Role: "user", Content: raw}
-	}
-
-	// Build multimodal message: text part + image parts
-	// Prepend file references (images + non-images) so Agent knows exact disk paths
-	var attachedPaths []string
-	if len(imageFiles) > 0 {
-		attachedPaths = append(attachedPaths, imageFiles...)
-	}
-	if len(nonImageFiles) > 0 {
-		attachedPaths = append(attachedPaths, nonImageFiles...)
-	}
-	if len(attachedPaths) > 0 {
-		textOnly = fmt.Sprintf("[Attached files]\n%s\n\n%s", strings.Join(attachedPaths, "\n"), textOnly)
-	}
-
-	if textOnly != "" {
-		// Text part goes first
-		parts = append([]llm.ContentPart{{Type: "text", Text: textOnly}}, parts...)
-	}
-
-	return llm.Message{
-		Role:         "user",
-		Content:      textOnly, // Keep text in Content for history persistence / display
-		ContentParts: parts,    // Multimodal parts for LLM API
-	}
-}
-
-// resizeImageIfLarge decodes the image data. If its dimensions are very large,
-// it rescales the image so its longest side is at most maxDim and returns the new JPEG bytes.
-// If decoding fails or resizing isn't needed, it returns the original data and MIME type.
-func resizeImageIfLarge(data []byte, mimeType string, maxDim int) ([]byte, string) {
-	img, format, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		log.Printf("[multimodal] failed to decode image for resizing (%s): %v", mimeType, err)
-		return data, mimeType
-	}
-
-	bounds := img.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
-	if w <= maxDim && h <= maxDim {
-		// Compress to JPEG if the file is still too large (> 2MB) and not a GIF.
-		if len(data) > 2*1024*1024 && format != "gif" {
-			var buf bytes.Buffer
-			if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err == nil {
-				return buf.Bytes(), "image/jpeg"
-			}
-		}
-		return data, mimeType
-	}
-
-	// Calculate new dimensions preserving aspect ratio
-	var newW, newH int
-	if w > h {
-		newW = maxDim
-		newH = (h * maxDim) / w
-	} else {
-		newH = maxDim
-		newW = (w * maxDim) / h
-	}
-
-	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
-	draw.BiLinear.Scale(dst, dst.Bounds(), img, bounds, draw.Over, nil)
-
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 85}); err != nil {
-		log.Printf("[multimodal] failed to encode resized image: %v", err)
-		return data, mimeType
-	}
-
-	return buf.Bytes(), "image/jpeg"
-}
+// buildUserMessage and multimodal logic are in multimodal.go

@@ -204,30 +204,6 @@ func (c *PostRunHookChain) OnRunComplete(ctx context.Context, info RunInfo) {
 	}
 }
 
-// BrainSnapshotHook saves a checkpoint after each run.
-type BrainSnapshotHook struct {
-	getBrain func() BrainStore
-}
-
-// BrainStore is the interface needed by the snapshot hook.
-type BrainStore interface {
-	SaveCheckpoint(cp interface{}) error
-	Write(name, content string) error
-}
-
-// NewBrainSnapshotHook creates the brain snapshot hook.
-func NewBrainSnapshotHook(getBrain func() BrainStore) *BrainSnapshotHook {
-	return &BrainSnapshotHook{getBrain: getBrain}
-}
-
-func (h *BrainSnapshotHook) OnRunComplete(ctx context.Context, info RunInfo) {
-	store := h.getBrain()
-	if store == nil {
-		return
-	}
-	log.Printf("[hook] Brain snapshot: session=%s steps=%d", info.SessionID, info.Steps)
-}
-
 // KIDistillHook uses LLM to distill knowledge after a run.
 type KIDistillHook struct {
 	getKI          func() KIStore

@@ -152,7 +152,7 @@ func (t *ViewMediaTool) handleImage(path, ext string) (map[string]string, error)
 
 	// Resize large images (reuses same logic as buildUserMessage in run.go)
 	if mimeType != "image/svg+xml" && mimeType != "image/gif" {
-		data, mimeType = resizeForVLM(data, mimeType, 1024)
+		data, mimeType = ResizeForVLM(data, mimeType, 1024)
 	}
 
 	dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))

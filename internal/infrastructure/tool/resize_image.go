@@ -12,9 +12,9 @@ import (
 	"golang.org/x/image/draw"
 )
 
-// resizeForVLM resizes an image if its dimensions exceed maxDim, and compresses
-// large images to JPEG. Shared between view_media_tool and buildUserMessage (run.go).
-func resizeForVLM(data []byte, mimeType string, maxDim int) ([]byte, string) {
+// ResizeForVLM resizes an image if its dimensions exceed maxDim, and compresses
+// large images to JPEG. Shared between view_media_tool and buildUserMessage.
+func ResizeForVLM(data []byte, mimeType string, maxDim int) ([]byte, string) {
 	img, format, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		log.Printf("[view_media] failed to decode image for resizing (%s): %v", mimeType, err)
