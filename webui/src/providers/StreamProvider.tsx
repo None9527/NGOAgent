@@ -41,6 +41,10 @@ interface StreamActions {
   handleScroll: () => void
   scrollToBottom: (behavior?: ScrollBehavior) => void
   resetToBottom: () => void
+  followOutput: (isAtBottom: boolean) => false | 'smooth' | 'auto'
+  handleAtBottomChange: (atBottom: boolean) => void
+  userScrolledUpRef: React.MutableRefObject<boolean>
+  isStreamingRef: React.MutableRefObject<boolean>
   enterStreamingMode: () => void
   exitStreamingMode: () => void
   pendingApprovals: ApprovalRequest[]
@@ -93,6 +97,8 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   const {
     scrollContainerRef, handleScroll, scrollToBottom, resetToBottom,
     enterStreamingMode, exitStreamingMode,
+    followOutput, handleAtBottomChange, userScrolledUpRef,
+    isStreamingRef,
   } = useChatScroll()
 
   // Pre-initialize WebSocket connection on mount so it's ready before first message.
@@ -311,6 +317,7 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       isStreaming, streamPhase, connectionState, taskProgress, subagentProgress,
       stopStream, reconnect, streamCallbacks, cancelRef,
       scrollContainerRef, handleScroll, scrollToBottom, resetToBottom,
+      followOutput, handleAtBottomChange, userScrolledUpRef, isStreamingRef,
       enterStreamingMode, exitStreamingMode,
       pendingApprovals, setPendingApprovals,
       planReview, setPlanReview,

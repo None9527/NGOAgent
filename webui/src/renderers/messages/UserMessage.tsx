@@ -60,6 +60,19 @@ function parseAttachments(content: string): { attachments: ParsedAttachment[]; c
     return { attachments, cleanContent: content.slice(legacyMatch[0].length).trim() };
   }
 
+  // Legacy bare-path format: [Attached files]\n/path/to/file\n...
+  const bareFmtRe = /^\[Attached files\]\n((?:\/.+\n?)+)\n*/;
+  const bareMatch = content.match(bareFmtRe);
+  if (bareMatch) {
+    for (const line of bareMatch[1].split('\n')) {
+      const p = line.trim();
+      if (!p) continue;
+      const name = p.split('/').pop() || p;
+      attachments.push({ name, path: p, isImage: IMAGE_EXTS.test(p) });
+    }
+    return { attachments, cleanContent: content.slice(bareMatch[0].length).trim() };
+  }
+
   return { attachments: [], cleanContent: content };
 }
 

@@ -37,6 +37,7 @@ export default function App() {
     isStreaming, streamPhase, connectionState, taskProgress, subagentProgress,
     streamCallbacks, cancelRef,
     scrollContainerRef, handleScroll, scrollToBottom, resetToBottom,
+    followOutput, handleAtBottomChange, userScrolledUpRef, isStreamingRef,
     enterStreamingMode, exitStreamingMode,
     pendingApprovals, setPendingApprovals,
     planReview, setPlanReview,
@@ -373,6 +374,10 @@ export default function App() {
                 onRetry={handleRetry}
                 customScrollParent={scrollEl}
                 isStreaming={streamPhase === 'streaming' || streamPhase === 'auto_waking'}
+                followOutput={followOutput}
+                onAtBottomChange={handleAtBottomChange}
+                userScrolledUpRef={userScrolledUpRef}
+                isStreamingRef={isStreamingRef}
               />
 
 

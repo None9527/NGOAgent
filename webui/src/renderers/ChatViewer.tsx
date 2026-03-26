@@ -72,6 +72,14 @@ export interface ChatViewerProps {
   customScrollParent?: HTMLElement | null;
   /** Whether the agent is currently streaming (shows thinking dots) */
   isStreaming?: boolean;
+  /** Virtuoso followOutput callback from useChatScroll */
+  followOutput?: (isAtBottom: boolean) => false | 'smooth' | 'auto';
+  /** Virtuoso atBottomStateChange callback from useChatScroll */
+  onAtBottomChange?: (atBottom: boolean) => void;
+  /** Ref indicating user has scrolled up — for wheel event detection */
+  userScrolledUpRef?: React.MutableRefObject<boolean>;
+  /** Ref indicating streaming is active — for wheel event detection */
+  isStreamingRef?: React.MutableRefObject<boolean>;
 }
 
 function extractContent(message: ChatMessageData['message']): string {
@@ -114,6 +122,10 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
       onRetry,
       customScrollParent,
       isStreaming = false,
+      followOutput: followOutputProp,
+      onAtBottomChange,
+      userScrolledUpRef,
+      isStreamingRef,
     },
     ref,
   ) => {
@@ -323,7 +335,13 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
 
     return (
       <div className={containerClasses} ref={scrollContainerRef}
-           style={customScrollParent ? undefined : { height: '100%' }}>
+           style={customScrollParent ? undefined : { height: '100%' }}
+           onWheel={(e) => {
+             // Detect user scroll-up during streaming
+             if (isStreamingRef?.current && e.deltaY < 0 && userScrolledUpRef) {
+               userScrolledUpRef.current = true;
+             }
+           }}>
         <Virtuoso
           ref={virtuosoRef}
           data={renderItems}
@@ -333,6 +351,9 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
           customScrollParent={customScrollParent ?? undefined}
           components={virtuosoComponents}
           defaultItemHeight={80}
+          followOutput={followOutputProp}
+          atBottomStateChange={onAtBottomChange}
+          atBottomThreshold={20}
         />
       </div>
     );
