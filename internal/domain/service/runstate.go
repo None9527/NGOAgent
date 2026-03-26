@@ -43,7 +43,7 @@ func (rs *RunState) Transition(to State) bool {
 
 // IsTerminal returns true if the run is in a terminal state.
 func (rs *RunState) IsTerminal() bool {
-	return rs.State == StateDone || rs.State == StateFatal || rs.State == StateAborted
+	return rs.State == StateDone || rs.State == StateFatal
 }
 
 // ═══════════════════════════════════════════

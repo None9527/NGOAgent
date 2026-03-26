@@ -4,18 +4,15 @@ package service
 type State int
 
 const (
-	StateIdle       State = iota // Waiting for input
-	StatePrepare                 // Building system prompt + context
-	StateGenerate                // Calling LLM
-	StateParseReply              // Parsing LLM response
-	StateToolExec                // Executing tool calls
-	StateGuardCheck              // Behavior guardrails check
-	StateCompact                 // Context compaction
-	StateWaiting                 // Waiting for user approval
-	StateError                   // Recoverable error
-	StateFatal                   // Unrecoverable error
-	StateAborted                 // User/system abort
-	StateDone                    // Turn complete
+	StateIdle       State = 0  // Waiting for input
+	StatePrepare    State = 1  // Building system prompt + context
+	StateGenerate   State = 2  // Calling LLM
+	StateToolExec   State = 3  // Executing tool calls
+	StateGuardCheck State = 4  // Behavior guardrails check
+	StateCompact    State = 5  // Context compaction
+	StateError      State = 6  // Recoverable error
+	StateFatal      State = 7  // Unrecoverable error
+	StateDone       State = 8  // Turn complete
 )
 
 // String returns the human-readable state name.
@@ -27,22 +24,16 @@ func (s State) String() string {
 		return "prepare"
 	case StateGenerate:
 		return "generate"
-	case StateParseReply:
-		return "parse_reply"
 	case StateToolExec:
 		return "tool_exec"
 	case StateGuardCheck:
 		return "guard_check"
 	case StateCompact:
 		return "compact"
-	case StateWaiting:
-		return "waiting"
 	case StateError:
 		return "error"
 	case StateFatal:
 		return "fatal"
-	case StateAborted:
-		return "aborted"
 	case StateDone:
 		return "done"
 	default:
@@ -60,14 +51,9 @@ type Transition struct {
 var ValidTransitions = []Transition{
 	{StateIdle, StatePrepare},
 	{StatePrepare, StateGenerate},
-	{StateGenerate, StateParseReply},
-	{StateParseReply, StateToolExec},
-	{StateParseReply, StateDone}, // No tool calls → done
+	{StateGenerate, StateToolExec},   // Tool calls present
+	{StateGenerate, StateDone},       // No tool calls → done
 	{StateToolExec, StateGuardCheck},
-	{StateToolExec, StateWaiting},    // Tool needs approval
-	{StateWaiting, StateToolExec},    // Approved → execute
-	{StateWaiting, StateGenerate},    // Denied → skip tool
-	{StateWaiting, StateAborted},     // Timeout / cancel
 	{StateGuardCheck, StateGenerate}, // Loop back for next turn
 	{StateGuardCheck, StateDone},     // Max steps reached
 	{StateGuardCheck, StateCompact},  // Context too large
@@ -76,7 +62,6 @@ var ValidTransitions = []Transition{
 	{StateError, StateGenerate},      // Retry
 	{StateError, StateFatal},         // Give up
 	{StateFatal, StateIdle},          // Reset
-	{StateAborted, StateIdle},        // Reset after abort
 	{StateDone, StateIdle},           // Reset for next turn
 	{StateDone, StatePrepare},        // PendingWake: subagent results continuation
 }
