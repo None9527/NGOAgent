@@ -15,13 +15,13 @@ func TestGuardConfigDrivenLimits(t *testing.T) {
 	g := NewBehaviorGuard(cfg)
 
 	// Should not trigger at step 49
-	v := g.Check("response", 5, 49)
+	v := g.Check("response alpha", 5, 49)
 	if v.Action != "pass" {
 		t.Fatalf("step 49: expected pass, got %s (%s)", v.Action, v.Rule)
 	}
 
-	// Should trigger at step 51 (maxSteps=50)
-	v = g.Check("response", 0, 51)
+	// Should trigger at step 51 (maxSteps=50) — use different text to avoid near-repeat
+	v = g.Check("response beta", 0, 51)
 	if v.Action != "terminate" || v.Rule != "step_limit" {
 		t.Fatalf("step 51: expected terminate/step_limit, got %s/%s", v.Action, v.Rule)
 	}
@@ -160,12 +160,67 @@ func TestGuardEmptyResponse(t *testing.T) {
 
 func TestGuardRepetitionLoop(t *testing.T) {
 	g := NewBehaviorGuard(nil)
-	g.Check("same text", 1, 1)
-	g.Check("same text", 1, 2)
-	v := g.Check("same text", 1, 3)
+	// First occurrence → pass
+	v := g.Check("same text", 1, 1)
+	if v.Action != "pass" {
+		t.Fatalf("first occurrence: expected pass, got %s", v.Action)
+	}
+
+	// Second identical → gradient warn (not terminate yet)
+	v = g.Check("same text", 1, 2)
+	if v.Action != "warn" || v.Rule != "repetition_near" {
+		t.Fatalf("second identical: expected warn/repetition_near, got %s/%s", v.Action, v.Rule)
+	}
+
+	// Third identical → terminate
+	v = g.Check("same text", 1, 3)
 	if v.Action != "terminate" || v.Rule != "repetition_loop" {
 		t.Fatalf("repetition: expected terminate, got %s/%s", v.Action, v.Rule)
 	}
 
-	t.Log("✅ Guard: Rule 2 repetition_loop")
+	t.Log("✅ Guard: Rule 2 repetition_loop with gradient intervention")
+}
+
+func TestGuardSimilarityDetection(t *testing.T) {
+	g := NewBehaviorGuard(nil)
+	// First response
+	g.Check("The quick brown fox jumps over the lazy dog and runs through the forest", 1, 1)
+	// Near-identical response (>85% similar)
+	v := g.Check("The quick brown fox jumps over the lazy dog and runs through the woods", 1, 2)
+	if v.Action != "warn" || v.Rule != "repetition_near" {
+		t.Fatalf("near-repeat: expected warn/repetition_near, got %s/%s (%s)", v.Action, v.Rule, v.Message)
+	}
+
+	// Completely different response → pass
+	g2 := NewBehaviorGuard(nil)
+	g2.Check("Hello world, this is a test message about coding", 1, 1)
+	v = g2.Check("The weather today is sunny and warm with clear skies", 1, 2)
+	if v.Action != "pass" {
+		t.Fatalf("different response: expected pass, got %s/%s", v.Action, v.Rule)
+	}
+
+	t.Log("✅ Guard: n-gram Jaccard similarity detection")
+}
+
+func TestNgramJaccardSimilarity(t *testing.T) {
+	// Identical strings → 1.0
+	if s := ngramJaccardSimilarity("hello world", "hello world"); s != 1.0 {
+		t.Fatalf("identical: expected 1.0, got %f", s)
+	}
+
+	// Completely different → low score
+	s := ngramJaccardSimilarity("abcdefghij", "ZYXWVUTSRQ")
+	if s > 0.1 {
+		t.Fatalf("different: expected <0.1, got %f", s)
+	}
+
+	// Short strings → edge case
+	if s := ngramJaccardSimilarity("ab", "ab"); s != 1.0 {
+		t.Fatalf("short identical: expected 1.0, got %f", s)
+	}
+	if s := ngramJaccardSimilarity("ab", "cd"); s != 0.0 {
+		t.Fatalf("short different: expected 0.0, got %f", s)
+	}
+
+	t.Log("✅ Guard: ngramJaccardSimilarity edge cases")
 }

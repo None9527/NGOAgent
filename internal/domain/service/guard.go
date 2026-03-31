@@ -29,6 +29,8 @@ type BehaviorGuard struct {
 	currentMode      string   // Sync'd from doPrepare (planning/execution/verification)
 	forceToolName    string   // Non-empty → force this tool on next LLM call
 	stepsSinceBoundary int    // Tool calls since last task_boundary (for ephemeral gating)
+	recentTools      []string // Last 10 tool names for sequence cycle detection
+	pendingCycleWarn string   // Pending cycle warning message for next Check()
 }
 
 // GuardVerdict is the result of a guard check.
@@ -46,11 +48,17 @@ func NewBehaviorGuard(cfg *config.AgentConfig) *BehaviorGuard {
 	}
 }
 
+// UpdateConfig hot-swaps the guard's config reference (called by agent subscriber).
+func (g *BehaviorGuard) UpdateConfig(cfg *config.AgentConfig) {
+	g.cfg = cfg
+}
+
 // ═══════════════════════════════════════════
 // Turn-level: Check (runs after each LLM response)
 // ═══════════════════════════════════════════
 
-// Check evaluates 4 guard rules against the latest response.
+// Check evaluates guard rules against the latest response.
+// Uses gradient intervention: near-repeats get warnings before termination.
 func (g *BehaviorGuard) Check(response string, toolCalls int, step int) GuardVerdict {
 	g.stepCount = step
 	g.toolCallCount += toolCalls
@@ -68,25 +76,49 @@ func (g *BehaviorGuard) Check(response string, toolCalls int, step int) GuardVer
 				Message: "Agent produced 3 consecutive empty responses. Terminating."}
 		}
 		return GuardVerdict{Action: "warn", Rule: "empty_response",
-			Message: "Your last response was empty. Please provide a meaningful response or use a tool."}
+			Message: "Your last response was empty. Please provide a meaningful response or use a tool. Try a different approach."}
 	}
 
-	// Rule 2: repetition_loop — 3 consecutive identical responses (Critical)
+	// Rule 2: repetition detection with gradient intervention
 	if response != "" {
 		g.lastResponses = append(g.lastResponses, response)
 		if len(g.lastResponses) > 5 {
 			g.lastResponses = g.lastResponses[1:]
 		}
-		if len(g.lastResponses) >= 3 {
-			last3 := g.lastResponses[len(g.lastResponses)-3:]
-			if last3[0] == last3[1] && last3[1] == last3[2] {
-				return GuardVerdict{Action: "terminate", Rule: "repetition_loop",
-					Message: "Agent is in a repetition loop (3 identical responses). Terminating."}
+		if len(g.lastResponses) >= 2 {
+			prev := g.lastResponses[len(g.lastResponses)-2]
+			curr := g.lastResponses[len(g.lastResponses)-1]
+
+			if prev == curr {
+				// Exact match: check if 3 in a row → terminate
+				if len(g.lastResponses) >= 3 {
+					prev2 := g.lastResponses[len(g.lastResponses)-3]
+					if prev2 == curr {
+						return GuardVerdict{Action: "terminate", Rule: "repetition_loop",
+							Message: "Agent is in a repetition loop (3 identical responses). Terminating."}
+					}
+				}
+				// 2nd exact repeat → strong warn
+				return GuardVerdict{Action: "warn", Rule: "repetition_near",
+					Message: "Your last two responses are identical. You MUST take a different approach. Re-read the context and try an alternative strategy."}
+			}
+
+			// Near-repeat: n-gram Jaccard similarity > 0.85
+			if sim := ngramJaccardSimilarity(prev, curr); sim > 0.85 {
+				return GuardVerdict{Action: "warn", Rule: "repetition_near",
+					Message: fmt.Sprintf("Your response is %.0f%% similar to the previous one. Try a different approach to avoid a loop.", sim*100)}
 			}
 		}
 	}
 
-	// Rule 3: step_limit — MAX_INVOCATIONS equivalent (Critical, only safety valve)
+	// Rule 3: tool sequence cycle (from PostToolRecord)
+	if g.pendingCycleWarn != "" {
+		msg := g.pendingCycleWarn
+		g.pendingCycleWarn = "" // consumed
+		return GuardVerdict{Action: "warn", Rule: "tool_cycle", Message: msg}
+	}
+
+	// Rule 4: step_limit — MAX_INVOCATIONS equivalent (Critical, only safety valve)
 	if g.stepCount > maxSteps {
 		return GuardVerdict{Action: "terminate", Rule: "step_limit",
 			Message: fmt.Sprintf("Agent exceeded %d steps. Terminating to prevent runaway.", maxSteps)}
@@ -98,6 +130,47 @@ func (g *BehaviorGuard) Check(response string, toolCalls int, step int) GuardVer
 	}
 
 	return GuardVerdict{Action: "pass"}
+}
+
+// ngramJaccardSimilarity computes 3-gram Jaccard similarity between two strings.
+// Returns a value between 0.0 (completely different) and 1.0 (identical).
+// Used for gradient repetition detection — much cheaper than embedding similarity.
+func ngramJaccardSimilarity(a, b string) float64 {
+	if len(a) < 3 || len(b) < 3 {
+		if a == b {
+			return 1.0
+		}
+		return 0.0
+	}
+
+	ngramsA := make(map[string]bool)
+	for i := 0; i+3 <= len(a); i++ {
+		ngramsA[a[i:i+3]] = true
+	}
+
+	ngramsB := make(map[string]bool)
+	for i := 0; i+3 <= len(b); i++ {
+		ngramsB[b[i:i+3]] = true
+	}
+
+	inter := 0
+	for k := range ngramsA {
+		if ngramsB[k] {
+			inter++
+		}
+	}
+
+	union := len(ngramsA)
+	for k := range ngramsB {
+		if !ngramsA[k] {
+			union++
+		}
+	}
+
+	if union == 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
 }
 
 // ═══════════════════════════════════════════
@@ -154,6 +227,42 @@ func (g *BehaviorGuard) PostToolRecord(toolName string) {
 	case "notify_user":
 		g.hasNotify = true
 	}
+
+	// Track tool sequence for cycle detection
+	g.recentTools = append(g.recentTools, toolName)
+	if len(g.recentTools) > 10 {
+		g.recentTools = g.recentTools[1:]
+	}
+	if cycle := g.detectToolCycle(); cycle != "" {
+		g.pendingCycleWarn = cycle
+	}
+}
+
+// detectToolCycle checks for repeating subsequences of length 2-4 in recent tool names.
+// Returns a warning message if found, empty string otherwise.
+func (g *BehaviorGuard) detectToolCycle() string {
+	n := len(g.recentTools)
+	if n < 4 {
+		return ""
+	}
+	// Check cycle lengths 2, 3, 4
+	for cycleLen := 2; cycleLen <= 4 && cycleLen*2 <= n; cycleLen++ {
+		matched := true
+		for i := 0; i < cycleLen; i++ {
+			if g.recentTools[n-1-i] != g.recentTools[n-1-i-cycleLen] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			pattern := strings.Join(g.recentTools[n-cycleLen:], "→")
+			return fmt.Sprintf(
+				"Detected tool usage cycle: [%s] repeating. You are likely stuck. Try a completely different approach.",
+				pattern,
+			)
+		}
+	}
+	return ""
 }
 
 // StepsSinceBoundary returns steps since last task_boundary call.

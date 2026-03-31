@@ -47,6 +47,19 @@ func (p *LoopPool) SetMaxLoops(n int) {
 	p.maxLoops = n
 }
 
+// ForEach calls fn for each active loop (snapshot under read lock).
+func (p *LoopPool) ForEach(fn func(*AgentLoop)) {
+	p.mu.RLock()
+	loops := make([]*AgentLoop, 0, len(p.loops))
+	for _, ml := range p.loops {
+		loops = append(loops, ml.loop)
+	}
+	p.mu.RUnlock()
+	for _, l := range loops {
+		fn(l)
+	}
+}
+
 // SetPerUserMax sets the maximum loops per user. 0 = unlimited.
 func (p *LoopPool) SetPerUserMax(n int) {
 	p.mu.Lock()

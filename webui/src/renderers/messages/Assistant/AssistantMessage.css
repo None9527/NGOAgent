@@ -152,3 +152,19 @@
   color: rgba(255,255,255,0.8);
   background: rgba(255,255,255,0.08);
 }
+
+/* ═══ Streaming Cursor ═══ */
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: rgba(255, 255, 255, 0.6);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: cursorBlink 1s step-end infinite;
+}

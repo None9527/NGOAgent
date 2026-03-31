@@ -89,3 +89,15 @@ button, a, [role="button"] {
 * {
   -webkit-tap-highlight-color: transparent;
 }
+
+/* ── Agent status breathing animations ── */
+@keyframes breathe {
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+@keyframes borderBreathe {
+  0%, 100% { border-color: rgba(59, 130, 246, 0.15); }
+  50% { border-color: rgba(59, 130, 246, 0.45); }
+}
+.animate-breathe { animation: breathe 2s ease-in-out infinite; }
+.animate-border-breathe { animation: borderBreathe 2s ease-in-out infinite; }

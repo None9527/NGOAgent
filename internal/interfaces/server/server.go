@@ -272,7 +272,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(req.Message, "/") {
 		firstWord := strings.Fields(req.Message)[0]
 		knownCmds := map[string]bool{
-			"/model": true, "/models": true, "/set": true, "/forge": true,
+			"/model": true, "/models": true, "/set": true, "/evo": true,
 			"/plan": true, "/status": true, "/help": true, "/skill": true,
 			"/clear": true, "/compact": true, "/cron": true,
 		}
@@ -581,8 +581,8 @@ func (s *Server) execSlash(input string) string {
 		}
 		return fmt.Sprintf("Set %s = %s", args[0], strings.Join(args[1:], " "))
 
-	case "/forge":
-		return "Forge mode activated. Use the forge tool to begin."
+	case "/evo":
+		return s.execEvo(args)
 
 	case "/plan":
 		return "请使用输入框旁的模式切换 pill（⭐ Auto / 📋 Plan / 🤖 Agentic）"
@@ -594,7 +594,7 @@ func (s *Server) execSlash(input string) string {
 			stats.Model, sec.Mode, stats.HistoryCount)
 
 	case "/help":
-		return "Commands: /model /models /set /forge /plan /skill /status /clear /compact /help"
+		return "Commands: /model /models /set /evo /plan /skill /status /clear /compact /help"
 
 	case "/skill":
 		skillsRaw, err := s.api.ListSkills()
@@ -606,7 +606,7 @@ func (s *Server) execSlash(input string) string {
 			Name        string `json:"name"`
 			Type        string `json:"type"`
 			Description string `json:"description"`
-			ForgeStatus string `json:"forge_status"`
+			EvoStatus string `json:"forge_status"`
 		}
 		json.Unmarshal(data, &skills)
 		if len(skills) == 0 {
@@ -614,7 +614,7 @@ func (s *Server) execSlash(input string) string {
 		}
 		var lines []string
 		for _, sk := range skills {
-			lines = append(lines, fmt.Sprintf("  %s [%s] (%s) — %s", sk.Name, sk.ForgeStatus, sk.Type, sk.Description))
+			lines = append(lines, fmt.Sprintf("  %s [%s] (%s) — %s", sk.Name, sk.EvoStatus, sk.Type, sk.Description))
 		}
 		return "Skills:\n" + strings.Join(lines, "\n")
 
@@ -628,6 +628,41 @@ func (s *Server) execSlash(input string) string {
 
 	default:
 		return "Unknown command: " + cmd
+	}
+}
+
+// execEvo handles the /evo command family.
+func (s *Server) execEvo(args []string) string {
+	if len(args) == 0 {
+		// Toggle evo mode — set plan mode to "evo" or back to "auto"
+		cfg := s.api.GetConfig()
+		agent, _ := cfg["agent"].(map[string]any)
+		currentMode, _ := agent["plan_mode"].(string)
+		if currentMode == "evo" {
+			_ = s.api.SetConfig("plan_mode", "auto")
+			return "🔄 Evo mode OFF → auto"
+		}
+		_ = s.api.SetConfig("plan_mode", "evo")
+		return "🧬 Evo mode ON — 自动评估 + 修复已启用"
+	}
+
+	subcmd := args[0]
+	switch subcmd {
+	case "repair":
+		return "🔧 Repair triggered — 将对最近执行进行评估并尝试修复。\n(请在下一条消息中描述问题，或直接发送任何消息触发修复)"
+
+	case "stats":
+		days := 7
+		if len(args) > 1 {
+			fmt.Sscanf(args[1], "%d", &days)
+			if days <= 0 {
+				days = 7
+			}
+		}
+		return fmt.Sprintf("📊 请求过去 %d 天的 Evo 统计数据...\n(统计功能需要 EvoStore 集成后生效)", days)
+
+	default:
+		return "Usage: /evo [repair|stats [N]]"
 	}
 }
 

@@ -62,6 +62,8 @@ const (
 	DeltaError                       // Error occurred
 	DeltaApproval                    // Approval requested
 	DeltaComplete                    // Turn completed
+	DeltaEvoEval                     // Evo: evaluation result
+	DeltaEvoRepair                   // Evo: repair attempt
 )
 
 // DeltaEvent is a typed streaming event.

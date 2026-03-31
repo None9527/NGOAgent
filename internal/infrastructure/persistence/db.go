@@ -64,7 +64,7 @@ func Open(dbPath string) (*gorm.DB, error) {
 	sqlDB.Exec("PRAGMA synchronous=NORMAL")
 
 	// Auto-migrate
-	if err := db.AutoMigrate(&Conversation{}, &Message{}, &Task{}); err != nil {
+	if err := db.AutoMigrate(&Conversation{}, &Message{}, &Task{}, &EvoTrace{}, &EvoEvaluation{}, &EvoRepair{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 

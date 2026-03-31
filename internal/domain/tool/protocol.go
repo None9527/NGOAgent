@@ -5,6 +5,12 @@
 // defines terminal step types for the agent protocol.
 package tool
 
+import (
+	"log"
+
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
+)
+
 // ─── Signal Enum ─────────────────────────────────────────────
 
 // Signal classifies the side-effect a tool result carries.
@@ -16,6 +22,7 @@ const (
 	SignalYield       Signal = 2 // Yield control to user (notify_user)
 	SignalSkillLoaded Signal = 3 // SKILL.md was read by agent (L2 trigger)
 	SignalMediaLoaded Signal = 4 // Media content loaded for VLM injection
+	SignalSpawnYield  Signal = 5 // Spawn-agent: force yield to wait for auto-wake
 )
 
 // ─── Terminal Step Configuration (declarative, like Anti) ─────
@@ -50,22 +57,29 @@ type DeltaSink interface {
 	OnPlanReview(message string, paths []string)
 }
 
+// BoundaryState holds task boundary tracking fields.
+// Shared between LoopState (protocol dispatch) and TaskTracker (agent loop).
+// By passing a pointer, we eliminate the copy overhead in protoState/syncLoopState.
+type BoundaryState struct {
+	PreviousMode     string
+	BoundaryTaskName string
+	BoundaryMode     string
+	BoundaryStatus   string
+	BoundarySummary  string
+	StepsSinceUpdate int
+	YieldRequested   bool
+}
+
 // LoopState is a mutable bag of state the dispatcher writes back.
 // The agent loop provides a concrete implementation.
 type LoopState struct {
 	PlanMode          string              // "auto" | "plan" | "agentic" — from chat request
 	PendingEphemerals []string            // Ephemeral messages to inject for next LLM turn
 	PendingMedia      []map[string]string // Multimodal: media items to inject {"type", "url"/"data", "path", "format"}
-	PreviousMode      string
-	BoundaryTaskName  string
-	BoundaryMode      string
-	BoundaryStatus    string
-	BoundarySummary   string
-	StepsSinceUpdate  int
-	YieldRequested    bool
-	ForceNextTool     string // Force next LLM call to use this tool (via tool_choice)
-	SkillLoaded       string // L2: skill name just loaded via SKILL.md read
-	SkillPath         string // L2: skill directory path
+	Boundary          *BoundaryState      // Shared pointer — eliminates protoState/syncLoopState copy
+	ForceNextTool     string              // Force next LLM call to use this tool (via tool_choice)
+	SkillLoaded       string              // L2: skill name just loaded via SKILL.md read
+	SkillPath         string              // L2: skill directory path
 }
 
 // ─── Signal Handlers ─────────────────────────────────────────
@@ -80,6 +94,7 @@ var handlers = map[Signal]SignalHandler{
 	SignalYield:       handleYield,
 	SignalSkillLoaded: handleSkillLoaded,
 	SignalMediaLoaded: handleMediaLoaded,
+	SignalSpawnYield:  handleSpawnYield,
 }
 
 func handleProgress(result ToolResult, sink DeltaSink, state *LoopState) {
@@ -90,12 +105,12 @@ func handleProgress(result ToolResult, sink DeltaSink, state *LoopState) {
 
 	sink.OnProgress(taskName, status, summary, mode)
 
-	state.PreviousMode = state.BoundaryMode
-	state.BoundaryTaskName = taskName
-	state.BoundaryMode = mode
-	state.BoundaryStatus = status
-	state.BoundarySummary = summary
-	state.StepsSinceUpdate = 0
+	state.Boundary.PreviousMode = state.Boundary.BoundaryMode
+	state.Boundary.BoundaryTaskName = taskName
+	state.Boundary.BoundaryMode = mode
+	state.Boundary.BoundaryStatus = status
+	state.Boundary.BoundarySummary = summary
+	state.Boundary.StepsSinceUpdate = 0
 
 	// Force next tool: deterministic plan→notify_user enforcement
 	if force, ok := result.Payload["force_next_tool"].(string); ok && force != "" {
@@ -109,12 +124,7 @@ func handleYield(result ToolResult, sink DeltaSink, state *LoopState) {
 
 	// Agentic mode: agent self-reviews plan, don't stop loop or show banner
 	if state.PlanMode == "agentic" {
-		state.PendingEphemerals = append(state.PendingEphemerals,
-			"🤖 [AGENTIC MODE] You have created an execution plan. "+
-			"Review it yourself for completeness and correctness. "+
-			"If satisfactory, proceed with execution immediately. "+
-			"If issues found, revise the plan first then execute. "+
-			"Do NOT wait for user approval.")
+		state.PendingEphemerals = append(state.PendingEphemerals, prompttext.EphAgenticSelfReview)
 		// YieldRequested stays false → loop continues
 		return
 	}
@@ -125,7 +135,7 @@ func handleYield(result ToolResult, sink DeltaSink, state *LoopState) {
 	} else if msg != "" {
 		sink.OnText(msg)
 	}
-	state.YieldRequested = true
+	state.Boundary.YieldRequested = true
 }
 
 // extractStringSlice safely converts an any value to []string.
@@ -170,6 +180,8 @@ func handleMediaLoaded(result ToolResult, _ DeltaSink, state *LoopState) {
 func Dispatch(result ToolResult, sink DeltaSink, state *LoopState) {
 	if h, ok := handlers[result.Signal]; ok {
 		h(result, sink, state)
+	} else if result.Signal != SignalNone {
+		log.Printf("[protocol] unhandled signal: %d", result.Signal)
 	}
 }
 
@@ -208,5 +220,16 @@ func MediaLoadedResult(output string, media []map[string]string) (ToolResult, er
 		Signal:  SignalMediaLoaded,
 		Payload: map[string]any{"media": media},
 	}, nil
+}
+
+func SpawnYieldResult(output string) (ToolResult, error) {
+	return ToolResult{
+		Output: output,
+		Signal: SignalSpawnYield,
+	}, nil
+}
+
+func handleSpawnYield(_ ToolResult, _ DeltaSink, state *LoopState) {
+	state.Boundary.YieldRequested = true
 }
 

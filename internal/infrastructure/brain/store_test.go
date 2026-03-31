@@ -1,7 +1,6 @@
 package brain
 
 import (
-	"os"
 	"testing"
 )
 
@@ -72,15 +71,8 @@ func TestVersionedWrite(t *testing.T) {
 		t.Fatalf("version 1 content wrong: %s", v1)
 	}
 
-	// .resolved should be latest pre-current (v2)
-	resolvedPath := store.Dir() + "/task.md.resolved"
-	data, err := os.ReadFile(resolvedPath)
-	if err != nil {
-		t.Fatalf("read .resolved: %v", err)
-	}
-	if string(data) != "# V2\n- [x] item 1\n- [ ] item 2" {
-		t.Fatalf(".resolved wrong: %s", string(data))
-	}
+	// NOTE: .resolved file is NOT part of version rotation — it's created by the
+	// Resolution Pipeline (requires workspaceDir). Version history uses .resolved.N files.
 
 	t.Log("✅ Brain versioning: 3 writes → current V3, 2 history, metadata v3")
 }

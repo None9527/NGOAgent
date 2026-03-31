@@ -13,6 +13,12 @@ import { buildToolCallContent } from '../renderers/toolcalls/shared/utils'
 
 // ─── State ────────────────────────────────────────────────────
 
+/**
+ * StreamState — mutable state for event processing within a single stream.
+ *
+ * @internal Mutated in-place by processEvent(). DO NOT share instances across
+ * streams or handlers. Always create a fresh state via createStreamState().
+ */
 export interface StreamState {
   currentAssistantId: string | null
   currentAssistantText: string
@@ -21,6 +27,7 @@ export interface StreamState {
   pendingToolIds: Map<string, string[]>
 }
 
+/** Create a fresh StreamState. One per stream — never reuse across streams. */
 export function createStreamState(): StreamState {
   return {
     currentAssistantId: null,
@@ -61,11 +68,13 @@ export function processEvent(
           timestamp: new Date().toISOString(),
           type: 'assistant',
           message: { role: 'model', parts: [{ text: delta }] },
+          isStreaming: true,
         })
       } else {
         state.currentAssistantText += delta
         cb.onUpdate(state.currentAssistantId, {
           message: { role: 'model', parts: [{ text: state.currentAssistantText }] },
+          isStreaming: true,
         })
       }
       break
@@ -81,11 +90,13 @@ export function processEvent(
           timestamp: new Date().toISOString(),
           type: 'assistant',
           message: { role: 'thinking', parts: [{ text: delta }] },
+          isStreaming: true,
         })
       } else {
         state.currentThinkingText += delta
         cb.onUpdate(state.currentThinkingId, {
           message: { role: 'thinking', parts: [{ text: state.currentThinkingText }] },
+          isStreaming: true,
         })
       }
       break
@@ -189,6 +200,13 @@ export function processEvent(
     }
 
     case 'step_done': {
+      // Mark the streamed message as completed → triggers Markdown render
+      if (state.currentAssistantId) {
+        cb.onUpdate(state.currentAssistantId, { isStreaming: false })
+      }
+      if (state.currentThinkingId) {
+        cb.onUpdate(state.currentThinkingId, { isStreaming: false })
+      }
       state.currentAssistantId = null
       state.currentAssistantText = ''
       state.currentThinkingId = null
@@ -251,6 +269,31 @@ export function processEvent(
     case 'auto_wake_done': {
       cb.onEnd()
       return false
+    }
+
+    case 'evo_eval': {
+      const text = (event.text as string) || 'evaluating...'
+      cb.onEvoEval?.(text)
+      // Also show as a system message in the chat stream
+      cb.onMessage({
+        uuid: uid(),
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        message: { role: 'system', parts: [{ text: `🧬 Evo: ${text}` }] },
+      })
+      break
+    }
+
+    case 'evo_repair': {
+      const text = (event.text as string) || 'repairing...'
+      cb.onEvoRepair?.(text)
+      cb.onMessage({
+        uuid: uid(),
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        message: { role: 'system', parts: [{ text: `🔧 Evo Repair: ${text}` }] },
+      })
+      break
     }
 
     case 'pong':

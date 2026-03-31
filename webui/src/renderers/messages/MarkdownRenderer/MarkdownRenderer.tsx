@@ -8,18 +8,13 @@
  */
 
 import type { FC, ComponentProps, ReactNode, ReactElement } from 'react'
-import { useMemo, useState, useCallback, useRef, useEffect, Children, isValidElement } from 'react'
+import { useMemo, useCallback, useRef, useEffect, Children, isValidElement, memo } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkAlert from 'remark-github-blockquote-alert'
 import rehypeRaw from 'rehype-raw'
 import { CodeBlockRenderer } from './CodeBlockRenderer'
-import Lightbox from 'yet-another-react-lightbox'
-import Thumbnails from 'yet-another-react-lightbox/plugins/thumbnails'
-import Counter from 'yet-another-react-lightbox/plugins/counter'
-import 'yet-another-react-lightbox/styles.css'
-import 'yet-another-react-lightbox/plugins/thumbnails.css'
-import 'yet-another-react-lightbox/plugins/counter.css'
+import { useLightbox } from '../../../providers/LightboxProvider'
 import './MarkdownRenderer.css'
 
 // ─── Constants ───────────────────────────────────────────────
@@ -81,7 +76,11 @@ function preprocessContent(content: string, enableFileLinks: boolean): string {
     // e.g. `path.png` → path.png (only for known media extensions)
     line = line.replace(/`(\/(?:[\w\p{L}\p{N}\-. ]+\/)*[\w\p{L}\p{N}\-. ]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?|mp4|webm|mov|avi|mkv|m4v))`/gu, '$1')
     MEDIA_PATH_REGEX.lastIndex = 0
-    line = line.replace(MEDIA_PATH_REGEX, (_match, filePath) => {
+    line = line.replace(MEDIA_PATH_REGEX, (match, filePath, offset) => {
+      // Skip if this path is part of an http:// or https:// URL
+      // (look backwards from match start for ://  or a scheme prefix)
+      const before = line.slice(Math.max(0, offset - 10), offset)
+      if (/https?:\/\/\S*$/.test(before) || /https?:\/\/$/.test(before)) return match
       if (seenMedia.has(filePath)) return ''
       seenMedia.add(filePath)
       const fileName = filePath.split('/').pop() || filePath
@@ -205,7 +204,7 @@ function getGalleryClass(count: number): string {
 
 // ─── Component ───────────────────────────────────────────────
 
-export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
+export const MarkdownRenderer: FC<MarkdownRendererProps> = memo(({
   content,
   onFileClick,
   enableFileLinks = true,
@@ -221,9 +220,8 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     [],
   )
 
-  // ─── Lightbox ────────────────────────────────
-  const [lightboxOpen, setLightboxOpen] = useState(false)
-  const [lightboxIndex, setLightboxIndex] = useState(0)
+  // ─── Lightbox (global singleton) ─────────────
+  const { open: openLightbox } = useLightbox()
 
   const processedContent = useMemo(
     () => preprocessContent(content, enableFileLinks),
@@ -248,9 +246,8 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
 
   const handleImageClick = useCallback((src: string) => {
     const idx = allImageUrls.findIndex(img => img.src === src)
-    setLightboxIndex(idx >= 0 ? idx : 0)
-    setLightboxOpen(true)
-  }, [allImageUrls])
+    openLightbox(allImageUrls, idx >= 0 ? idx : 0)
+  }, [allImageUrls, openLightbox])
 
   // Delegated click handler for raw HTML img elements (gallery images)
   // Also handles .md-gallery-overflow clicks → opens lightbox at first hidden image
@@ -275,14 +272,13 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
           handleImageClick(img.src)
         } else {
           // fallback: open at index 4
-          setLightboxIndex(4)
-          setLightboxOpen(true)
+          openLightbox(allImageUrls, 4)
         }
       }
     }
     node.addEventListener('click', handler)
     return () => node.removeEventListener('click', handler)
-  }, [handleImageClick])
+  }, [handleImageClick, openLightbox, allImageUrls])
 
   // ─── Component overrides ─────────────────────
 
@@ -404,32 +400,18 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
   )
 
   return (
-    <>
-      <Lightbox
-        open={lightboxOpen}
-        close={() => setLightboxOpen(false)}
-        index={lightboxIndex}
-        slides={allImageUrls.map(img => ({ src: img.src, alt: img.alt }))}
-        plugins={[Thumbnails, Counter]}
-        thumbnails={{ border: 0, borderRadius: 8, padding: 0, gap: 8 }}
-        counter={{ container: { style: { top: 'unset', bottom: 0 } } }}
-        styles={{
-          container: { backgroundColor: 'rgba(0, 0, 0, 0.92)', backdropFilter: 'blur(16px)' },
-        }}
-        animation={{ fade: 200, swipe: 300 }}
-        carousel={{ finite: true }}
-      />
-      <div className="markdown-content" ref={containerRef}>
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          rehypePlugins={rehypePlugins}
-          components={components}
-        >
-          {processedContent}
-        </ReactMarkdown>
-      </div>
-    </>
+    <div className="markdown-content" ref={containerRef}>
+      <ReactMarkdown
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={rehypePlugins}
+        components={components}
+      >
+        {processedContent}
+      </ReactMarkdown>
+    </div>
   )
-}
+})
+
+MarkdownRenderer.displayName = 'MarkdownRenderer'
 
 export default MarkdownRenderer

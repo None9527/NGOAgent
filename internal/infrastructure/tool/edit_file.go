@@ -42,6 +42,7 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 	oldStr, _ := args["old_string"].(string)
 	newStr, _ := args["new_string"].(string)
 	replaceAll, _ := args["replace_all"].(bool)
+	fuzzyUsed := false
 
 	if path == "" {
 		return dtool.ToolResult{Output: "Error: 'path' is required"}, nil
@@ -124,12 +125,37 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 	// Count occurrences
 	count := strings.Count(normalizedContent, normalizedOld)
 
+	// LAZY_COMMENT detection (pre-match): check BEFORE fuzzy cascade
+	// so placeholder patterns are caught regardless of match method.
+	// Only trigger when new_string is suspiciously shorter (< 75% of old_string length).
+	if len(newStr)*4 < len(oldStr)*3 {
+		lazyPatterns := []string{
+			"// ... rest", "// ...remaining", "/* ... */",
+			"// existing code", "// ... 其余代码", "// ... same as before",
+			"// ... unchanged", "// ... keep existing",
+			"// ... rest of", "// rest of the code", "// ...rest",
+			"// todo:", "// fixme:", "// placeholder",
+			"// ... other", "// ... 其他", "// ... 省略",
+			"// ... 以下省略", "// 其余代码不变",
+		}
+		lowerNew := strings.ToLower(newStr)
+		for _, pat := range lazyPatterns {
+			if strings.Contains(lowerNew, pat) {
+				return dtool.ToolResult{Output: fmt.Sprintf(
+					"Error [code 10]: new_string contains lazy placeholder '%s'. "+
+						"You must provide the COMPLETE replacement content, not placeholders.", pat)}, nil
+			}
+		}
+	}
+
 	if count == 0 {
 		// Cascade fuzzy matching: L1 unicode → L2 line-trim → L3 block-anchor
 		if fuzzyMatch := cascadeFuzzyMatch(normalizedContent, normalizedOld); fuzzyMatch != "" {
 			// Use the matched slice for replacement instead of the original oldStr
 			normalizedOld = fuzzyMatch
 			count = 1
+			// Track fuzzy match for output notice
+			fuzzyUsed = true
 		} else {
 			// Error code 8: String not found — include best candidate feedback
 			errMsg := fmt.Sprintf("Error [code 8]: old_string not found in file.\nString: %s", oldStr)
@@ -146,24 +172,6 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 	}
 
 	// Perform replacement
-	// LAZY_COMMENT detection: check if new_string contains placeholder patterns
-	lazyPatterns := []string{
-		"// ... rest", "// ...remaining", "/* ... */",
-		"// existing code", "// ... 其余代码", "// ... same as before",
-		"// ... unchanged", "// ... keep existing",
-		"// ... rest of", "// rest of the code", "// ...rest",
-		"// todo:", "// fixme:", "// placeholder",
-		"// ... other", "// ... 其他", "// ... 省略",
-		"// ... 以下省略", "// 其余代码不变",
-	}
-	lowerNew := strings.ToLower(newStr)
-	for _, pat := range lazyPatterns {
-		if strings.Contains(lowerNew, pat) {
-			return dtool.ToolResult{Output: fmt.Sprintf(
-				"Error [code 10]: new_string contains lazy placeholder '%s'. "+
-					"You must provide the COMPLETE replacement content, not placeholders.", pat)}, nil
-		}
-	}
 
 	var newContent string
 	if replaceAll {
@@ -183,7 +191,15 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 	globalFileState.MarkModified(path, []byte(newContent))
 
 	if replaceAll {
-		return dtool.ToolResult{Output: fmt.Sprintf("Successfully replaced %d occurrences in %s", count, path)}, nil
+		msg := fmt.Sprintf("Successfully replaced %d occurrences in %s", count, path)
+		if fuzzyUsed {
+			msg += " (fuzzy matched — actual content differed in whitespace/unicode from old_string)"
+		}
+		return dtool.ToolResult{Output: msg}, nil
 	}
-	return dtool.ToolResult{Output: fmt.Sprintf("Successfully edited %s", path)}, nil
+	msg := fmt.Sprintf("Successfully edited %s", path)
+	if fuzzyUsed {
+		msg += " (fuzzy matched — actual content differed in whitespace/unicode from old_string)"
+	}
+	return dtool.ToolResult{Output: msg}, nil
 }

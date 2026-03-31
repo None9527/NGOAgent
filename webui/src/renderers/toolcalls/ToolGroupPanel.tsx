@@ -158,6 +158,16 @@ function getModeBadgeClass(mode: string): string {
   }
 }
 
+/** Mode icon — aligned with TaskProgressBar */
+function getModeIcon(mode: string): string {
+  switch (mode) {
+    case 'planning': return '📐'
+    case 'execution': return '⚡'
+    case 'verification': return '✅'
+    default: return '•'
+  }
+}
+
 export const ToolGroupPanel: FC<ToolGroupPanelProps> = memo(({
   items,
   sessionId,
@@ -173,7 +183,7 @@ export const ToolGroupPanel: FC<ToolGroupPanelProps> = memo(({
     [items],
   )
 
-  // Force Virtuoso to recalculate item heights after expand/collapse
+  // Notify virtualizer to re-measure item heights after expand/collapse
   const notifyResize = useCallback(() => {
     requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
   }, [])
@@ -226,6 +236,7 @@ export const ToolGroupPanel: FC<ToolGroupPanelProps> = memo(({
       {/* Header */}
       <div className="tgp-header">
         <span className="tgp-header-label">
+          {sectionMode && <span style={{ marginRight: 6 }}>{getModeIcon(sectionMode)}</span>}
           {headerLabel}
           {sectionMode && (
             <span className={`tgp-mode-badge ${getModeBadgeClass(sectionMode)}`}>

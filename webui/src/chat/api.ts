@@ -51,7 +51,7 @@ export function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise
   return fetch(input, { ...init, headers })
 }
 
-const API_BASE = '' // Legacy export — prefer getApiBase()
+
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${getApiBase()}${path}`, {
@@ -89,7 +89,7 @@ export const api = {
   retry: (sessionId: string) => post<{ status: string; last_message: string }>('/v1/retry', { session_id: sessionId }),
 }
 
-export { API_BASE }
+
 
 /**
  * Build a proxied file URL with token query param.

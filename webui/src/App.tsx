@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react'
 import { ChatViewer } from './renderers/ChatViewer'
+import type { ChatViewerHandle } from './renderers/ChatViewer'
 import { InputForm } from './renderers/InputForm'
-import { api, getApiBase } from './chat/api'
+import { api, getApiBase, getAuthToken } from './chat/api'
 import { chatStream, checkActiveRun } from './chat/streamHandler'
 import type { ChatMessageData } from './chat/types'
 import { useConfig } from './providers/ConfigProvider'
@@ -9,16 +10,22 @@ import { useSession } from './providers/SessionProvider'
 import { useStream } from './providers/StreamProvider'
 import { useHub } from './providers/HubProvider'
 import { useUIStore } from './stores/uiStore'
+import { useMessageStore } from './stores/messageStore'
 
 // Import new structural components
 import { Sidebar } from './components/Sidebar'
 import { TopNavbar } from './components/TopNavbar'
 import { WelcomeScreen } from './components/WelcomeScreen'
+import { ApprovalBanner } from './components/ApprovalBanner'
+import { PlanReviewBanner } from './components/PlanReviewBanner'
+import { TaskProgressBar } from './components/TaskProgressBar'
 // Lazy-load heavy components not needed on initial render
 const IntelligenceHub = lazy(() => import('./components/IntelligenceHub/index').then(m => ({ default: m.IntelligenceHub })))
 const SettingsPage = lazy(() => import('./components/SettingsPage').then(m => ({ default: m.SettingsPage })))
 const ConnectPage = lazy(() => import('./components/ConnectPage').then(m => ({ default: m.ConnectPage })))
 import { SubagentDock } from './components/SubagentDock'
+
+import { ScrollToBottomFab } from './components/ScrollToBottomFab'
 
 // Import styles
 import './renderers/styles/variables.css'
@@ -31,21 +38,19 @@ export default function App() {
   const session = useSession()
   const stream = useStream()
   const hub = useHub()
-  const { sessionId, sessions, messages, setSessionId, setSessions, setMessages, pendingScrollToEnd, loadHistory } = session
+  const { sessionId, sessions, setSessionId, pendingScrollToEnd, loadHistory } = session
+  const messages = useMessageStore(s => s.messages)
   const { planMode, availableModels, health } = config
   const {
-    isStreaming, streamPhase, connectionState, taskProgress, subagentProgress,
+    isStreaming, streamPhase, connectionState, taskProgress,
     streamCallbacks, cancelRef,
-    scrollContainerRef, handleScroll, scrollToBottom, resetToBottom,
-    followOutput, handleAtBottomChange, userScrolledUpRef, isStreamingRef,
+    scrollToBottom, resetToBottom,
     enterStreamingMode, exitStreamingMode,
     pendingApprovals, setPendingApprovals,
     planReview, setPlanReview,
     setIsStreaming, setSubagentProgress,
   } = stream
-  const subagentStats = subagentProgress.length > 0
-    ? { running: subagentProgress.filter(e => e.status === 'running').length, total: subagentProgress.length }
-    : null
+
 
   // ── UIStore (replaces 6 scattered useState) ──
   const {
@@ -57,23 +62,32 @@ export default function App() {
     setInputText,
     attachedFiles,
     setAttachedFiles,
-    planFeedbackInput,
-    setPlanFeedbackInput,
-    showFeedbackInput,
-    setShowFeedbackInput,
   } = useUIStore()
 
   const [connected, setConnected] = useState(() => {
     try {
-      const t = localStorage.getItem('AUTH_TOKEN')
+      const t = getAuthToken()
       return !!(t && t.trim())
     } catch { return false }
   })
   const inputRef = useRef<HTMLDivElement>(null)
-  // scrollEl: the mounted DOM node — used as Virtuoso's customScrollParent.
-  // Must be state (not ref.current) so Virtuoso re-renders after mount with real element.
-  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null)
-  useEffect(() => { setScrollEl(scrollContainerRef.current) }, [scrollContainerRef])
+  const chatViewerRef = useRef<ChatViewerHandle>(null)
+
+  // Phase 3: scroll control is fully managed by ScrollProvider.
+  // ChatVirtualList registers virtualizer capability; StreamProvider consumes it.
+
+  // Measure floating composer height for dynamic footer spacer
+  const composerRef = useRef<HTMLDivElement>(null)
+  const [composerHeight, setComposerHeight] = useState(200)
+  useEffect(() => {
+    const el = composerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([entry]) => {
+      setComposerHeight(Math.ceil(entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   // Reactive scroll-to-end: fires after React commits state from loadHistory
   useEffect(() => {
@@ -91,7 +105,7 @@ export default function App() {
       try {
         // Lazy token validation
         const configRes = await fetch(`${getApiBase()}/v1/config`, {
-          headers: { 'Authorization': `Bearer ${localStorage.getItem('AUTH_TOKEN') || ''}` },
+          headers: { 'Authorization': `Bearer ${getAuthToken()}` },
           signal: AbortSignal.timeout(5000),
         })
         if (configRes.status === 401) {
@@ -167,35 +181,25 @@ export default function App() {
 
   const handleModelSwitch = useCallback((modelName: string) => config.switchModel(modelName), [config])
 
-  const handleSuggestionClick = useCallback((suggestionText: string) => {
-    setInputText(suggestionText)
-    if (inputRef.current) {
-      inputRef.current.focus()
-    }
-  }, [setInputText])
+
 
   // Retry — re-generate the last assistant response
-  // Flow: strip backend history → strip UI messages → re-send through normal chat
-  const sendRef = useRef<((e?: React.FormEvent, overrideText?: string) => void) | undefined>(undefined)
+  // Phase 2: uses messageStore.stripFromLastUser() (fixes A3 off-by-one)
   const handleRetry = useCallback(async () => {
     if (!sessionId) return
     try {
       const { last_message } = await api.retry(sessionId)
       if (!last_message) return
-      // Strip assistant/tool messages from UI (keep up to last user msg)
-      setMessages(prev => {
-        const lastUserIdx = [...prev].reverse().findIndex(m => m.type === 'user')
-        if (lastUserIdx === -1) return prev
-        return prev.slice(0, prev.length - lastUserIdx)
-      })
-      // Directly re-send: add user message + start stream (bypass handleSend to avoid stale isStreaming closure)
+      // Strip from last user message onward (inclusive)
+      useMessageStore.getState().stripFromLastUser()
+      // Re-send through normal chat
       const userMsg: ChatMessageData = {
         uuid: `user-${Date.now()}`,
         timestamp: new Date().toISOString(),
         type: 'user',
         message: { role: 'user', parts: [{ text: last_message }] },
       }
-      setMessages(prev => [...prev, userMsg])
+      useMessageStore.getState().add(userMsg)
       setIsStreaming(true)
       setSubagentProgress([])
       enterStreamingMode()
@@ -205,7 +209,7 @@ export default function App() {
     } catch (err) {
       console.error('[retry] failed:', err)
     }
-  }, [sessionId, planMode, streamCallbacks])
+  }, [sessionId, planMode, streamCallbacks, setIsStreaming, setSubagentProgress, enterStreamingMode, scrollToBottom, cancelRef])
 
   // Send message — overrideText allows direct send from banner buttons
   const handleSend = useCallback(async (e?: React.FormEvent, overrideText?: string) => {
@@ -215,19 +219,12 @@ export default function App() {
 
     setInputText('')
 
-    // Lazy session creation: create on first message
+    // Lazy session creation: use unified session.newSession() path (D1 fix)
+    // This ensures messages/msgIndexRef are properly cleared + sidebar refreshed
     let sid = sessionId
     if (!sid) {
       try {
-        const sess = await api.newSession()
-        sid = sess.session_id
-        setSessionId(sid)
-        // Immediately add to sidebar before refresh
-        setSessions(prev => [{
-          id: sid, title: '', channel: 'web',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }, ...prev])
+        sid = await session.newSession()
       } catch (err) {
         console.error('Failed to create session', err)
         return
@@ -253,7 +250,7 @@ export default function App() {
       type: 'user',
       message: { role: 'user', parts: [{ text: finalText }] },
     }
-    setMessages(prev => [...prev, userMsg])
+    useMessageStore.getState().add(userMsg)
     setIsStreaming(true)
     setSubagentProgress([]) // Clear previous sub-agent data
     enterStreamingMode()
@@ -261,8 +258,9 @@ export default function App() {
 
     const handle = chatStream(finalText, sid, planMode, streamCallbacks)
     cancelRef.current = handle.cancel
-  }, [inputText, isStreaming, sessionId, attachedFiles, streamCallbacks])
-  sendRef.current = handleSend
+  }, [inputText, isStreaming, sessionId, attachedFiles, streamCallbacks, planMode, session,
+      setInputText, setAttachedFiles,
+      setIsStreaming, setSubagentProgress, enterStreamingMode, scrollToBottom, cancelRef])
 
   // Gate: show ConnectPage until authenticated
   if (!connected) {
@@ -281,8 +279,6 @@ export default function App() {
         onNewSession={handleNewSession}
         onDeleteSession={handleDeleteSession}
         onRenameSession={handleRenameSession}
-        onOpenHubTab={(tab: 'brain' | 'knowledge' | 'cron' | 'skills') => hub.openTab(tab)}
-        onOpenSettings={() => setIsSettingsOpen(true)}
       />
 
       <main className="flex-1 flex flex-col relative w-full h-full min-w-0 bg-transparent">
@@ -293,8 +289,6 @@ export default function App() {
           onToggleHub={hub.toggle}
           isHubOpen={hub.isOpen}
           connectionState={connectionState}
-          isStreaming={isStreaming}
-          subagentStats={subagentStats}
           availableModels={availableModels}
           currentModel={health?.model || ''}
           onModelSelect={handleModelSwitch}
@@ -302,212 +296,43 @@ export default function App() {
         />
 
         {/* Banners absolutely centered over the read-column */}
-        {pendingApprovals.length > 0 && (
-          <div className="absolute top-14 sm:top-20 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-full max-w-4xl px-2 sm:px-4 pointer-events-none">
-            <div className="flex flex-col gap-2 w-full pointer-events-auto" style={{ animation: 'slideDown 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}>
-              {pendingApprovals.map((req, idx) => (
-                <div key={req.approvalId}
-                  className={`w-full rounded-2xl border border-amber-500/30 bg-black/60 backdrop-blur-[40px] px-5 py-4 flex flex-col gap-3 shadow-[0_20px_40px_-10px_rgba(0,0,0,0.8)] ${pendingApprovals.length > 1 && idx > 0 ? 'mt-2' : ''}`}
-                  style={{ animation: 'fadeInScale 0.25s cubic-bezier(0.4, 0, 0.2, 1)', animationDelay: `${idx * 0.1}s`, animationFillMode: 'backwards' }}>
-                <div className="flex items-start gap-4">
-                  <span className="text-amber-400 text-xl mt-0.5 opacity-90 leading-none">⚠️</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold tracking-wide text-amber-200">
-                      待审批操作 <span className="text-gray-500 mx-2">|</span> <code className="font-mono text-[11px] bg-amber-500/10 text-amber-300/90 px-2 py-0.5 rounded-md border border-amber-500/20">{req.toolName}</code>
-                    </div>
-                    {req.reason && (
-                      <div className="text-[13px] text-amber-100/60 mt-1.5 leading-relaxed">{req.reason}</div>
-                    )}
-                    {Object.keys(req.args).length > 0 && (
-                      <pre className="text-[11px] mt-2 text-gray-400 bg-black/40 rounded-lg px-3 py-2.5 overflow-auto max-h-32 font-mono ring-1 ring-white/5">
-                        {JSON.stringify(req.args, null, 2)}
-                      </pre>
-                    )}
-                  </div>
-                </div>
-                <div className="flex gap-2 justify-end flex-wrap">
-                  <button
-                    onClick={async () => {
-                      await api.approve(req.approvalId, false)
-                      setPendingApprovals(prev => prev.filter(r => r.approvalId !== req.approvalId))
-                    }}
-                    className="px-4 py-1.5 rounded-lg text-sm font-medium bg-red-900/60 hover:bg-red-800/80 text-red-200 border border-red-700/40 transition-all hover:scale-105">
-                    拒绝
-                  </button>
-                  <button
-                    onClick={async () => {
-                      await api.approve(req.approvalId, true)
-                      setPendingApprovals(prev => prev.filter(r => r.approvalId !== req.approvalId))
-                    }}
-                    className="px-4 py-1.5 rounded-lg text-sm font-medium bg-emerald-900/60 hover:bg-emerald-800/80 text-emerald-200 border border-emerald-700/40 transition-all hover:scale-105">
-                    允许执行
-                  </button>
-                </div>
-              </div>
-              ))}
-              {pendingApprovals.length > 1 && (
-                <div className="text-xs text-center text-amber-300/60 mt-1">
-                  {pendingApprovals.length} 个待审批操作
-                </div>
-              )}
+        <ApprovalBanner pendingApprovals={pendingApprovals} setPendingApprovals={setPendingApprovals} />
+
+        {/* ── Chat Area: @tanstack/virtual self-manages scroll at 100% height ── */}
+        <div className="flex-1 min-h-0 w-full relative z-0">
+          {messages.length === 0 ? (
+            <div className="flex items-center justify-center h-full">
+              <WelcomeScreen />
             </div>
-          </div>
-        )}
-
-        {/* ── Scrollable Chat Area ── */}
-        {/* The hook's MutationObserver + ResizeObserver watches this container */}
-        {/* NOTE: Do NOT add CSS scroll-smooth here — it overrides scrollTop assignments and causes */}
-        {/* scroll lag during streaming. The hook uses scrollTo({behavior:'smooth'}) only for explicit user scrolls. */}
-        <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 min-h-0 w-full overflow-y-scroll relative z-0" style={{ WebkitOverflowScrolling: 'touch' }}>
-          {/* Reading Column Container */}
-          <div className="w-full max-w-4xl mx-auto flex flex-col min-h-full pt-10 md:pt-20 px-1 md:px-4 relative">
-            {messages.length === 0 ? (
-              <div className="flex-1 flex items-center justify-center">
-                <WelcomeScreen onSuggestionClick={handleSuggestionClick} />
-              </div>
-            ) : (
-            <div className="w-full flex flex-col relative min-h-full">
-              <ChatViewer
-                messages={messages}
-                theme="dark"
-                sessionId={sessionId}
-                onRetry={handleRetry}
-                customScrollParent={scrollEl}
-                isStreaming={streamPhase === 'streaming' || streamPhase === 'auto_waking'}
-                followOutput={followOutput}
-                onAtBottomChange={handleAtBottomChange}
-                userScrolledUpRef={userScrolledUpRef}
-                isStreamingRef={isStreamingRef}
-              />
-
-
-
-            </div>
-            )}
-          </div>
+          ) : (
+            <ChatViewer
+              ref={chatViewerRef}
+              messages={messages}
+              theme="dark"
+              sessionId={sessionId}
+              onRetry={handleRetry}
+              isStreaming={streamPhase === 'streaming' || streamPhase === 'auto_waking'}
+              composerHeight={composerHeight}
+            />
+          )}
+          {/* FAB: scroll-to-bottom when user scrolls up */}
+          {messages.length > 0 && <ScrollToBottomFab />}
         </div>
+
         {/* Floating Composer Container (Anchored to main bounds, compensated for 6px custom scrollbar width) */}
-        <div className="absolute bottom-0 left-0 w-full pointer-events-none z-10 pr-[6px]" 
+        <div ref={composerRef} className="absolute bottom-0 left-0 w-full pointer-events-none z-10 pr-[6px]" 
              style={{ background: 'linear-gradient(to bottom, transparent, rgba(0,0,0,0.5) 40%, rgba(0,0,0,0.95) 100%)' }}>
           <div className="w-full max-w-4xl mx-auto px-1 md:px-4 pb-2 md:pb-8 pt-10 md:pt-24 pointer-events-auto">
-            {/* Task Progress Banner — fixed above input, appears/disappears with task_boundary events */}
-            {taskProgress && (
-              <div className="px-1 mb-2">
-              <div className="w-full rounded-xl border border-white/[0.08] bg-[#1c1c1c] px-4 py-2.5 flex items-center gap-3 transition-all duration-200">
-                <span className={`shrink-0 inline-block w-2 h-2 rounded-full animate-pulse ${
-                  taskProgress.mode === 'planning' ? 'bg-blue-400' :
-                  taskProgress.mode === 'verification' ? 'bg-emerald-400' : 'bg-amber-400'
-                }`} />
-                <span className="text-sm font-medium text-gray-200 truncate flex-1">{taskProgress.taskName}</span>
-                <span className={`shrink-0 text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded ${
-                  taskProgress.mode === 'planning' ? 'bg-blue-900/50 text-blue-300' :
-                  taskProgress.mode === 'verification' ? 'bg-emerald-900/50 text-emerald-300' :
-                  'bg-amber-900/50 text-amber-300'
-                }`}>{taskProgress.mode}</span>
-                {taskProgress.status && (
-                  <span className="shrink-0 text-[11px] text-gray-500 hidden sm:block truncate max-w-[140px]">{taskProgress.status}</span>
-                )}
-              </div>
-              </div>
-            )}
+            <TaskProgressBar
+              isStreaming={streamPhase === 'streaming' || streamPhase === 'auto_waking'}
+              taskProgress={taskProgress}
+              isWaitingPlan={planReview !== null}
+              isWaitingApproval={pendingApprovals.length > 0}
+            />
             <SubagentDock />
             {/* Plan Review Banner — width aligned with InputForm */}
             {planReview && (
-              <div className="px-1 mb-2">
-              <div className="w-full rounded-2xl border border-blue-500/30 bg-black/60 backdrop-blur-[40px] px-5 py-4 flex flex-col gap-3 shadow-[0_20px_40px_-10px_rgba(0,0,0,0.8)]"
-                style={{ animation: 'slideDown 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}>
-                <div className="flex items-start gap-4">
-                  <span className="text-blue-400 text-xl mt-0.5 opacity-90 leading-none">📋</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold tracking-wide text-blue-200">计划执行审批</div>
-                    <div className="text-[13px] text-blue-100/60 mt-1.5 leading-relaxed">{planReview.message}</div>
-                    {planReview.paths.length > 0 && (
-                      <div className="text-[11px] text-gray-500 mt-2 font-mono flex flex-wrap gap-1">
-                        {planReview.paths.map(p => (
-                          <span key={p} className="bg-black/40 px-2 py-0.5 rounded-md border border-white/5">{p.split('/').pop()}</span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {showFeedbackInput && (
-                  <div className="flex gap-2 mt-1">
-                    <input
-                      type="text"
-                      value={planFeedbackInput}
-                      onChange={(e) => setPlanFeedbackInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && planFeedbackInput.trim()) {
-                          const text = planFeedbackInput.trim()
-                          setShowFeedbackInput(false)
-                          setPlanReview(null)
-                          setPlanFeedbackInput('')
-                          handleSend(undefined, text)
-                        }
-                      }}
-                      placeholder="输入修改意见..."
-                      className="flex-1 bg-black/30 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder:text-gray-600 focus:outline-none focus:border-blue-500/40"
-                      autoFocus
-                    />
-                    <button
-                      onClick={() => {
-                        if (planFeedbackInput.trim()) {
-                          const text = planFeedbackInput.trim()
-                          setShowFeedbackInput(false)
-                          setPlanReview(null)
-                          setPlanFeedbackInput('')
-                          handleSend(undefined, text)
-                        }
-                      }}
-                      className="px-3 py-1.5 rounded-lg text-sm font-medium bg-blue-900/60 hover:bg-blue-800/80 text-blue-200 border border-blue-700/40 transition-colors"
-                    >
-                      发送
-                    </button>
-                  </div>
-                )}
-
-                <div className="flex gap-2 justify-end flex-wrap mt-2">
-                  <button
-                    onClick={() => {
-                      setPlanReview(null)
-                      setShowFeedbackInput(false)
-                      handleSend(undefined, 'rejected')
-                    }}
-                    className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 transition-all hover:scale-105"
-                  >
-                    拒绝并关闭
-                  </button>
-                  <button
-                    onClick={() => {
-                      hub.openTab('brain')
-                      if (planReview.paths.length > 0) {
-                        hub.focusFile(planReview.paths[0].split('/').pop() || 'plan.md')
-                      }
-                    }}
-                    className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 transition-all hover:scale-105"
-                  >
-                    检视大纲
-                  </button>
-                  <button
-                    onClick={() => setShowFeedbackInput(true)}
-                    className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition-all hover:scale-105"
-                  >
-                    修改计划
-                  </button>
-                  <button
-                    onClick={() => {
-                      setPlanReview(null)
-                      setShowFeedbackInput(false)
-                      handleSend(undefined, 'approved')
-                    }}
-                    className="px-4 py-1.5 rounded-full text-[11px] font-medium tracking-wide bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-all hover:scale-105"
-                  >
-                    批准执行
-                  </button>
-                </div>
-              </div>
-              </div>
+              <PlanReviewBanner planReview={planReview} setPlanReview={setPlanReview} onSend={handleSend} />
             )}
             <InputForm
               inputText={inputText}

@@ -62,11 +62,14 @@ type AuditEntry struct {
 	Reason   string `json:"reason"`
 }
 
-// ContextStats holds context usage stats.
+// ContextStats holds context usage stats with cost tracking (P0-A #1).
 type ContextStats struct {
-	Model         string `json:"model"`
-	HistoryCount  int    `json:"history_count"`
-	TokenEstimate int    `json:"token_estimate"`
+	Model         string         `json:"model"`
+	HistoryCount  int            `json:"history_count"`
+	TokenEstimate int            `json:"token_estimate"`
+	TotalCostUSD  float64        `json:"total_cost_usd"`
+	TotalCalls    int            `json:"total_calls"`
+	ByModel       map[string]any `json:"by_model,omitempty"`
 }
 
 // SystemInfoResponse holds runtime system information.

@@ -113,10 +113,13 @@
   flex-direction: column;
   position: relative;
   min-width: 0;
-  scroll-behavior: smooth;
+  /* NOTE: scroll-behavior: smooth was here but CONFLICTS with Virtuoso's
+     instant scrollTop assignments during streaming → causes "sticky" lag.
+     Smooth scrolling is handled programmatically via scrollTo({behavior}) instead. */
 }
 
-/* Disable overflow anchoring on individual items for manual scroll control */
+/* Disable overflow anchoring on DIRECT children only.
+   Must NOT cascade into Virtuoso's internal containers. */
 .chat-messages > * {
   overflow-anchor: none;
 }
@@ -701,5 +704,69 @@
   padding-left: 0.8em;
   color: #999;
   margin: 0.5em 0;
+}
+
+/* ===========================
+   Scroll-to-Bottom FAB
+   =========================== */
+.scroll-to-bottom-fab {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(28, 28, 30, 0.85);
+  backdrop-filter: blur(12px);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  transition: opacity 0.2s ease, transform 0.2s ease,
+              background 0.15s ease, color 0.15s ease,
+              box-shadow 0.15s ease;
+}
+
+.scroll-to-bottom-fab:hover {
+  background: rgba(45, 45, 48, 0.95);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6), 0 0 12px rgba(255, 255, 255, 0.05);
+}
+
+.scroll-to-bottom-fab:active {
+  transform: translateX(-50%) scale(0.92);
+}
+
+/* ===========================
+   SubagentDock Animations (migrated from inline <style>)
+   =========================== */
+@keyframes dockFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes dotWave {
+  0%, 100% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.3); opacity: 1; }
+}
+
+/* ===========================
+   Thinking Dots (upgraded staggered bounce)
+   =========================== */
+@keyframes thinkingBounce {
+  0%, 80%, 100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  40% {
+    transform: translateY(-2px);
+    opacity: 0.85;
+  }
 }
 

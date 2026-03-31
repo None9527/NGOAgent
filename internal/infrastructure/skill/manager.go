@@ -9,7 +9,39 @@ import (
 	"time"
 
 	"github.com/ngoclaw/ngoagent/internal/domain/entity"
+	"gopkg.in/yaml.v3"
 )
+
+// skillFrontmatter maps directly to SKILL.md YAML frontmatter.
+type skillFrontmatter struct {
+	Name        string   `yaml:"name"`
+	Description string   `yaml:"description"`
+	Weight      string   `yaml:"weight"`
+	Rules       []string `yaml:"rules"`
+}
+
+// extractFrontmatter parses the YAML frontmatter block between --- delimiters.
+func extractFrontmatter(content string) skillFrontmatter {
+	var fm skillFrontmatter
+	lines := strings.Split(content, "\n")
+	var start, end int
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "---" {
+			if start == 0 {
+				start = i + 1
+			} else {
+				end = i
+				break
+			}
+		}
+	}
+	if start == 0 || end == 0 {
+		return fm
+	}
+	block := strings.Join(lines[start:end], "\n")
+	_ = yaml.Unmarshal([]byte(block), &fm)
+	return fm
+}
 
 // detectSkillType checks skill directory contents to determine type.
 //   - "executable": has run.sh or run.py
@@ -62,17 +94,18 @@ func (m *Manager) Discover() {
 				continue
 			}
 
-			name, desc := parseSkillHeader(string(content))
+			raw := string(content)
+			fm := extractFrontmatter(raw)
+			name := fm.Name
 			if name == "" {
 				name = entry.Name()
 			}
 
-			cmd := parseSkillCommand(string(content))
+			cmd := parseSkillCommand(raw)
 			skillDir := filepath.Join(dir, entry.Name())
 			skillType := detectSkillType(skillDir)
-			triggers := parseTriggers(string(content)) // Use full content, not `desc` (YAML `|` multiline breaks parseSkillHeader)
-			weight := parseSkillWeight(string(content))
-			// Auto-detect weight: has triggers → heavy, otherwise → light
+			triggers := parseTriggers(raw)
+			weight := fm.Weight
 			if weight == "" {
 				if len(triggers) > 0 {
 					weight = "heavy"
@@ -83,15 +116,16 @@ func (m *Manager) Discover() {
 			m.skills[name] = &entity.Skill{
 				ID:          name,
 				Name:        name,
-				Description: desc,
+				Description: fm.Description,
 				Type:        skillType,
 				Weight:      weight,
 				Triggers:    triggers,
+				Rules:       fm.Rules,
 				Command:     cmd,
 				Path:        filepath.Join(dir, entry.Name()),
-				Content:     string(content),
+				Content:     raw,
 				Enabled:     true,
-				ForgeStatus: "draft",
+				EvoStatus:   "draft",
 				InstalledAt: time.Now(),
 			}
 		}
@@ -141,38 +175,38 @@ func (m *Manager) ListSummary() string {
 
 // --- Forge Lifecycle ---
 
-// SetForgeStatus updates the forge status of a skill.
+// SetEvoStatus updates the forge status of a skill.
 // Valid transitions: draft→forging→forged, forged→degraded, degraded→reforging→forged
-func (m *Manager) SetForgeStatus(name, status string) error {
+func (m *Manager) SetEvoStatus(name, status string) error {
 	s, ok := m.skills[name]
 	if !ok {
 		return fmt.Errorf("skill not found: %s", name)
 	}
 
 	valid := map[string][]string{
-		"draft":     {"forging"},
-		"forging":   {"forged", "draft"},
-		"forged":    {"degraded"},
-		"degraded":  {"reforging"},
-		"reforging": {"forged", "degraded"},
+		"draft":     {"evolving"},
+		"evolving":   {"evolved", "draft"},
+		"evolved":    {"degraded"},
+		"degraded":  {"re-evolving"},
+		"re-evolving": {"evolved", "degraded"},
 	}
 
-	allowed, ok := valid[s.ForgeStatus]
+	allowed, ok := valid[s.EvoStatus]
 	if !ok {
-		return fmt.Errorf("unknown current status: %s", s.ForgeStatus)
+		return fmt.Errorf("unknown current status: %s", s.EvoStatus)
 	}
 
 	for _, a := range allowed {
 		if a == status {
-			s.ForgeStatus = status
+			s.EvoStatus = status
 			return nil
 		}
 	}
-	return fmt.Errorf("invalid transition: %s → %s", s.ForgeStatus, status)
+	return fmt.Errorf("invalid transition: %s → %s", s.EvoStatus, status)
 }
 
-// RecordForgeRun stores a forge execution result.
-func (m *Manager) RecordForgeRun(name string, run entity.ForgeRun) error {
+// RecordEvoRun stores a forge execution result.
+func (m *Manager) RecordEvoRun(name string, run entity.EvoRun) error {
 	s, ok := m.skills[name]
 	if !ok {
 		return fmt.Errorf("skill not found: %s", name)
@@ -190,8 +224,8 @@ func (m *Manager) RecordForgeRun(name string, run entity.ForgeRun) error {
 	if !run.Success {
 		status = "FAIL: " + run.FailureReason
 	}
-	fmt.Fprintf(f, "[%s] %s retries=%d deps=%v\n",
-		run.Timestamp.Format(time.RFC3339), status, run.Retries, run.DepsAdded)
+	fmt.Fprintf(f, "[%s] %s retries=%d strategy=%s\n",
+		run.Timestamp.Format(time.RFC3339), status, run.Retries, run.Strategy)
 	return nil
 }
 
@@ -221,37 +255,10 @@ func parseSkillCommand(content string) string {
 	return cmd.String()
 }
 
-// parseSkillHeader extracts name and description from SKILL.md YAML frontmatter.
-func parseSkillHeader(content string) (name, desc string) {
-	lines := strings.Split(content, "\n")
-	inFrontmatter := false
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "---" {
-			if inFrontmatter {
-				break
-			}
-			inFrontmatter = true
-			continue
-		}
-		if !inFrontmatter {
-			continue
-		}
-		if strings.HasPrefix(line, "name:") {
-			name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
-			name = strings.Trim(name, "\"'")
-		}
-		if strings.HasPrefix(line, "description:") {
-			desc = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
-			desc = strings.Trim(desc, "\"'")
-		}
-	}
-	return
-}
-
-// parseTriggers extracts trigger words from the description.
+// parseTriggers extracts trigger words from the full file content.
 // Looks for "触发词：" or "triggers:" line and splits by Chinese/English comma.
-func parseTriggers(desc string) []string {
-	for _, line := range strings.Split(desc, "\n") {
+func parseTriggers(content string) []string {
+	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		var triggerPart string
 		if strings.HasPrefix(trimmed, "触发词：") || strings.HasPrefix(trimmed, "触发词:") {
@@ -262,7 +269,6 @@ func parseTriggers(desc string) []string {
 		} else {
 			continue
 		}
-		// Split by Chinese comma, English comma, or 、
 		var triggers []string
 		for _, sep := range []string{"、", "，", ","} {
 			triggerPart = strings.ReplaceAll(triggerPart, sep, "|")
@@ -276,33 +282,6 @@ func parseTriggers(desc string) []string {
 		return triggers
 	}
 	return nil
-}
-
-// parseSkillWeight extracts weight from SKILL.md frontmatter.
-// Returns "light", "heavy", or "" for auto-detect.
-func parseSkillWeight(content string) string {
-	lines := strings.Split(content, "\n")
-	inFrontmatter := false
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "---" {
-			if inFrontmatter {
-				break
-			}
-			inFrontmatter = true
-			continue
-		}
-		if !inFrontmatter {
-			continue
-		}
-		if strings.HasPrefix(line, "weight:") {
-			w := strings.TrimSpace(strings.TrimPrefix(line, "weight:"))
-			w = strings.Trim(w, "\"'")
-			if w == "light" || w == "heavy" {
-				return w
-			}
-		}
-	}
-	return ""
 }
 
 // MatchTriggers checks user message against all skill triggers.
@@ -361,7 +340,7 @@ func (m *Manager) AutoPromote() []*entity.Skill {
 func (m *Manager) ListUnforged() []*entity.Skill {
 	var result []*entity.Skill
 	for _, s := range m.skills {
-		if s.ForgeStatus == "draft" {
+		if s.EvoStatus == "draft" {
 			result = append(result, s)
 		}
 	}
@@ -372,7 +351,7 @@ func (m *Manager) ListUnforged() []*entity.Skill {
 func (m *Manager) ListDegraded() []*entity.Skill {
 	var result []*entity.Skill
 	for _, s := range m.skills {
-		if s.ForgeStatus == "degraded" {
+		if s.EvoStatus == "degraded" {
 			result = append(result, s)
 		}
 	}

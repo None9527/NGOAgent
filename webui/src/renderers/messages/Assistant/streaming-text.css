@@ -1,0 +1,14 @@
+/**
+ * streaming-text.css — Lightweight style for streaming plain-text mode.
+ * Visually matches MarkdownRenderer output to minimize flash on transition.
+ */
+
+.streaming-text {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.7;
+  color: #e5e5e5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}

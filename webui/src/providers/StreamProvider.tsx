@@ -1,28 +1,22 @@
 /**
  * StreamProvider — manages SSE streaming state, callbacks, send/stop actions.
  * Uses useHub() directly for Intelligence Hub integration.
+ *
+ * Phase 2 refactor: messages writes go through messageStore (Zustand).
+ * Phase 3 refactor: scroll logic moved to ScrollProvider. StreamProvider
+ * consumes scroll capabilities via useScrollContext().
  */
 
-import { createContext, useContext, useState, useCallback, useRef, useMemo, useEffect, type ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, useRef, useMemo, useEffect, useLayoutEffect, type ReactNode } from 'react'
 import { reconnectStream, getSharedWSClient, onWSStateChange } from '../chat/streamHandler'
 import { uid } from '../chat/messageMapper'
-import { useChatScroll } from '../hooks/useChatScroll'
+import { useScrollContext } from './ScrollProvider'
 import { useSession } from './SessionProvider'
 import { useHub } from './HubProvider'
-import type { ChatMessageData, StreamCallbacks, ApprovalRequest } from '../chat/types'
+import { useMessageStore } from '../stores/messageStore'
+import type { ChatMessageData, StreamCallbacks, ApprovalRequest, SubagentProgressEntry, StreamPhase } from '../chat/types'
 
-export interface SubagentProgressEntry {
-  runID: string
-  taskName: string
-  status: 'running' | 'completed' | 'failed'
-  done: number
-  total: number
-  error?: string
-  output?: string
-  currentStep?: string // current tool being executed
-}
-
-export type StreamPhase = 'idle' | 'streaming' | 'waiting_approval' | 'awaiting_subagents' | 'auto_waking' | 'reconnecting'
+export type { SubagentProgressEntry, StreamPhase }
 
 interface StreamState {
   isStreaming: boolean // computed: phase !== 'idle'
@@ -37,12 +31,10 @@ interface StreamActions {
   reconnect: (sessionId: string, lastSeq: number) => void
   streamCallbacks: StreamCallbacks
   cancelRef: React.MutableRefObject<(() => void) | null>
-  scrollContainerRef: React.RefObject<HTMLDivElement | null>
-  handleScroll: () => void
+  scrollContainerRef: React.MutableRefObject<HTMLDivElement | null>
+
   scrollToBottom: (behavior?: ScrollBehavior) => void
   resetToBottom: () => void
-  followOutput: (isAtBottom: boolean) => false | 'smooth' | 'auto'
-  handleAtBottomChange: (atBottom: boolean) => void
   userScrolledUpRef: React.MutableRefObject<boolean>
   isStreamingRef: React.MutableRefObject<boolean>
   enterStreamingMode: () => void
@@ -67,8 +59,12 @@ export function useStream(): StreamContextValue {
 }
 
 export function StreamProvider({ children }: { children: ReactNode }) {
-  const { setMessages, setSessions, msgIndexRef, refreshSessions } = useSession()
+  const { setSessions, refreshSessions } = useSession()
   const hub = useHub()
+  const store = useMessageStore
+
+  // Subscribe to messages for useLayoutEffect scroll trigger
+  const messages = useMessageStore(s => s.messages)
 
   const [streamPhase, setStreamPhase] = useState<StreamPhase>('idle')
   const isStreaming = streamPhase !== 'idle'
@@ -95,16 +91,13 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   const currentTaskSectionIdRef = useRef<string | null>(null)
 
   const {
-    scrollContainerRef, handleScroll, scrollToBottom, resetToBottom,
+    scrollContainerRef, scrollToEnd, resetToBottom,
     enterStreamingMode, exitStreamingMode,
-    followOutput, handleAtBottomChange, userScrolledUpRef,
-    isStreamingRef,
-  } = useChatScroll()
+    isStreamingRef, autoScrollRef, userScrolledUpRef,
+  } = useScrollContext()
 
   // Pre-initialize WebSocket connection on mount so it's ready before first message.
   // Wire WS connection state → connectionState for accurate TopNavbar status.
-  // NOTE: Do NOT close the WS on cleanup — it's a session-level singleton that must
-  // survive React StrictMode's mount→unmount→remount cycle in dev.
   useEffect(() => {
     getSharedWSClient()
     const unsub = onWSStateChange((wsState: string) => {
@@ -115,49 +108,70 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     return () => { unsub() } // Do NOT closeSharedWSClient() here — survives remounts
   }, [])
 
-  // ── SSE Callbacks ──
+  // ── Streaming auto-scroll ──
+  // useLayoutEffect fires AFTER React commits DOM changes, BEFORE browser paints.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    if (!isStreamingRef.current || !autoScrollRef.current) return
+    scrollToEnd()
+  }, [messages]) // fires on every messages state change
+
+  // ── SSE Callbacks (Phase 2: use messageStore) ──
+
   const onMessage = useCallback((msg: ChatMessageData) => {
     // Transition reconnecting → connected on first event
     if (reconnectingRef.current) {
       reconnectingRef.current = false
       setConnectionState('connected')
     }
-    setMessages(prev => {
-      if (prev.some(m => m.uuid === msg.uuid)) return prev
-      msgIndexRef.current.set(msg.uuid, prev.length)
-      return [...prev, msg]
-    })
-  }, [setMessages, msgIndexRef])
+    // store.add() returns false if uuid already exists → StrictMode safe dedup
+    store.getState().add(msg)
+  }, [store])
+
+  // ── RAF Throttle for streaming text updates ──
+  const pendingTextPatchRef = useRef<Map<string, Partial<ChatMessageData>>>(new Map())
+  const rafIdRef = useRef(0)
+
+  const flushTextUpdates = useCallback(() => {
+    rafIdRef.current = 0
+    const pending = pendingTextPatchRef.current
+    if (pending.size === 0) return
+    // batchUpdate auto-handles index lookups + fallbacks
+    store.getState().batchUpdate(pending)
+    pending.clear()
+  }, [store])
+
+  // Cleanup RAF on unmount
+  useEffect(() => {
+    return () => { if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current) }
+  }, [])
 
   const onUpdate = useCallback((uuid: string, patch: Partial<ChatMessageData>) => {
-    setMessages(prev => {
-      const idx = msgIndexRef.current.get(uuid)
-      if (idx === undefined) return prev
-      const m = prev[idx]
-      if (!m) return prev
-      const next = [...prev]
-      if (patch.toolCall && m.toolCall) {
-        next[idx] = {
-          ...m, ...patch,
-          toolCall: {
-            ...m.toolCall,
-            ...patch.toolCall,
-            title: patch.toolCall.title || m.toolCall.title,
-            rawInput: patch.toolCall.rawInput || m.toolCall.rawInput,
-            content: patch.toolCall.content && patch.toolCall.content.length > 0
-              ? patch.toolCall.content
-              : m.toolCall.content,
-          },
-        }
-      } else {
-        next[idx] = { ...m, ...patch }
+    // Fast path: streaming text updates → batch via RAF
+    if (patch.isStreaming === true && patch.message && !patch.toolCall) {
+      pendingTextPatchRef.current.set(uuid, patch)
+      if (!rafIdRef.current) {
+        rafIdRef.current = requestAnimationFrame(flushTextUpdates)
       }
-      return next
-    })
+      return
+    }
+
+    // Slow path: toolCall updates, isStreaming:false transitions → immediate
+    // MERGE any pending RAF text patch so accumulated text isn't lost.
+    const pendingPatch = pendingTextPatchRef.current.get(uuid)
+    pendingTextPatchRef.current.delete(uuid)
+    const mergedPatch = pendingPatch ? { ...pendingPatch, ...patch } : patch
+
+    // store.update() handles toolCall deep merge + index fallback internally
+    store.getState().update(uuid, mergedPatch)
+
     if (patch.toolCall?.status === 'completed' && patch.toolCall?.kind) {
       const kind = patch.toolCall.kind as string
       if (['write', 'edit', 'updated_plan'].includes(kind)) {
-        hub.setBrainRefreshTrigger(prev => prev + 1)
+        const title = String(patch.toolCall.title || '').toLowerCase()
+        if (/\b(task\.md|implementation_plan\.md|walkthrough\.md|plan\.md)\b/.test(title) || kind === 'updated_plan') {
+          hub.setBrainRefreshTrigger(prev => prev + 1)
+        }
       }
       if (kind === 'updated_plan' && patch.toolCall.rawInput) {
         const planType = (patch.toolCall.rawInput as Record<string, unknown>).type as string
@@ -168,23 +182,24 @@ export function StreamProvider({ children }: { children: ReactNode }) {
         }
       }
     }
-  }, [setMessages, msgIndexRef, hub])
+  }, [store, hub, flushTextUpdates])
 
   const onToolCall = useCallback((msg: ChatMessageData) => {
     if (reconnectingRef.current) {
       reconnectingRef.current = false
       setConnectionState('connected')
     }
-    setMessages(prev => {
-      if (prev.some(m => m.uuid === msg.uuid)) return prev
-      msgIndexRef.current.set(msg.uuid, prev.length)
-      return [...prev, msg]
-    })
+    // store.add() handles dedup internally
+    store.getState().add(msg)
     if (msg.toolCall && ['write', 'edit', 'updated_plan'].includes(msg.toolCall.kind)) {
-      hub.setTab('brain')
-      hub.setIsOpen(true)
+      const title = String(msg.toolCall.title || '').toLowerCase()
+      const isBrainArtifact = /\b(task\.md|implementation_plan\.md|walkthrough\.md|plan\.md)\b/.test(title)
+      if (isBrainArtifact || msg.toolCall.kind === 'updated_plan') {
+        hub.setTab('brain')
+        hub.setIsOpen(true)
+      }
     }
-  }, [setMessages, msgIndexRef, hub])
+  }, [store, hub])
 
   const subagentProgressRef = useRef(subagentProgress)
   subagentProgressRef.current = subagentProgress
@@ -192,47 +207,37 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   const streamPhaseRef = useRef(streamPhase)
   streamPhaseRef.current = streamPhase
 
+  /** Drain pending RAF patches — used by onEnd/onError/stopStream (A5 fix) */
+  const drainPendingPatches = useCallback(() => {
+    if (rafIdRef.current) { cancelAnimationFrame(rafIdRef.current); rafIdRef.current = 0 }
+    pendingTextPatchRef.current.clear()
+  }, [])
+
   const onEnd = useCallback(() => {
-    const currentPhase = streamPhaseRef.current
-    // Guard: if cancelRef was already cleared (e.g. session-switch pre-cleanup),
-    // this is a stale onEnd from an abandoned stream — don't reset state.
-    // EXCEPTION: if we're in auto_waking/awaiting_subagents, force cleanup to prevent stuck UI.
-    if (!cancelRef.current && currentPhase !== 'auto_waking' && currentPhase !== 'awaiting_subagents' && currentPhase !== 'streaming') {
-      refreshSessions(true)
-      return
-    }
-    // Always transition to idle on done event.
-    // SubagentDock handles sub-agent progress display independently.
-    // Auto-wake will set phase to 'auto_waking' via auto_wake_start event if needed.
+    // Always transition to idle — any received 'done' event means agent finished.
+    // Previous guard (!cancelRef.current && phase check) was too strict:
+    // WS connections keep cancelRef alive after 'done', causing guard to skip idle reset.
     setStreamPhase('idle')
     exitStreamingMode()
     setTaskProgress(null)
     currentTaskSectionIdRef.current = null
+    drainPendingPatches()
     setConnectionState('connected')
     cancelRef.current = null
     refreshSessions(true)
-    setTimeout(() => refreshSessions(true), 5000)
-    setTimeout(() => refreshSessions(true), 10000)
-  }, [exitStreamingMode, refreshSessions])
+  }, [exitStreamingMode, refreshSessions, drainPendingPatches])
 
   const onError = useCallback((err: Error) => {
     setStreamPhase('idle')
     exitStreamingMode()
     setTaskProgress(null)
     currentTaskSectionIdRef.current = null
-    // Do NOT set connectionState to 'disconnected' here —
-    // stream errors are transient; WS connection may still be alive.
-    // connectionState should only reflect actual WS state.
+    drainPendingPatches()
     cancelRef.current = null
     console.error('Stream error:', err)
     const errText = err instanceof Error ? err.message : String(err)
-    setMessages(prev => [...prev, {
-      uuid: `err-${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      type: 'assistant' as const,
-      message: { role: 'model', parts: [{ text: `⚠️ **Error:** ${errText}` }] },
-    }])
-  }, [exitStreamingMode, setMessages])
+    store.getState().appendError(errText)
+  }, [exitStreamingMode, store, drainPendingPatches])
 
   const onAutoWakeStart = useCallback(() => {
     setStreamPhase('auto_waking')
@@ -253,7 +258,6 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       setTaskProgress({ taskName, status, summary, mode })
       // task_section dedup: inject once, then update in-place
       if (!currentTaskSectionIdRef.current) {
-        // First progress event → create new task_section message
         const sectionId = uid()
         currentTaskSectionIdRef.current = sectionId
         onMessage({
@@ -263,7 +267,6 @@ export function StreamProvider({ children }: { children: ReactNode }) {
           taskSection: { taskName, status, summary, mode },
         })
       } else {
-        // Subsequent updates → patch the existing task_section in-place
         onUpdate(currentTaskSectionIdRef.current, {
           taskSection: { taskName, status, summary, mode },
         })
@@ -301,7 +304,8 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     exitStreamingMode()
     setTaskProgress(null)
     currentTaskSectionIdRef.current = null
-  }, [streamPhase, exitStreamingMode])
+    drainPendingPatches()
+  }, [streamPhase, exitStreamingMode, drainPendingPatches])
 
   const reconnect = useCallback((sessionId: string, lastSeq: number) => {
     setStreamPhase('reconnecting')
@@ -316,8 +320,8 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     <StreamContext.Provider value={{
       isStreaming, streamPhase, connectionState, taskProgress, subagentProgress,
       stopStream, reconnect, streamCallbacks, cancelRef,
-      scrollContainerRef, handleScroll, scrollToBottom, resetToBottom,
-      followOutput, handleAtBottomChange, userScrolledUpRef, isStreamingRef,
+      scrollContainerRef, scrollToBottom: scrollToEnd, resetToBottom,
+      userScrolledUpRef, isStreamingRef,
       enterStreamingMode, exitStreamingMode,
       pendingApprovals, setPendingApprovals,
       planReview, setPlanReview,

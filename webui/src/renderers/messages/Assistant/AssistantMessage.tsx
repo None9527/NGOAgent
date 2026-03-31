@@ -31,6 +31,8 @@ export interface AssistantMessageProps {
   isLastAssistant?: boolean;
   /** Retry callback — re-generate this response */
   onRetry?: () => void;
+  /** Whether this message is currently being streamed */
+  isStreaming?: boolean;
 }
 
 /**
@@ -47,6 +49,7 @@ export const AssistantMessage: FC<AssistantMessageProps> = memo(({
   isLast = false,
   isLastAssistant = false,
   onRetry,
+  isStreaming: _isStreaming = false,
 }) => {
   const [copyFeedback, setCopyFeedback] = useState(false);
 
@@ -55,8 +58,11 @@ export const AssistantMessage: FC<AssistantMessageProps> = memo(({
     return null;
   }
 
-  const handleCopy = useCallback(() => {
+  const handleCopy = useCallback(async () => {
     try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      // Fallback for older browsers / insecure contexts
       const el = document.createElement('textarea');
       el.value = content;
       el.style.position = 'fixed';
@@ -65,8 +71,6 @@ export const AssistantMessage: FC<AssistantMessageProps> = memo(({
       el.select();
       document.execCommand('copy');
       document.body.removeChild(el);
-    } catch {
-      navigator.clipboard?.writeText(content);
     }
     setCopyFeedback(true);
     setTimeout(() => setCopyFeedback(false), 1500);
@@ -112,11 +116,27 @@ export const AssistantMessage: FC<AssistantMessageProps> = memo(({
           color: '#e5e5e5',
         }}
       >
-        <MessageContent
-          content={content}
-          onFileClick={onFileClick}
-          enableFileLinks={true}
-        />
+        {/* Perf-P0: Dual-buffer render — plain text during streaming, Markdown after.
+            This reduces per-delta render from ~5-10ms (Markdown parse) to ~0.1ms.
+            Similar to Cursor/Windsurf behavior. */}
+        {_isStreaming ? (
+          <div className="streaming-plaintext" style={{
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            lineHeight: '1.75',
+            fontSize: '14px',
+            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+            letterSpacing: '0.01em',
+          }}>
+            {content}
+          </div>
+        ) : (
+          <MessageContent
+            content={content}
+            onFileClick={onFileClick}
+            enableFileLinks={true}
+          />
+        )}
       </div>
 
       {/* Hover action toolbar */}

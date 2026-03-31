@@ -102,6 +102,8 @@ export interface ChatMessageData {
   taskSection?: TaskSectionMeta
   cwd?: string
   gitBranch?: string
+  /** True while this message is being streamed (text_delta in progress) */
+  isStreaming?: boolean
 }
 
 // ═══════════════════════════════════════════
@@ -158,6 +160,8 @@ export interface StreamCallbacks {
   onProgress?: (taskName: string, status: string, summary: string, mode: string) => void
   onSubagentProgress?: (runID: string, taskName: string, status: string, done: number, total: number, error?: string, output?: string, currentStep?: string) => void
   onAutoWakeStart?: () => void
+  onEvoEval?: (text: string) => void
+  onEvoRepair?: (text: string) => void
   onEnd: () => void
   onError: (err: Error) => void
 }

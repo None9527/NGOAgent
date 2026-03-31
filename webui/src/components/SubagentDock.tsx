@@ -13,9 +13,15 @@ export function SubagentDock() {
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const hasEntries = subagentProgress.length > 0
-  const runningCount = subagentProgress.filter(e => e.status === 'running').length
-  const completedCount = subagentProgress.filter(e => e.status === 'completed').length
-  const failedCount = subagentProgress.filter(e => e.status === 'failed').length
+  const { running: runningCount, completed: completedCount, failed: failedCount } = subagentProgress.reduce(
+    (acc, e) => {
+      if (e.status === 'running') acc.running++
+      else if (e.status === 'completed') acc.completed++
+      else if (e.status === 'failed') acc.failed++
+      return acc
+    },
+    { running: 0, completed: 0, failed: 0 },
+  )
   const allDone = hasEntries && runningCount === 0
 
   useEffect(() => {
@@ -40,16 +46,6 @@ export function SubagentDock() {
   return (
     <div className="w-full max-w-xl mx-auto mb-2"
       style={{ animation: 'dockFadeIn 0.25s ease-out' }}>
-      <style>{`
-        @keyframes dockFadeIn {
-          from { opacity: 0; transform: translateY(6px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes dotWave {
-          0%, 100% { transform: scale(1); opacity: 0.6; }
-          50% { transform: scale(1.3); opacity: 1; }
-        }
-      `}</style>
 
       <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] backdrop-blur-sm overflow-hidden">
         {/* Compact bar */}

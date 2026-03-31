@@ -74,6 +74,7 @@ func Build() (*App, error) {
 	}
 	repo := persistence.NewRepository(db)
 	historyStore := persistence.NewHistoryStore(db)
+	evoStore := persistence.NewEvoStore(db) // Evo tables: evo_traces, evo_evaluations, evo_repairs
 
 	// ═══════════════════════════════════════════
 	// Phase 2: Core Infrastructure
@@ -199,8 +200,13 @@ func Build() (*App, error) {
 	registry.Register(&tool.GrepSearchTool{})
 	registry.Register(tool.NewRunCommandTool(sbMgr))
 	registry.Register(tool.NewCommandStatusTool(sbMgr))
-	registry.Register(tool.NewWebSearchTool(cfg.Search.Endpoint))
-	registry.Register(tool.NewWebFetchTool())
+	searxngURLB := cfg.Search.SearXNGURL
+	if searxngURLB == "" {
+		searxngURLB = cfg.Search.Endpoint
+	}
+	registry.Register(tool.NewWebSearchTool(searxngURLB))
+	registry.Register(tool.NewWebFetchTool(cfg.Search.Endpoint))
+	registry.Register(tool.NewDeepResearchTool(cfg.Search.Endpoint))
 	registry.Register(tool.NewTaskPlanTool(brainDir))
 	registry.Register(tool.NewTaskBoundaryTool())
 	registry.Register(tool.NewNotifyUserTool())
@@ -211,7 +217,7 @@ func Build() (*App, error) {
 	registry.Register(tool.NewTaskListTool(brainDir))
 	spawnTool := tool.NewSpawnAgentTool(nil) // Lazy: SpawnFunc set after loop creation
 	registry.Register(spawnTool)
-	registry.Register(tool.NewForgeTool(cfg.Forge.SandboxDir))
+	registry.Register(tool.NewEvoTool("/tmp/ngoagent-evo"))
 	brainArtifactTool := tool.NewBrainArtifactTool(nil) // Lazy: Brain set per-session
 	registry.Register(brainArtifactTool)
 	registry.Register(tool.NewUndoEditTool(fileHistory))
@@ -241,6 +247,25 @@ func Build() (*App, error) {
 	}
 	// Diary hook: record run summary to daily diary after each session
 	hookChain.Add(service.NewDiaryHook(&diaryAdapter{store: diaryStore}))
+	// NOTE: TraceCollectorHook is per-loop (created in NewAgentLoop), NOT global.
+
+	// Evo evaluator + repair router (nil-safe: if EvoConfig disabled, these are inert)
+	var evoEvaluator *service.EvoEvaluator
+	var evoRepairRouter *service.RepairRouter
+	if cfg.Evo.AutoEval {
+		evalModel := cfg.Evo.EvalModel
+		if evalModel == "" {
+			evalModel = cfg.Agent.DefaultModel
+		}
+		if evalProvider, err := router.Resolve(evalModel); err == nil {
+			evoEvaluator = service.NewEvoEvaluator(evalProvider, cfg.Evo, evoStore)
+			evoRepairRouter = service.NewRepairRouter(cfg.Evo, evoStore)
+			log.Printf("[evo] Evaluator active: model=%s threshold=%.1f maxRetries=%d",
+				evalModel, cfg.Evo.ScoreThreshold, cfg.Evo.MaxRetries)
+		} else {
+			log.Printf("[evo] Warning: eval model %q not found, evo disabled: %v", evalModel, err)
+		}
+	}
 
 	baseDeps := service.Deps{
 		Config:       cfg,
@@ -256,9 +281,12 @@ func Build() (*App, error) {
 		Workspace:    wsStore,
 		SkillMgr:     skillMgr,
 		HistoryStore: &historyAdapter{store: historyStore},
-		FileHistory:  fileHistory,
-		Hooks:        hookChain,
-		MemoryStore:  memStore,
+		FileHistory:     fileHistory,
+		Hooks:           hookChain,
+		MemoryStore:     memStore,
+		EvoEvaluator:    evoEvaluator,
+		EvoRepairRouter: evoRepairRouter,
+		EvoStore:        evoStore,
 	}
 	factory := service.NewLoopFactory(baseDeps, 8) // max 8 concurrent runs
 
@@ -275,7 +303,7 @@ func Build() (*App, error) {
 	var barrierMu sync.Mutex
 	barriers := make(map[string]*service.SubagentBarrier) // keyed by sessionID for correctness
 
-	spawnTool.SetSpawnFunc(func(ctx context.Context, task string) (string, error) {
+	spawnTool.SetSpawnFunc(func(ctx context.Context, task, taskName string) (string, error) {
 		// Get the RUNTIME session ID from context (injected by ChatStream)
 		// instead of the fixed builder-time sessionID variable.
 		runtimeSID := ctxutil.SessionIDFromContext(ctx)
@@ -351,30 +379,35 @@ func Build() (*App, error) {
 				})
 			}
 			barriers[runtimeSID] = b
+			// Wire config-driven concurrency limit
+			if cfg.Agent.MaxSubagents > 0 {
+				b.SetMaxConcurrent(cfg.Agent.MaxSubagents)
+			}
 		}
 		barrierMu.Unlock()
 
-		taskName := "sub-agent"
-		// Extract task_name from task string if present
-		if idx := strings.Index(task, "\n"); idx > 0 {
-			firstLine := task[:idx]
-			if len(firstLine) < 60 {
-				taskName = firstLine
-			}
+		// S7: taskName comes directly from spawn_agent tool — no need to re-extract
+		if taskName == "" {
+			taskName = "sub-agent"
 		}
 
-		ch := service.NewSubagentChannel(func(runID, result string) {
+		ch := service.NewSubagentChannel(func(runID, result string, err error) {
 			// Route completion through barrier instead of direct ephemeral
-			b.OnComplete(runID, result, nil)
+			b.OnComplete(runID, result, err)
 		})
 		run := factory.Create(runtimeSID, ch)
 		run.Loop.InjectEphemeral(prompttext.EphSubAgentContext)
+
+		// S2: Register in barrier BEFORE RunAsync to prevent race
+		// (fast-completing subagent could call OnComplete before Add)
+		if err := b.Add(run.ID, taskName); err != nil {
+			// S5: concurrency limit reached
+			return "", fmt.Errorf("cannot spawn sub-agent: %v", err)
+		}
+
 		// Use Background context — subagent must survive parent loop completion.
 		// Parent context cancellation should NOT kill running subagents.
 		runID := factory.RunAsync(context.Background(), run, task)
-
-		// Register in barrier AFTER RunAsync so runID is known
-		b.Add(runID, taskName)
 
 		// Wire per-tool step push so SubagentDock shows current activity
 		if spawnTool.EventPusher != nil {
@@ -459,8 +492,16 @@ func Build() (*App, error) {
 	})
 
 	cfgMgr.Subscribe("agent", func(old, new *config.Config) {
-		log.Printf("[hot-reload] Agent config changed: planning=%v",
-			new.Agent.PlanningMode)
+		log.Printf("[hot-reload] Agent config changed: planning=%v max_steps=%d max_subagents=%d",
+			new.Agent.PlanningMode, new.Agent.MaxSteps, new.Agent.MaxSubagents)
+		// Push to main loop
+		loop.ReloadConfig(new)
+		// Push to all active session loops
+		if loopPool != nil {
+			loopPool.ForEach(func(l *service.AgentLoop) {
+				l.ReloadConfig(new)
+			})
+		}
 	})
 
 	// NOTE: Approval flow uses PendingApproval registry (RequestApproval → Resolve via POST /v1/approve).
@@ -523,13 +564,10 @@ func Build() (*App, error) {
 		// Auto-register MCP-discovered tools into agent registry
 		tool.RegisterMCPTools(registry, mcpMgr)
 	}
-	// Unified skill activation: single use_skill tool + fallback for direct calls
-	useSkillTool := tool.NewUseSkillTool(skillMgr)
-	registry.Register(useSkillTool)
-	registry.SetSkillFallback(useSkillTool)
-	// Layered registration:
+	// Skill registration:
 	// - light + executable: register as ScriptTool (LLM calls directly)
 	// - heavy + executable: trigger-inject + run_command (LLM uses run_command after ephemeral hint)
+	// - workflow: agent uses read_file on SKILL.md when needed (no dedicated tool)
 	for _, sk := range skillMgr.AutoPromote() {
 		if (sk.Type == "executable" || sk.Type == "hybrid") && sk.Weight == "light" {
 			registry.Register(tool.NewScriptTool(sk))
@@ -538,7 +576,7 @@ func Build() (*App, error) {
 			log.Printf("[skill] Heavy skill (trigger-inject): %s [%d triggers]", sk.Name, len(sk.Triggers))
 		}
 	}
-	log.Printf("[skill] use_skill tool registered with %d skills available", len(skillMgr.List()))
+	log.Printf("[skill] %d skills discovered (YAML pre-read, no use_skill tool)", len(skillMgr.List()))
 
 	// ═══════════════════════════════════════════
 	// Phase 8: Unified API + Server

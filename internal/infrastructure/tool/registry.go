@@ -4,7 +4,6 @@ package tool
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
@@ -28,11 +27,10 @@ type ToolInfo struct {
 
 // Registry manages tool registration, lookup, enable/disable, and path resolution.
 type Registry struct {
-	mu            sync.RWMutex
-	tools         map[string]Tool
-	disabled      map[string]bool
-	workspaceDir  string        // Default workspace for resolving relative paths
-	skillFallback *UseSkillTool // Fallback for skill-name tool calls
+	mu           sync.RWMutex
+	tools        map[string]Tool
+	disabled     map[string]bool
+	workspaceDir string // Default workspace for resolving relative paths
 }
 
 // NewRegistry creates an empty tool registry.
@@ -43,14 +41,7 @@ func NewRegistry() *Registry {
 	}
 }
 
-// SetSkillFallback registers the UseSkillTool as fallback handler.
-// When a tool is not found but matches a skill name, the skill's
-// SKILL.md content is returned automatically.
-func (r *Registry) SetSkillFallback(ust *UseSkillTool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.skillFallback = ust
-}
+
 
 // SetWorkspaceDir sets the default workspace directory for path resolution.
 // Relative paths in tool args will be resolved against this directory.
@@ -99,13 +90,6 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 	r.mu.RUnlock()
 
 	if !ok {
-		// Fallback: check if name matches a skill → auto-load SKILL.md
-		if r.skillFallback != nil {
-			result, err := r.skillFallback.LoadSkill(ctx, name, "")
-			if err == nil && !strings.Contains(result.Output, "not found") {
-				return result, nil
-			}
-		}
 		return dtool.ToolResult{}, &ToolError{Code: "not_found", Message: "tool not found: " + name}
 	}
 	if disabled {

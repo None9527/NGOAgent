@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,15 +17,16 @@ import (
 
 // WebSearchTool performs web searches via SearXNG.
 type WebSearchTool struct {
-	endpoint string
-	client   *http.Client
+	searxngURL string // Direct SearXNG URL for fast raw search
+	client     *http.Client
 }
 
-// NewWebSearchTool creates a web search tool with SearXNG endpoint.
-func NewWebSearchTool(endpoint string) *WebSearchTool {
+// NewWebSearchTool creates a web search tool.
+// searxngURL should point directly to SearXNG (e.g. http://localhost:8080).
+func NewWebSearchTool(searxngURL string) *WebSearchTool {
 	return &WebSearchTool{
-		endpoint: endpoint,
-		client:   &http.Client{Timeout: 15 * time.Second},
+		searxngURL: strings.TrimRight(searxngURL, "/"),
+		client:     &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
@@ -53,13 +55,13 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]any) (dtool
 		limit = int(v)
 	}
 
-	if t.endpoint == "" {
-		return dtool.ToolResult{Output: "Error: web search not configured. Set 'search.endpoint' in config.yaml (e.g. http://localhost:8888)"}, nil
+	if t.searxngURL == "" {
+		return dtool.ToolResult{Output: "Error: web search not configured. Set 'search.searxng_url' in config.yaml (e.g. http://localhost:8080)"}, nil
 	}
 
-	// Call SearXNG JSON API
+	// Call SearXNG JSON API directly for fast, lightweight search
 	searchURL := fmt.Sprintf("%s/search?q=%s&format=json&categories=general&language=auto",
-		strings.TrimRight(t.endpoint, "/"),
+		t.searxngURL,
 		url.QueryEscape(query),
 	)
 
@@ -108,22 +110,17 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]any) (dtool
 	return dtool.ToolResult{Output: sb.String()}, nil
 }
 
-// WebFetchTool fetches content from a URL.
+// WebFetchTool fetches content from a URL via the agent-search /api/fetch endpoint.
+// This proxy gives access to curl_cffi and Camoufox stealth browser, bypassing CF protections.
 type WebFetchTool struct {
-	client *http.Client
+	agentSearchURL string
+	client         *http.Client
 }
 
-func NewWebFetchTool() *WebFetchTool {
+func NewWebFetchTool(agentSearchEndpoint string) *WebFetchTool {
 	return &WebFetchTool{
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return fmt.Errorf("too many redirects")
-				}
-				return nil
-			},
-		},
+		agentSearchURL: strings.TrimRight(agentSearchEndpoint, "/"),
+		client: &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -142,55 +139,84 @@ func (t *WebFetchTool) Schema() map[string]any {
 }
 
 func (t *WebFetchTool) Execute(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
-	url, _ := args["url"].(string)
+	targetURL, _ := args["url"].(string)
 	maxLength := 50000
 
 	if v, ok := args["max_length"].(float64); ok && v > 0 {
 		maxLength = int(v)
 	}
 
-	if url == "" {
+	if targetURL == "" {
 		return dtool.ToolResult{Output: "Error: 'url' is required"}, nil
 	}
 
-	// Protocol check
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
 		return dtool.ToolResult{Output: "Error: only http:// and https:// protocols are supported"}, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// If agent-search endpoint is not configured, fall back to direct fetch
+	if t.agentSearchURL == "" {
+		return dtool.ToolResult{Output: "Error: agent-search endpoint not configured (set search.endpoint in config)"}, nil
+	}
+
+	// Proxy to agent-search /api/fetch for CF-piercing stealth fetch
+	payload := map[string]any{
+		"url":        targetURL,
+		"max_length": maxLength,
+	}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		t.agentSearchURL+"/api/fetch",
+		bytes.NewReader(body),
+	)
 	if err != nil {
 		return dtool.ToolResult{Output: fmt.Sprintf("Error creating request: %v", err)}, nil
 	}
-	req.Header.Set("User-Agent", "NGOAgent/1.0")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain")
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return dtool.ToolResult{Output: fmt.Sprintf("Error fetching URL: %v", err)}, nil
+		return dtool.ToolResult{Output: fmt.Sprintf("Error fetching URL via agent-search: %v", err)}, nil
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return dtool.ToolResult{Output: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, resp.Status)}, nil
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxLength)))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 200_000))
 	if err != nil {
-		return dtool.ToolResult{Output: fmt.Sprintf("Error reading response: %v", err)}, nil
+		return dtool.ToolResult{Output: fmt.Sprintf("Error reading agent-search response: %v", err)}, nil
 	}
 
-	content := string(body)
-
-	// Basic HTML → text conversion (strip tags)
-	content = stripHTMLTags(content)
-	content = strings.TrimSpace(content)
-
-	if len(content) >= maxLength {
-		content = content[:maxLength] + "\n... (truncated)"
+	if resp.StatusCode != http.StatusOK {
+		return dtool.ToolResult{Output: fmt.Sprintf("agent-search /api/fetch error HTTP %d: %s", resp.StatusCode, string(respBody))}, nil
 	}
 
-	return dtool.ToolResult{Output: fmt.Sprintf("URL: %s\nStatus: %d\n\n%s", url, resp.StatusCode, content)}, nil
+	var fr struct {
+		URL         string `json:"url"`
+		Title       string `json:"title"`
+		Content     string `json:"content"`
+		ContentType string `json:"content_type"`
+		Truncated   bool   `json:"truncated"`
+		FetchTimeMs int    `json:"fetch_time_ms"`
+	}
+	if err := json.Unmarshal(respBody, &fr); err != nil {
+		return dtool.ToolResult{Output: fmt.Sprintf("Error parsing agent-search response: %v\nRaw: %s", err, string(respBody))}, nil
+	}
+
+	if fr.ContentType == "error" || strings.Contains(fr.Content, "[Fetch error") {
+		return dtool.ToolResult{Output: fmt.Sprintf("Fetch failed for %s: %s", fr.URL, fr.Content)}, nil
+	}
+
+	var sb strings.Builder
+	if fr.Title != "" {
+		sb.WriteString(fmt.Sprintf("Title: %s\n", fr.Title))
+	}
+	sb.WriteString(fmt.Sprintf("URL: %s\n", fr.URL))
+	sb.WriteString(fmt.Sprintf("Fetched in: %dms\n\n", fr.FetchTimeMs))
+	sb.WriteString(fr.Content)
+	if fr.Truncated {
+		sb.WriteString("\n... (truncated)")
+	}
+	return dtool.ToolResult{Output: sb.String()}, nil
 }
 
 // stripHTMLTags converts HTML to plain text.
@@ -250,4 +276,145 @@ func stripHTMLTags(s string) string {
 	}
 
 	return result
+}
+
+// ---------------------------------------------------------------------------
+// DeepResearchTool: one-shot deep research via agent-search /api/search_and_fetch
+// ---------------------------------------------------------------------------
+
+// DeepResearchTool provides high-quality, anti-bot-proof deep content via
+// the agent-search pipeline: SearXNG → LLM reranker → parallel Camoufox crawl.
+type DeepResearchTool struct {
+	agentSearchURL string
+	client         *http.Client
+}
+
+func NewDeepResearchTool(agentSearchEndpoint string) *DeepResearchTool {
+	return &DeepResearchTool{
+		agentSearchURL: strings.TrimRight(agentSearchEndpoint, "/"),
+		client:         &http.Client{Timeout: 120 * time.Second},
+	}
+}
+
+func (t *DeepResearchTool) Name() string        { return "deep_research" }
+func (t *DeepResearchTool) Description() string { return prompttext.ToolDeepResearch }
+
+func (t *DeepResearchTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query":      map[string]any{"type": "string", "description": "Research question or topic"},
+			"categories": map[string]any{"type": "string", "description": "Content category: general|news|images|videos (default: general)"},
+			"fetch_top":  map[string]any{"type": "integer", "description": "Number of top results to deep-crawl (default: 3, max: 5)"},
+			"limit":      map[string]any{"type": "integer", "description": "Max results to return (default: 5)"},
+		},
+		"required": []string{"query"},
+	}
+}
+
+func (t *DeepResearchTool) Execute(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
+	query, _ := args["query"].(string)
+	if query == "" {
+		return dtool.ToolResult{Output: "Error: 'query' is required"}, nil
+	}
+
+	if t.agentSearchURL == "" {
+		return dtool.ToolResult{Output: "Error: agent-search endpoint not configured (set search.endpoint in config)"}, nil
+	}
+
+	categories := "general"
+	if v, ok := args["categories"].(string); ok && v != "" {
+		categories = v
+	}
+
+	fetchTop := 3
+	if v, ok := args["fetch_top"].(float64); ok && v > 0 {
+		fetchTop = min(int(v), 5)
+	}
+
+	limit := 5
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	payload := map[string]any{
+		"query":              query,
+		"categories":         categories,
+		"fetch_top":          fetchTop,
+		"limit":              limit,
+		"max_content_length": 30000,
+	}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		t.agentSearchURL+"/api/search_and_fetch",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return dtool.ToolResult{Output: fmt.Sprintf("Error creating request: %v", err)}, nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return dtool.ToolResult{Output: fmt.Sprintf("Error calling deep_research pipeline: %v", err)}, nil
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 500_000))
+	if err != nil {
+		return dtool.ToolResult{Output: fmt.Sprintf("Error reading response: %v", err)}, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return dtool.ToolResult{Output: fmt.Sprintf("agent-search error HTTP %d: %s", resp.StatusCode, string(respBody))}, nil
+	}
+
+	var result struct {
+		Results []struct {
+			Title        string  `json:"title"`
+			URL          string  `json:"url"`
+			Snippet      string  `json:"snippet"`
+			Content      string  `json:"content"`
+			RerankScore  float64 `json:"rerank_score"`
+			RerankReason string  `json:"rerank_reason"`
+			ImageURL     string  `json:"image_url"`
+		} `json:"results"`
+		Total       int    `json:"total"`
+		Fetched     int    `json:"fetched"`
+		Intent      string `json:"intent"`
+		QueryTimeMs int    `json:"query_time_ms"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return dtool.ToolResult{Output: fmt.Sprintf("Error parsing deep_research response: %v", err)}, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Deep Research Results for: %s\n", query))
+	sb.WriteString(fmt.Sprintf("Intent: %s | Results: %d | Deep-crawled: %d | Time: %dms\n\n",
+		result.Intent, result.Total, result.Fetched, result.QueryTimeMs))
+
+	for i, r := range result.Results {
+		sb.WriteString(fmt.Sprintf("--- [%d] %s ---\n", i+1, r.Title))
+		sb.WriteString(fmt.Sprintf("URL: %s\n", r.URL))
+		if r.RerankScore > 0 {
+			sb.WriteString(fmt.Sprintf("Relevance: %.1f | Reason: %s\n", r.RerankScore, r.RerankReason))
+		}
+		if r.ImageURL != "" {
+			sb.WriteString(fmt.Sprintf("Image: %s\n", r.ImageURL))
+		}
+		if r.Content != "" {
+			sb.WriteString(fmt.Sprintf("\n%s\n\n", r.Content))
+		} else if r.Snippet != "" {
+			sb.WriteString(fmt.Sprintf("Snippet: %s\n\n", r.Snippet))
+		}
+	}
+	return dtool.ToolResult{Output: sb.String()}, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

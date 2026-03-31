@@ -164,8 +164,11 @@ export function getDisplayTitle(
 // History → ChatMessageData Converter
 // ═══════════════════════════════════════════
 
-let _seq = 0
-const uid = () => `msg-${Date.now()}-${++_seq}`
+// C4: crypto.randomUUID for true uniqueness (no counter reset on HMR)
+const uid = () =>
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? `msg-${crypto.randomUUID()}`
+    : `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
 /**
  * Convert backend history messages to ChatMessageData array.

@@ -12,6 +12,10 @@ import type { Highlighter } from 'shiki'
 
 type SupportedTheme = 'github-dark' | 'github-light' | 'vitesse-dark'
 
+const PRELOAD_LANGS = [
+  'typescript', 'javascript', 'python', 'go', 'bash', 'json',
+] as const
+
 const SUPPORTED_LANGS = [
   'typescript', 'javascript', 'tsx', 'jsx',
   'python', 'go', 'bash', 'sh', 'json', 'yaml', 'rust',
@@ -29,8 +33,8 @@ async function getHighlighter(): Promise<Highlighter> {
   _initPromise = (async () => {
     const { createHighlighter } = await import('shiki')
     const hl = await createHighlighter({
-      themes: ['github-dark', 'github-light', 'vitesse-dark'],
-      langs: SUPPORTED_LANGS as unknown as string[],
+      themes: ['github-dark'],  // Only load the used theme
+      langs: PRELOAD_LANGS as unknown as string[],  // Preload only common langs
     })
     _highlighter = hl
     return hl
@@ -70,13 +74,25 @@ export async function highlight(
       ? normalizedLang
       : 'text'
 
+    // Lazy-load language if not yet loaded
+    if (supportedLang !== 'text' && supportedLang !== 'plaintext') {
+      const loaded = hl.getLoadedLanguages()
+      if (!loaded.includes(supportedLang)) {
+        try {
+          await hl.loadLanguage(supportedLang as Parameters<typeof hl.loadLanguage>[0])
+        } catch {
+          // Language not available — fall back to plaintext
+          return `<pre><code>${escapeHtml(code)}</code></pre>`
+        }
+      }
+    }
+
     let html = hl.codeToHtml(code, {
       lang: supportedLang,
       theme,
     })
 
     // Strip all inline background-color from Shiki output
-    // (prevents bg leaking through — container provides the bg)
     html = html.replace(/background-color:[^;"}]+;?/g, '')
 
     return html

@@ -44,6 +44,7 @@ func (ce *ChatEngine) Chat(ctx context.Context, sessionID, message string) error
 						Role:       e.Role,
 						Content:    e.Content,
 						ToolCallID: e.ToolCallID,
+						Reasoning:  e.Reasoning,
 					}
 					if e.ToolCalls != "" {
 						json.Unmarshal([]byte(e.ToolCalls), &msgs[i].ToolCalls)

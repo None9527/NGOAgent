@@ -43,7 +43,7 @@ type AuditEntry struct {
 	Decision  Decision
 	Level     DecisionLevel
 	Reason    string
-	Mode      string // chat / forge
+	Mode      string // chat / evo
 }
 
 // ApprovalFunc blocks until user approves/denies. Returns true=approved.
@@ -86,15 +86,15 @@ func NewHook(cfg *config.SecurityConfig) *Hook {
 // BeforeToolCall is called before every tool execution.
 func (h *Hook) BeforeToolCall(ctx context.Context, toolName string, args map[string]any) (Decision, string) {
 	mode := ctxutil.ModeFromContext(ctx)
-	forgeID := ctxutil.ActiveForgeIDFromContext(ctx)
+	evoID := ctxutil.ActiveEvoIDFromContext(ctx)
 
 	var decision Decision
 	var reason string
 	var level DecisionLevel
 
 	switch {
-	case forgeID != "":
-		decision, reason = h.forgeDecide(toolName, args, forgeID)
+	case evoID != "":
+		decision, reason = h.evoDecide(toolName, args, evoID)
 		level = LevelPolicy
 	default:
 		decision, reason, level = h.normalDecide(ctx, toolName, args)
@@ -305,10 +305,10 @@ func (h *Hook) normalDecide(_ context.Context, toolName string, args map[string]
 	}
 }
 
-// forgeDecide allows operations within the forge sandbox.
-func (h *Hook) forgeDecide(toolName string, args map[string]any, _ string) (Decision, string) {
-	if toolName == "forge" {
-		return Allow, "forge self-access"
+// evoDecide allows operations within the forge sandbox.
+func (h *Hook) evoDecide(toolName string, args map[string]any, _ string) (Decision, string) {
+	if toolName == "evo" {
+		return Allow, "evo self-access"
 	}
 
 	if toolName == "write_file" || toolName == "edit_file" {
@@ -316,26 +316,26 @@ func (h *Hook) forgeDecide(toolName string, args map[string]any, _ string) (Deci
 		if path == "" {
 			path, _ = args["file_path"].(string)
 		}
-		if !strings.HasPrefix(path, "/tmp/ngoagent-forge/") {
-			return Deny, "forge: file operation outside sandbox"
+		if !strings.HasPrefix(path, "/tmp/ngoagent-evo/") {
+			return Deny, "evo: file operation outside sandbox"
 		}
-		return Allow, "forge: inside sandbox"
+		return Allow, "evo: inside sandbox"
 	}
 
 	if toolName == "read_file" || toolName == "glob" || toolName == "grep_search" {
-		return Allow, "forge: read-only"
+		return Allow, "evo: read-only"
 	}
 
 	// run_command: check if it's a dependency install → allow with audit
 	if toolName == "run_command" {
 		cmd, _ := args["command"].(string)
 		if isDependencyInstall(cmd) {
-			return Allow, "forge: dependency install (audited)"
+			return Allow, "evo: dependency install (audited)"
 		}
-		return Allow, "forge: command execution (audited)"
+		return Allow, "evo: command execution (audited)"
 	}
 
-	return Ask, "forge: unexpected tool"
+	return Ask, "evo: unexpected tool"
 }
 
 // ═══════════════════════════════════════════

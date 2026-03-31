@@ -1,25 +1,25 @@
 /**
- * SessionProvider — manages sessionId, sessions list, messages, and history.
- * Eliminates ~6 useState + 4 handlers from App.tsx.
+ * SessionProvider — manages sessionId, sessions list, and history.
+ *
+ * Phase 2 refactor: messages state moved to messageStore (Zustand).
+ * SessionProvider now orchestrates session lifecycle, history loading,
+ * and sidebar refresh — but no longer owns message state.
  */
 
 import { createContext, useContext, useState, useCallback, useRef, type ReactNode } from 'react'
 import { api } from '../chat/api'
 import { historyToMessages } from '../chat/messageMapper'
-import type { ChatMessageData, SessionListItem } from '../chat/types'
+import { useMessageStore } from '../stores/messageStore'
+import type { SessionListItem } from '../chat/types'
 
 interface SessionState {
   sessionId: string
   sessions: SessionListItem[]
-  messages: ChatMessageData[]
 }
 
 interface SessionActions {
   setSessionId: (id: string) => void
   setSessions: React.Dispatch<React.SetStateAction<SessionListItem[]>>
-  setMessages: React.Dispatch<React.SetStateAction<ChatMessageData[]>>
-  /** O(1) message index lookup used during streaming */
-  msgIndexRef: React.MutableRefObject<Map<string, number>>
   /** Load history for a session and reset scroll flag */
   loadHistory: (sid: string) => Promise<void>
   /** Refresh sessions list from backend (throttled) */
@@ -49,25 +49,18 @@ export function useSession(): SessionContextValue {
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [sessionId, setSessionId] = useState('')
   const [sessions, setSessions] = useState<SessionListItem[]>([])
-  const [messages, setMessages] = useState<ChatMessageData[]>([])
-  const msgIndexRef = useRef<Map<string, number>>(new Map())
   const pendingScrollToEnd = useRef(false)
   const lastRefreshRef = useRef(0)
 
   const loadHistory = useCallback(async (sid: string) => {
     try {
       const data = await api.getHistory(sid)
-      setMessages(() => {
-        const msgs = historyToMessages(data.messages, sid)
-        const idx = new Map<string, number>()
-        msgs.forEach((m, i) => idx.set(m.uuid, i))
-        msgIndexRef.current = idx
-        return msgs
-      })
+      const msgs = historyToMessages(data.messages, sid)
+      useMessageStore.getState().replace(msgs)
       pendingScrollToEnd.current = true
     } catch (err) {
       console.error('Failed to load history', err)
-      setMessages([])
+      useMessageStore.getState().clear()
     }
   }, [])
 
@@ -90,7 +83,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const newSession = useCallback(async (): Promise<string> => {
     const sess = await api.newSession()
     setSessionId(sess.session_id)
-    setMessages([])
+    useMessageStore.getState().clear()
     await refreshSessions(true)
     return sess.session_id
   }, [refreshSessions])
@@ -103,7 +96,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (id === sessionId) {
         const sess = await api.newSession()
         setSessionId(sess.session_id)
-        setMessages([])
+        useMessageStore.getState().clear()
       }
     } catch (err) {
       console.error('Failed to delete session', err)
@@ -130,9 +123,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   return (
     <SessionContext.Provider value={{
-      sessionId, sessions, messages,
-      setSessionId, setSessions, setMessages,
-      msgIndexRef, pendingScrollToEnd,
+      sessionId, sessions,
+      setSessionId, setSessions,
+      pendingScrollToEnd,
       loadHistory, refreshSessions,
       newSession, deleteSession, renameSession,
       initialize,

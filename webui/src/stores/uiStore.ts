@@ -14,8 +14,7 @@ interface UIState {
   hubOpen: boolean
   inputText: string
   attachedFiles: FileItem[]
-  planFeedbackInput: string
-  showFeedbackInput: boolean
+
 }
 
 interface UIActions {
@@ -29,8 +28,7 @@ interface UIActions {
   addAttachedFile: (file: FileItem) => void
   removeAttachedFile: (name: string) => void
   clearAttachedFiles: () => void
-  setPlanFeedbackInput: (v: string) => void
-  setShowFeedbackInput: (v: boolean) => void
+
 }
 
 type UIStore = UIState & UIActions
@@ -42,8 +40,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   hubOpen: false,
   inputText: '',
   attachedFiles: [],
-  planFeedbackInput: '',
-  showFeedbackInput: false,
+
 
   // ── Actions ──
   setSidebarOpen: (v) => set({ sidebarOpen: v }),
@@ -66,6 +63,5 @@ export const useUIStore = create<UIStore>((set, get) => ({
       attachedFiles: s.attachedFiles.filter((f) => f.name !== name),
     })),
   clearAttachedFiles: () => set({ attachedFiles: [] }),
-  setPlanFeedbackInput: (v) => set({ planFeedbackInput: v }),
-  setShowFeedbackInput: (v) => set({ showFeedbackInput: v }),
+
 }))

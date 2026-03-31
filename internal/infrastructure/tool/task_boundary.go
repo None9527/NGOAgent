@@ -71,14 +71,8 @@ func (t *TaskBoundaryTool) Execute(ctx context.Context, args map[string]any) (dt
 
 	data, _ := json.Marshal(update)
 	output := "Task boundary updated."
-	switch mode {
-	case "planning":
-		output += " Next: create plan.md via task_plan if not already done."
-	case "execution":
-		output += " Next: create/update task.md via task_plan to track progress."
-	case "verification":
-		output += " Next: after tests pass, create walkthrough.md via task_plan."
-	}
+	// Mode-specific instructions are handled by EphPlanningMode/EphExitingPlanningMode.
+	// Avoid duplicating them here to prevent LLM attention dilution.
 	return dtool.ToolResult{
 		Output:  output,
 		Signal:  dtool.SignalProgress,

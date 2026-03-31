@@ -8,7 +8,7 @@ import { api, getApiBase, authFetch } from '../chat/api'
 import type { HealthInfo } from '../chat/types'
 
 interface ConfigState {
-  planMode: 'auto' | 'plan' | 'agentic'
+  planMode: 'auto' | 'plan' | 'agentic' | 'evo'
   securityMode: string
   availableModels: string[]
   health: HealthInfo | null
@@ -19,7 +19,7 @@ interface ConfigActions {
   toggleSecurityMode: () => Promise<void>
   switchModel: (modelName: string) => Promise<void>
   /** Initialize from backend — called once after auth */
-  initialize: () => Promise<{ planMode: 'auto' | 'plan' | 'agentic'; securityMode: string }>
+  initialize: () => Promise<{ planMode: 'auto' | 'plan' | 'agentic' | 'evo'; securityMode: string }>
 }
 
 type ConfigContextValue = ConfigState & ConfigActions
@@ -33,7 +33,7 @@ export function useConfig(): ConfigContextValue {
 }
 
 export function ConfigProvider({ children }: { children: ReactNode }) {
-  const [planMode, setPlanMode] = useState<'auto' | 'plan' | 'agentic'>('auto')
+  const [planMode, setPlanMode] = useState<'auto' | 'plan' | 'agentic' | 'evo'>('auto')
   const [securityMode, setSecurityMode] = useState('allow')
   const [availableModels, setAvailableModels] = useState<string[]>([])
   const [health, setHealth] = useState<HealthInfo | null>(null)
@@ -42,6 +42,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setPlanMode(prev => {
       if (prev === 'auto') return 'plan'
       if (prev === 'plan') return 'agentic'
+      if (prev === 'agentic') return 'evo'
       return 'auto'
     })
   }, [])
@@ -73,17 +74,17 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setAvailableModels(modelsData.models || [])
 
     // Load config for mode sync
-    const configRes = await fetch(`${getApiBase()}/v1/config`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('AUTH_TOKEN') || ''}` },
+    const configRes = await authFetch(`${getApiBase()}/v1/config`, {
       signal: AbortSignal.timeout(5000),
     })
     if (!configRes.ok) return { planMode: 'auto' as const, securityMode: 'allow' }
 
     const cfg = await configRes.json()
     const planModeVal = cfg?.agent?.planning_mode
-    let resolvedPlan: 'auto' | 'plan' | 'agentic' = 'auto'
+    let resolvedPlan: 'auto' | 'plan' | 'agentic' | 'evo' = 'auto'
     if (planModeVal === 'plan' || planModeVal === true) resolvedPlan = 'plan'
     else if (planModeVal === 'agentic') resolvedPlan = 'agentic'
+    else if (planModeVal === 'evo') resolvedPlan = 'evo'
 
     const resolvedSecurity = cfg?.security?.mode || 'allow'
 

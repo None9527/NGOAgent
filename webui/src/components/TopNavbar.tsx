@@ -6,12 +6,36 @@ export interface TopNavbarProps {
   onToggleHub: () => void
   isHubOpen: boolean
   connectionState?: 'connected' | 'reconnecting' | 'disconnected'
-  isStreaming?: boolean
-  subagentStats?: { running: number; total: number } | null
   availableModels?: string[]
   currentModel?: string
   onModelSelect?: (modelName: string) => void
   onOpenSettings?: () => void
+}
+
+// ── Status Indicator ─────────────────────────────────────────
+// Only shows network connection state — agent work status is in TaskProgressBar
+function StatusIndicator({ connectionState }: { connectionState: string }) {
+  if (connectionState === 'disconnected') {
+    return (
+      <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-red-500/10 border border-red-500/20">
+        <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+        <span className="text-[11px] font-medium text-red-400/90 tracking-wide">Offline</span>
+      </div>
+    )
+  }
+  if (connectionState === 'reconnecting') {
+    return (
+      <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-500/10 border border-amber-500/20">
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+        <span className="text-[11px] font-medium text-amber-400/90 tracking-wide">Reconnecting</span>
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center gap-1.5 px-1.5 py-1">
+      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400/80" />
+    </div>
+  )
 }
 
 export const TopNavbar: React.FC<TopNavbarProps> = ({ 
@@ -20,8 +44,6 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   onToggleHub, 
   isHubOpen,
   connectionState = 'connected',
-  isStreaming = false,
-  subagentStats = null,
   availableModels = [],
   currentModel = '',
   onModelSelect,
@@ -94,49 +116,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             </div>
           )}
         </div>
-        {/* Unified status indicator — always visible */}
-        {(() => {
-          if (connectionState === 'disconnected') {
-            return (
-              <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-red-500/10 border border-red-500/20">
-                <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
-                <span className="text-[11px] font-medium text-red-400/90 tracking-wide">Offline</span>
-              </div>
-            )
-          }
-          if (connectionState === 'reconnecting') {
-            return (
-              <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-500/10 border border-amber-500/20 animate-in fade-in">
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                <span className="text-[11px] font-medium text-amber-400/90 tracking-wide">Reconnecting</span>
-              </div>
-            )
-          }
-          // Subagent progress takes priority over Thinking
-          if (subagentStats && subagentStats.running > 0) {
-            return (
-              <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-blue-500/8 border border-blue-500/15">
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                <span className="text-[11px] font-medium text-blue-400/80 tracking-wide">
-                  子任务 {subagentStats.total - subagentStats.running}/{subagentStats.total}
-                </span>
-              </div>
-            )
-          }
-          if (isStreaming) {
-            return (
-              <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-blue-500/8 border border-blue-500/15">
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                <span className="text-[11px] font-medium text-blue-400/80 tracking-wide">Thinking</span>
-              </div>
-            )
-          }
-          return (
-            <div className="flex items-center gap-1.5 px-1.5 py-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400/80" />
-            </div>
-          )
-        })()}
+        <StatusIndicator connectionState={connectionState} />
       </div>
       
       <div className="flex items-center gap-2">

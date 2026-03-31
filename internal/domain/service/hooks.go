@@ -52,6 +52,16 @@ func NewHookManager() *HookManager {
 // AddToolHook registers a tool lifecycle hook.
 func (m *HookManager) AddToolHook(h ToolHook) { m.tool = append(m.tool, h) }
 
+// GetTraceCollector returns the TraceCollectorHook from the tool hook chain, if one exists.
+func (m *HookManager) GetTraceCollector() (*TraceCollectorHook, bool) {
+	for _, h := range m.tool {
+		if tc, ok := h.(*TraceCollectorHook); ok {
+			return tc, true
+		}
+	}
+	return nil, false
+}
+
 // AddCompactHook registers a compaction lifecycle hook.
 func (m *HookManager) AddCompactHook(h CompactHook) { m.compact = append(m.compact, h) }
 
@@ -62,6 +72,7 @@ func (m *HookManager) AddMessageHook(h MessageHook) { m.message = append(m.messa
 // Returns potentially modified args and skip=true if any hook wants to skip.
 func (m *HookManager) FireBeforeTool(ctx context.Context, name string, args map[string]any) (map[string]any, bool) {
 	for _, h := range m.tool {
+		var hookSkip bool
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -69,14 +80,14 @@ func (m *HookManager) FireBeforeTool(ctx context.Context, name string, args map[
 				}
 			}()
 			newArgs, skip := h.BeforeTool(ctx, name, args)
-			if skip {
-				args = newArgs
-				return
-			}
 			if newArgs != nil {
 				args = newArgs
 			}
+			hookSkip = skip
 		}()
+		if hookSkip {
+			return args, true // Propagate skip to caller
+		}
 	}
 	return args, false
 }
@@ -173,6 +184,11 @@ type RunInfo struct {
 	Mode         string
 	History      []llm.Message // conversation history for distillation
 	Delta        DeltaSink     // SSE event sink for real-time push (e.g. title_updated)
+	// Evo mode fields
+	EvoTraceJSON     string      // Serialized trace steps (for evo runs)
+	EvoEval          *EvalResult // Evaluation result (nil if not evo)
+	EvoRepairSuccess bool        // Whether a repair succeeded
+	EvoRepairPlan    *RepairPlan // The repair plan that was used
 }
 
 // PostRunHookChain executes multiple hooks in order.
@@ -260,6 +276,10 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		// Steps counts generate→tool→guard cycles, so Steps=0 means pure text Q&A.
 		// Previously Steps<5 filtered too aggressively — most sessions have 1-3 steps.
 		if info.Steps < 2 || len(info.History) < 4 {
+			// Still check for evo repair distillation even on short sessions
+			if info.EvoRepairSuccess && info.EvoRepairPlan != nil {
+				h.distillEvoRepair(store, info)
+			}
 			log.Printf("[hook] KI distill: skipped (steps=%d, history=%d) for session=%s",
 				info.Steps, len(info.History), info.SessionID)
 			return
@@ -335,6 +355,33 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 	}()
 }
 
+// distillEvoRepair saves a successful repair strategy as a KI entry.
+func (h *KIDistillHook) distillEvoRepair(store KIStore, info RunInfo) {
+	if info.EvoRepairPlan == nil || info.EvoEval == nil {
+		return
+	}
+
+	title := fmt.Sprintf("Evo Repair: %s → %s", info.EvoEval.ErrorType, info.EvoRepairPlan.Strategy)
+	summary := fmt.Sprintf("Successful %s repair for %s error (score %.2f → improved)",
+		info.EvoRepairPlan.Strategy, info.EvoEval.ErrorType, info.EvoEval.Score)
+	content := fmt.Sprintf("# %s\n\n**Error Type:** %s\n**Strategy:** %s\n**Original Score:** %.2f\n**Description:** %s\n\n## Context\n\nUser request: %s\n\n## Issues Found\n\n%s\n\n## Repair Action\n\n%s",
+		title,
+		info.EvoEval.ErrorType,
+		info.EvoRepairPlan.Strategy,
+		info.EvoEval.Score,
+		info.EvoRepairPlan.Description,
+		info.UserMessage,
+		formatIssues(info.EvoEval.Issues),
+		info.EvoRepairPlan.Ephemeral,
+	)
+
+	tags := []string{"evo-repair", string(info.EvoRepairPlan.Strategy), info.EvoEval.ErrorType}
+	if err := store.SaveDistilled(title, summary, content, tags, []string{info.SessionID}); err != nil {
+		log.Printf("[hook] evo repair KI save failed: %v", err)
+	} else {
+		log.Printf("[hook] evo repair KI distilled: strategy=%s error=%s", info.EvoRepairPlan.Strategy, info.EvoEval.ErrorType)
+	}
+}
 
 // ═══════════════════════════════════════════
 // TitleDistillHook — LLM-generated session title

@@ -15,11 +15,15 @@ import (
 func TestEditFileLazyCommentDetection(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "test.go")
-	os.WriteFile(filePath, []byte("func main() {\n\tfmt.Println(\"hello\")\n}\n"), 0644)
+	// Realistic multi-line function — lazy edits try to replace this with much shorter stubs
+	longContent := "func main() {\n\tfmt.Println(\"hello\")\n\tfmt.Println(\"world\")\n\tif err := doSomething(); err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}\n"
+	os.WriteFile(filePath, []byte(longContent), 0644)
 
 	tool := &EditFileTool{}
 	// Mark file as read
-	globalFileState.MarkRead(filePath, []byte("func main() {\n\tfmt.Println(\"hello\")\n}\n"))
+	globalFileState.MarkRead(filePath, []byte(longContent))
+
+	oldStr := "func main() {\n\tfmt.Println(\"hello\")\n\tfmt.Println(\"world\")\n\tif err := doSomething(); err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}"
 
 	patterns := []struct {
 		name   string
@@ -36,7 +40,7 @@ func TestEditFileLazyCommentDetection(t *testing.T) {
 		t.Run(p.name, func(t *testing.T) {
 			result, err := tool.Execute(context.Background(), map[string]any{
 				"path":       filePath,
-				"old_string": "func main() {\n\tfmt.Println(\"hello\")\n}",
+				"old_string": oldStr,
 				"new_string": p.newStr,
 			})
 			if err != nil {

@@ -12,6 +12,7 @@ func DefaultConfig() *Config {
 		Agent: AgentConfig{
 			PlanningMode:    false,
 			MaxSteps:        200,
+			MaxSubagents:    3,
 			Workspace:       "~/.ngoagent/workspace",
 			Temperature:     0.7,
 			TopP:            0.9,
@@ -34,11 +35,13 @@ func DefaultConfig() *Config {
 		Cron: CronConfig{
 			Enabled: true,
 		},
-		Forge: ForgeConfig{
-			SandboxDir:         "/tmp/ngoagent-forge",
-			MaxRetries:         5,
-			AutoForgeOnInstall: true,
-			HistoryLimit:       20,
+		Evo: EvoConfig{
+			MaxRetries:      2,
+			CooldownSeconds: 30,
+			CleanupDays:     30,
+			ScoreThreshold:  0.7,
+			EvalModel:       "",
+			AutoEval:        true,
 		},
 		Embedding: EmbeddingConfig{
 			Provider:            "", // disabled by default
@@ -69,6 +72,7 @@ server:
 agent:
   planning_mode: false
   max_steps: 200
+  max_subagents: 3              # max concurrent sub-agents per session
   workspace: "~/.ngoagent/workspace"
   # LLM hyperparameters
   temperature: 0.7          # 0.0-2.0, lower = more deterministic
@@ -102,6 +106,14 @@ storage:
 
 cron:
   enabled: true
+
+evo:
+  max_retries: 2              # max auto-repair retries per session
+  cooldown_seconds: 30        # min interval between repairs
+  cleanup_days: 30            # trace/eval/repair data retention days
+  score_threshold: 0.7        # evaluation pass threshold (0.0-1.0)
+  eval_model: ""              # evaluator model (empty = use main model)
+  auto_eval: true             # auto-evaluate in evo mode
 
 memory:
   half_life_days: 30        # time-decay half-life for memory fragments

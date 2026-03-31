@@ -7,12 +7,10 @@
 import {
   forwardRef,
   useCallback,
-  useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
 } from 'react';
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import type { ChatMessageData, MessagePart, ClaudeContentItem } from '../chat/types.js';
 import { groupMessages, type RenderItem } from '../chat/groupMessages.js';
 import { MessageErrorBoundary } from '../components/ErrorBoundary.js';
@@ -23,6 +21,9 @@ import { getToolRenderer } from './toolcalls/toolRegistry.js';
 import { ToolGroupPanel } from './toolcalls/ToolGroupPanel.js';
 import { shouldShowToolCall } from './toolcalls/index.js';
 import type { ToolCallData as BaseToolCallData } from './toolcalls/index.js';
+import { ChatVirtualList, type ChatVirtualListHandle } from './ChatVirtualList.js';
+import { useHeightEstimator } from '../hooks/useHeightEstimator.js';
+import { extractContent } from '../chat/messageUtils.js';
 // Side-effect import: registers all tools into toolRegistry
 import './toolcalls/index.js';
 import './ChatViewer.css';
@@ -37,72 +38,27 @@ export type { ChatMessageData, MessagePart, ClaudeContentItem };
  * ChatViewer ref handle for programmatic control
  */
 export interface ChatViewerHandle {
-  /** Scroll to the bottom of the messages */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
-  /** Scroll to the top of the messages */
   scrollToTop: (behavior?: ScrollBehavior) => void;
-  /** Get the scroll container element */
-  getScrollContainer: () => HTMLDivElement | null;
 }
 
 /**
  * ChatViewer component props
  */
 export interface ChatViewerProps {
-  /** Array of chat messages in JSONL format */
   messages: ChatMessageData[];
-  /** Optional additional CSS class name */
   className?: string;
-  /** Optional callback when a file path is clicked */
   onFileClick?: (path: string) => void;
-  /** Optional empty state message */
   emptyMessage?: string;
-  /** Theme variant: 'dark' | 'light' | 'auto' (default: 'auto') */
   theme?: 'dark' | 'light' | 'auto';
-  /** Show empty state icon (default: true) */
   showEmptyIcon?: boolean;
-  /** Current Session ID for fetching artifacts */
   sessionId?: string;
-  /** Retry callback — re-generate last assistant response */
   onRetry?: () => void;
-  /**
-   * External scroll container for Virtuoso.
-   * When provided, Virtuoso uses this element as its scroller instead of
-   * creating its own fixed-height viewport — fixing the height:0 bug.
-   */
-  customScrollParent?: HTMLElement | null;
-  /** Whether the agent is currently streaming (shows thinking dots) */
   isStreaming?: boolean;
-  /** Virtuoso followOutput callback from useChatScroll */
-  followOutput?: (isAtBottom: boolean) => false | 'smooth' | 'auto';
-  /** Virtuoso atBottomStateChange callback from useChatScroll */
-  onAtBottomChange?: (atBottom: boolean) => void;
-  /** Ref indicating user has scrolled up — for wheel event detection */
-  userScrolledUpRef?: React.MutableRefObject<boolean>;
-  /** Ref indicating streaming is active — for wheel event detection */
-  isStreamingRef?: React.MutableRefObject<boolean>;
+  composerHeight?: number;
 }
 
-function extractContent(message: ChatMessageData['message']): string {
-  if (!message) return '';
 
-  if (message.parts && Array.isArray(message.parts)) {
-    return message.parts.map((part) => part.text || '').join('');
-  }
-
-  if (typeof message.content === 'string') {
-    return message.content;
-  }
-
-  if (Array.isArray(message.content)) {
-    return message.content
-      .filter((item) => item.type === 'text' && item.text)
-      .map((item) => item.text || '')
-      .join('');
-  }
-
-  return '';
-}
 
 function parseTimestamp(isoString: string): number {
   const date = new Date(isoString);
@@ -121,18 +77,12 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
       showEmptyIcon = true,
       sessionId,
       onRetry,
-      customScrollParent,
       isStreaming = false,
-      followOutput: followOutputProp,
-      onAtBottomChange,
-      userScrolledUpRef,
-      isStreamingRef,
+      composerHeight = 200,
     },
     ref,
   ) => {
-    const virtuosoRef = useRef<VirtuosoHandle>(null);
-    // Keep a fallback scrollContainerRef for the imperative handle
-    const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const virtualListRef = useRef<ChatVirtualListHandle>(null);
 
     const sortedMessages = useMemo(
       () =>
@@ -143,16 +93,10 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
               return shouldShowToolCall(msg.toolCall.kind, msg.toolCall);
             }
             return true;
-          })
-          .sort((a, b) => {
-            const timeA = parseTimestamp(a.timestamp);
-            const timeB = parseTimestamp(b.timestamp);
-            return timeA - timeB;
           }),
       [messages],
     );
 
-    // Group consecutive tool_call messages into collapsible panels
     const renderItems = useMemo(
       () => groupMessages(sortedMessages),
       [sortedMessages],
@@ -166,80 +110,42 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
       return -1;
     }, [renderItems]);
 
+    // Height estimation via Pretext
+    const { estimateSize } = useHeightEstimator();
+    const boundEstimateSize = useCallback(
+      (index: number) => estimateSize(index, renderItems),
+      [estimateSize, renderItems],
+    );
+
+    // Forward handle to parent
     useImperativeHandle(
       ref,
       () => ({
-        scrollToBottom: (behavior: ScrollBehavior = 'smooth') => {
-          if (virtuosoRef.current) {
-            virtuosoRef.current.scrollToIndex({ index: renderItems.length - 1, behavior: behavior as 'smooth' | 'auto' | undefined })
-          } else {
-            const container = scrollContainerRef.current;
-            if (container) container.scrollTo({ top: container.scrollHeight, behavior });
-          }
+        scrollToBottom: (behavior?: ScrollBehavior) => {
+          virtualListRef.current?.scrollToBottom(behavior);
         },
-        scrollToTop: (behavior: ScrollBehavior = 'smooth') => {
-          if (virtuosoRef.current) {
-            virtuosoRef.current.scrollToIndex({ index: 0, behavior: behavior as 'smooth' | 'auto' | undefined })
-          } else {
-            const container = scrollContainerRef.current;
-            if (container) container.scrollTo({ top: 0, behavior });
-          }
+        scrollToTop: (behavior?: ScrollBehavior) => {
+          virtualListRef.current?.scrollToTop(behavior);
         },
-        getScrollContainer: () => scrollContainerRef.current,
       }),
-      [renderItems.length],
+      [],
     );
 
-    // ── Streaming auto-scroll ─────────────────────────────────
-    // Two scroll triggers exist; they MUST NOT fire simultaneously:
-    //
-    // 1. New item added → data.length changes → Virtuoso followOutput handles it
-    // 2. Content grows (streaming text) → data.length unchanged → we handle it
-    //
-    // Previous bug: both fired on the same render, setting different scroll
-    // positions → visual bounce. Fix: track length and skip when it changes.
-    const prevItemCountRef = useRef(renderItems.length);
-    useEffect(() => {
-      const lengthChanged = renderItems.length !== prevItemCountRef.current;
-      prevItemCountRef.current = renderItems.length;
-
-      // Length changed → Virtuoso followOutput will scroll. Do nothing.
-      if (lengthChanged) return;
-
-      // Content growth (same length) during streaming → manually scroll.
-      if (
-        !isStreaming ||
-        userScrolledUpRef?.current ||
-        renderItems.length === 0
-      ) return;
-
-      const el = customScrollParent;
-      if (!el) return;
-
-      // Max scroll position = bottom of content including footer spacer.
-      // Footer spacer (280/340px) provides breathing room above the
-      // floating composer. No conflict with Virtuoso because followOutput
-      // does NOT fire for same-length data updates.
-      el.scrollTop = el.scrollHeight - el.clientHeight;
-    }, [renderItems, isStreaming, userScrolledUpRef, customScrollParent]);
-
     // Render a single non-grouped message
+    // C2: prevItem/nextItem passed from caller to decouple from renderItems reference
     const renderSingleMessage = useCallback((
       index: number,
       msg: ChatMessageData,
+      prevItem: RenderItem | undefined,
+      nextItem: RenderItem | undefined,
     ) => {
       const key = msg.uuid || `msg-${index}`;
-      const prevItem = renderItems[index - 1];
-      const nextItem = renderItems[index + 1];
-
-      // Determine isFirst/isLast based on surrounding render items
       const isFirst = !prevItem || (prevItem.type === 'message' && prevItem.data.type === 'user') || prevItem.type === 'tool_group';
       const isLast = !nextItem || (nextItem.type === 'message' && nextItem.data.type === 'user') || nextItem.type === 'tool_group';
 
       let element: React.ReactElement | null = null;
 
       if (msg.type === 'tool_call' && msg.toolCall) {
-        // Single tool_call not in a group (shouldn't happen with groupMessages, but fallback)
         const config = getToolRenderer(msg.toolCall);
         if (!config) return <div style={{ height: 1, overflow: 'hidden' }} />;
         const ToolCallComponent = config.component;
@@ -287,6 +193,7 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
                 isLast={isLast}
                 isLastAssistant={index === lastAssistantIndex}
                 onRetry={onRetry}
+                isStreaming={msg.isStreaming}
               />
             );
           }
@@ -300,7 +207,7 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
           {element}
         </MessageErrorBoundary>
       );
-    }, [renderItems, sessionId, onFileClick, lastAssistantIndex, onRetry]);
+    }, [sessionId, onFileClick, lastAssistantIndex, onRetry]);
 
     // Render a RenderItem (single message or tool group panel)
     const renderItem = useCallback((
@@ -319,8 +226,8 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
           </MessageErrorBoundary>
         );
       }
-      return renderSingleMessage(index, item.data);
-    }, [renderSingleMessage, sessionId]);
+      return renderSingleMessage(index, item.data, renderItems[index - 1], renderItems[index + 1]);
+    }, [renderSingleMessage, renderItems, sessionId]);
 
     const containerClasses = [
       'chat-viewer-container',
@@ -346,50 +253,23 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
       );
     }
 
-    // Footer: thinking dots (before first response) + spacer for floating composer
-    // MUST be a stable reference — inline functions cause Virtuoso to remount on every render → scroll jank.
-    const lastItemType = renderItems.length > 0 ? renderItems[renderItems.length - 1] : null;
-    const showThinkingDots = isStreaming && lastItemType?.type === 'message' && lastItemType.data.type === 'user';
-
-    const FooterComponent = useCallback(() => (
-      <>
-        {showThinkingDots && (
-          <div className="flex items-center gap-[6px] pl-[10px] py-4">
-            <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" />
-            <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" style={{ animationDelay: '0.3s' }} />
-            <span className="w-[4px] h-[4px] rounded-full bg-white/25 animate-pulse" style={{ animationDelay: '0.6s' }} />
-          </div>
-        )}
-        <div className="h-[280px] md:h-[340px] pointer-events-none" aria-hidden="true" />
-      </>
-    ), [showThinkingDots]);
-
-    // Stable components object — only recreated when Footer reference changes
-    const virtuosoComponents = useMemo(() => ({ Footer: FooterComponent }), [FooterComponent]);
+    // Show thinking dots only when streaming and last item is a user message
+    const showDots = useMemo(() => {
+      if (!isStreaming) return false;
+      const last = renderItems.length > 0 ? renderItems[renderItems.length - 1] : null;
+      return last?.type === 'message' && last.data.type === 'user';
+    }, [isStreaming, renderItems]);
 
     return (
-      <div className={containerClasses} ref={scrollContainerRef}
-           style={customScrollParent ? undefined : { height: '100%' }}
-           onWheel={(e) => {
-             // Detect user scroll-up during streaming
-             if (isStreamingRef?.current && e.deltaY < 0 && userScrolledUpRef) {
-               userScrolledUpRef.current = true;
-             }
-           }}>
-        <Virtuoso
-          ref={virtuosoRef}
-          data={renderItems}
-          itemContent={renderItem}
-          style={customScrollParent ? undefined : { height: '100%' }}
-          increaseViewportBy={{ top: 600, bottom: 600 }}
-          customScrollParent={customScrollParent ?? undefined}
-          components={virtuosoComponents}
-          defaultItemHeight={80}
-          followOutput={followOutputProp}
-          atBottomStateChange={onAtBottomChange}
-          atBottomThreshold={20}
-        />
-      </div>
+      <ChatVirtualList
+        ref={virtualListRef}
+        items={renderItems}
+        renderItem={renderItem}
+        estimateSize={boundEstimateSize}
+        composerHeight={composerHeight}
+        showDots={showDots}
+        className={containerClasses}
+      />
     );
   },
 );

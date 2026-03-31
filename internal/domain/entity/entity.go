@@ -31,21 +31,22 @@ type Skill struct {
 	Type        string   // executable / workflow
 	Weight      string   // light (→ ScriptTool) / heavy (→ Trigger-Inject + run_command)
 	Triggers    []string // Trigger words extracted from description for auto-injection
+	Rules       []string // Execution rules auto-injected on trigger match
 	Content     string
 	Command     string // Quick command extracted from SKILL.md bash block
 	Path        string
 	Enabled     bool
-	ForgeStatus string // draft / forging / forged / degraded / reforging
+	EvoStatus string // draft / evolving / evolved / degraded / re-evolving
 	InstalledAt time.Time
 }
 
-// ForgeRun records a single forge execution result.
-type ForgeRun struct {
+// EvoRun records a single evolution execution result.
+type EvoRun struct {
 	ID            string
 	SkillID       string
 	Success       bool
 	Retries       int
+	Strategy      string   // param_fix | tool_swap | re_route | iterate | escalate
 	FailureReason string
-	DepsAdded     []string
 	Timestamp     time.Time
 }

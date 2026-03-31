@@ -110,13 +110,25 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 				if llmErr, ok := err.(*llm.LLMError); ok {
 					switch llmErr.Level {
 					case llm.ErrorTransient, llm.ErrorOverload:
+						// P0-A #4: background tasks (compact/title) skip retries — avoid amplification
+						if llmErr.IsBackground {
+							log.Printf("[retry] background task %s — skipping retry", llmErr.Level)
+							a.deps.Delta.OnError(err)
+							return err
+						}
 						base, maxR := llm.BackoffConfig(llmErr.Level)
 						if retries < maxR {
 							retries++
 							backoff := llm.BackoffWithJitter(base, retries-1)
 							log.Printf("[retry] %s attempt %d/%d, backoff %v: %s",
 								llmErr.Level, retries, maxR, backoff, llmErr.Code)
-							time.Sleep(backoff)
+							// P0-A #6: notify user of retry
+							a.deps.Delta.OnText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
+							select {
+							case <-runCtx.Done():
+								return runCtx.Err()
+							case <-time.After(backoff):
+							}
 							a.transition(StateGenerate)
 							continue
 						}
@@ -124,15 +136,20 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 						if retries < 1 {
 							retries++
 							log.Printf("[retry] context overflow → compacting then retry")
+							// Reduce max tokens to force more aggressive generation if supported
+							opts.MaxTokens = opts.MaxTokens / 2
 							a.transition(StateCompact)
 							continue
 						}
 					case llm.ErrorBilling:
 						log.Printf("[error] billing/quota exhausted: %s", llmErr.Message)
+						// P0-A #6: user-friendly message
+						a.deps.Delta.OnText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
 						a.transition(StateFatal)
 						a.deps.Delta.OnError(err)
 						return err
 					case llm.ErrorFatal:
+						a.deps.Delta.OnText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
 						a.transition(StateFatal)
 						a.deps.Delta.OnError(err)
 						return err
@@ -194,7 +211,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 
 					a.deps.Delta.OnText("\n" + result + "\n")
 					a.transition(StateDone)
-					goto loopEnd
+					break // exit tool loop; state machine will hit StateDone
 				}
 
 				if err != nil {
@@ -215,8 +232,8 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			// Check if any tool returned a terminal signal (declarative config).
 			// Mirrors Anti's TERMINAL_STEP_TYPE mechanism.
 			a.mu.Lock()
-			shouldStop := a.yieldRequested
-			a.yieldRequested = false
+			shouldStop := a.task.YieldRequested
+			a.task.YieldRequested = false
 			a.mu.Unlock()
 			if shouldStop {
 				a.transition(StateDone)
@@ -248,7 +265,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			}
 
 		case StateCompact:
-			a.doCompact()
+			a.doCompact(runCtx)
 			a.InjectEphemeral(prompttext.EphCompactionNotice)
 			a.persistFullHistory() // full replace after restructuring
 			a.transition(StateGenerate)
@@ -261,6 +278,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			}
 			a.state = StateIdle
 			a.persistHistory()
+
 			// OnComplete FIRST: release frontend (step_done event) immediately.
 			a.deps.Delta.OnComplete()
 			// Hooks run async: must NOT block runInner return (which releases run lock).
@@ -290,10 +308,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) error {
 			return fmt.Errorf("unexpected state: %s", a.CurrentState())
 		}
 	}
-loopEnd:
-	a.persistHistory()
-	a.deps.Delta.OnComplete()
-	go a.fireHooks(runCtx, steps)
+	// Unreachable: all paths exit via StateDone.return or default.return
 	return nil
 }
 
@@ -328,6 +343,9 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 	} else {
 		systemPrompt, _ = a.deps.PromptEngine.Assemble(promptDeps)
 	}
+
+	// Track actual system prompt size for precise token estimation
+	a.tokenTracker.SetSystemPromptSize(estimateStringTokens(systemPrompt))
 
 	// Build messages
 	messages := make([]llm.Message, 0, len(a.history)+1)
@@ -424,13 +442,19 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 	toolDefs := a.cachedToolDefs
 	a.mu.Unlock()
 
+	// P0-A #5: MaxTokens override for context overflow recovery
+	maxTokens := mp.MaxOutputTokens
+	if opts.MaxTokens > 0 {
+		maxTokens = opts.MaxTokens
+	}
+
 	req := &llm.Request{
 		Model:       model,
 		Messages:    messages,
 		Tools:       toolDefs,
 		Temperature: mp.Temperature,
 		TopP:        mp.TopP,
-		MaxTokens:   mp.MaxOutputTokens,
+		MaxTokens:   maxTokens,
 		Stream:      true,
 		ToolChoice:  forceTool,
 	}
@@ -465,6 +489,8 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 			// UI notification (OnToolStart) is deferred to doToolExec to avoid duplicates.
 		case llm.ChunkError:
 			if chunk.Error != nil {
+				// Must drain remaining chunks to prevent goroutine leak
+				go func() { for range ch {} }()
 				return nil, chunk.Error
 			}
 		}
@@ -480,6 +506,14 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions) (*llm.Respo
 	if genErr != nil {
 		return nil, genErr
 	}
+
+	// Record precise token usage with per-model cost tracking (P0-A #1+#3)
+	if resp != nil {
+		model := a.deps.LLMRouter.CurrentModel()
+		policy := llm.GetPolicy(model)
+		a.tokenTracker.RecordAPIUsageWithCost(resp.Usage, model, policy)
+	}
+
 	return resp, nil
 }
 
@@ -490,6 +524,7 @@ func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunO
 		ToolDescs:   a.buildToolDescs(),
 		TokenBudget: llm.GetPolicy(model).ContextWindow,
 		Runtime:     a.buildRuntimeInfo(model),
+		CurrentStep: a.task.CurrentStep,
 	}
 
 	// UserRules — from config discovery or workspace
@@ -586,8 +621,7 @@ func (a *AgentLoop) buildRuntimeInfo(model string) string {
 func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, error) {
 	// Track how many tool calls since last task_boundary update
 	a.mu.Lock()
-	a.stepsSinceUpdate++
-	a.currentStep++
+	a.task.RecordToolCall()
 	a.mu.Unlock()
 
 	// Step-level guard: pre-check (planning behavior enforcement)
@@ -643,6 +677,10 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 			return fmt.Sprintf("Tool '%s' skipped by hook", tc.Function.Name), nil
 		}
 	}
+	// Evo trace: record tool invocation (per-loop, session-isolated)
+	if a.traceCollector != nil {
+		a.traceCollector.BeforeTool(ctx, tc.Function.Name, args)
+	}
 
 	a.deps.Delta.OnToolStart(tc.ID, tc.Function.Name, args)
 	// Inject fully-configured brain store into tool context (single key, carries sessionID + workspaceDir)
@@ -652,10 +690,13 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 	}
 	result, err := a.safeToolExec(toolCtx, tc.Function.Name, args)
 
-	// Truncate large outputs
+	// P0-A #2: Per-tool output budget — replaces hardcoded 50KB limit
 	output := result.Output
-	if len(output) > 50*1024 {
-		output = output[:25*1024] + "\n... (output truncated) ...\n" + output[len(output)-25*1024:]
+	budget := toolResultBudget(tc.Function.Name)
+	if len(output) > budget {
+		headSize := budget / 5         // 20% head
+		tailSize := budget - headSize  // 80% tail (stderr/stack traces cluster here)
+		output = output[:headSize] + fmt.Sprintf("\n... (output truncated, %d → %d bytes, showing head+tail) ...\n", len(output), budget) + output[len(output)-tailSize:]
 	}
 
 	a.deps.Delta.OnToolResult(tc.ID, tc.Function.Name, output, err)
@@ -664,6 +705,10 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 	// Hook: AfterTool (Void — logging, audit, stats)
 	if a.deps.Hooks != nil {
 		a.deps.Hooks.FireAfterTool(ctx, tc.Function.Name, output, err)
+	}
+	// Evo trace: record tool output (per-loop, session-isolated)
+	if a.traceCollector != nil {
+		a.traceCollector.AfterTool(ctx, tc.Function.Name, output, err)
 	}
 
 	// --- Protocol Dispatch (centralized in protocol.go) ---
@@ -686,7 +731,7 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 				// Track plan.md modification
 				if planArgs.Type == "plan" || planArgs.Type == "" {
 					a.mu.Lock()
-					a.planModified = true
+					a.task.PlanModified = true
 					a.mu.Unlock()
 				}
 				// Record artifact last step for staleness tracking
@@ -695,7 +740,7 @@ func (a *AgentLoop) doToolExec(ctx context.Context, tc llm.ToolCall) (string, er
 					artifactName = "plan.md"
 				}
 				a.mu.Lock()
-				a.artifactLastStep[artifactName] = a.currentStep
+				a.task.RecordArtifactTouch(artifactName)
 				a.mu.Unlock()
 			}
 		}
@@ -731,14 +776,21 @@ func (a *AgentLoop) buildToolDescs() []prompt.ToolDesc {
 	return descs
 }
 
-// estimateTokens returns a rough token count of the current history.
-// Uses unicode-aware counting: CJK characters ≈ 1.5 tokens each, ASCII ≈ 0.25.
+// estimateTokens returns the best estimate of current prompt token usage.
+// Prefers hybrid tracker (API precise + delta estimate, ±5% error) when available.
+// Falls back to character-based heuristic (±30% error) on first call.
 func (a *AgentLoop) estimateTokens() int {
+	// Try hybrid tracker first
+	if est, ok := a.tokenTracker.CurrentEstimate(); ok {
+		return est
+	}
+
+	// Fallback: full character-based estimation
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Baseline: system prompt is assembled separately in doGenerate (~3000 tokens)
-	total := 3000
+	// Baseline: use tracked system prompt size (precise) instead of hardcoded guess
+	total := a.tokenTracker.SystemPromptTokens()
 	for _, msg := range a.history {
 		total += estimateStringTokens(msg.Content)
 		total += estimateStringTokens(msg.Reasoning)
@@ -767,28 +819,44 @@ func estimateStringTokens(s string) int {
 
 // doCompact performs LLM-based history compaction.
 // Uses turn-boundary-aware slicing to preserve tool_call/tool message pairs.
-func (a *AgentLoop) doCompact() {
+func (a *AgentLoop) doCompact(runCtx context.Context) {
 	a.mu.Lock()
 	if len(a.history) <= 6 {
 		a.mu.Unlock()
 		return
 	}
 
-	// Find safe cut point: walk backward from end to find 2 complete user turns.
-	// A "turn" starts at a user message and extends through assistant+tool messages.
-	safeCut := 1 // default: keep everything except history[0]
-	userCount := 0
-	for i := len(a.history) - 1; i > 0; i-- {
+	// Density-aware cut: score each user turn by information density,
+	// then keep the highest-density recent turns in the tail.
+	type turnInfo struct {
+		start   int
+		density int // len(content) + toolCalls*200
+	}
+	var turns []turnInfo
+	for i := 1; i < len(a.history); i++ {
 		if a.history[i].Role == "user" {
-			userCount++
-			if userCount >= 2 {
-				safeCut = i
-				break
-			}
+			turns = append(turns, turnInfo{start: i})
 		}
 	}
-	// If we couldn't find 2 user turns, keep last half
-	if userCount < 2 {
+	// Calculate density for each turn
+	for idx := range turns {
+		end := len(a.history)
+		if idx+1 < len(turns) {
+			end = turns[idx+1].start
+		}
+		for j := turns[idx].start; j < end; j++ {
+			turns[idx].density += len(a.history[j].Content)
+			turns[idx].density += len(a.history[j].ToolCalls) * 200
+		}
+	}
+
+	// Keep last 2 turns (at minimum), but prefer high-density ones
+	safeCut := 1
+	if len(turns) >= 2 {
+		safeCut = turns[len(turns)-2].start
+	} else if len(turns) >= 1 {
+		safeCut = turns[len(turns)-1].start
+	} else {
 		safeCut = len(a.history) / 2
 	}
 
@@ -837,35 +905,50 @@ CRITICAL: If the conversation contains content inside <preference_knowledge> or 
 	model := a.deps.LLMRouter.CurrentModel()
 	provider, _ := a.deps.LLMRouter.Resolve(model)
 
-	// Bug #7 fix: defer cancel at function level, not inside if-block
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Use runCtx-derived timeout so compaction respects user Stop
+	ctx, cancel := context.WithTimeout(runCtx, 30*time.Second)
 	defer cancel()
 
+	// Compact depth guard: prevent recursive summary loss (>3 consecutive compacts)
 	summary := ""
-	if provider != nil {
-		req := &llm.Request{
-			Model:       model,
-			Messages:    summaryMessages,
-			Temperature: 0.3,
-			MaxTokens:   1024,
-			Stream:      false,
-		}
-
-		ch := make(chan llm.StreamChunk, 32)
-		resp, err := provider.GenerateStream(ctx, req, ch)
-		// Drain channel
-		for range ch {
-		}
-		if err == nil && resp != nil && resp.Content != "" {
-			summary = resp.Content
-		}
-	}
-
-	// Fallback: simple truncation if LLM fails
-	if summary == "" {
+	a.compactCount++
+	if a.compactCount > 3 {
+		// Skip LLM summary — just truncate raw to prevent information loss cascading
 		for _, msg := range middle {
 			if msg.Role == "assistant" && msg.Content != "" {
-				summary += msg.Content[:min(200, len(msg.Content))] + "... "
+				summary += msg.Content[:min(300, len(msg.Content))] + "... "
+			}
+		}
+		if summary != "" {
+			summary = "[Compact limit reached — raw extraction] " + summary
+		}
+	} else {
+		// Normal LLM-based summarization
+		if provider != nil {
+			req := &llm.Request{
+				Model:       model,
+				Messages:    summaryMessages,
+				Temperature: 0.3,
+				MaxTokens:   1024,
+				Stream:      false,
+			}
+
+			ch := make(chan llm.StreamChunk, 32)
+			resp, err := provider.GenerateStream(ctx, req, ch)
+			// Drain channel
+			for range ch {
+			}
+			if err == nil && resp != nil && resp.Content != "" {
+				summary = resp.Content
+			}
+		}
+
+		// Fallback: simple truncation if LLM fails
+		if summary == "" {
+			for _, msg := range middle {
+				if msg.Role == "assistant" && msg.Content != "" {
+					summary += msg.Content[:min(200, len(msg.Content))] + "... "
+				}
 			}
 		}
 	}
@@ -892,6 +975,7 @@ CRITICAL: If the conversation contains content inside <preference_knowledge> or 
 	compacted = append(compacted, tail...)
 	a.history = compacted
 	a.historicyDirty = true // triggers sanitize in next doGenerate
+	a.tokenTracker.Reset() // hybrid tracker baseline invalidated by restructure
 
 	// Hook: AfterCompact — notify of new compacted state
 	if a.deps.Hooks != nil {
@@ -899,18 +983,38 @@ CRITICAL: If the conversation contains content inside <preference_knowledge> or 
 	}
 }
 
-// forceTruncate keeps only system + last N messages.
+// forceTruncate keeps only system + last N messages (turn-boundary-aware).
+// Fires BeforeCompact hook on discarded messages so vector memory can preserve them.
 func (a *AgentLoop) forceTruncate(keep int) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	if len(a.history) <= keep+1 {
+		a.mu.Unlock()
 		return
 	}
 
-	// Preserve first user message at index 0, append the last `keep` items
+	// Find safe cut point: walk backward to ensure we don't start on an orphaned tool result
+	safeCut := len(a.history) - keep
+	if safeCut < 1 {
+		safeCut = 1
+	}
+	for safeCut > 1 && a.history[safeCut].Role == "tool" {
+		safeCut-- // Never start on a tool result (orphaned without its tool_call)
+	}
+
+	// Fire BeforeCompact hook for discarded content (vector memory persistence)
+	discarded := make([]llm.Message, len(a.history[1:safeCut]))
+	copy(discarded, a.history[1:safeCut])
+	a.mu.Unlock()
+
+	if a.deps.Hooks != nil && len(discarded) > 0 {
+		a.deps.Hooks.FireBeforeCompact(context.Background(), discarded)
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Rebuild: first message (preserved) + safe tail
 	truncated := []llm.Message{a.history[0]}
-	truncated = append(truncated, a.history[len(a.history)-keep:]...)
+	truncated = append(truncated, a.history[safeCut:]...)
 	a.history = truncated
 	a.persistedCount = 0 // history restructured, next persist must be full replace
 	a.historicyDirty = true // triggers sanitize in next doGenerate
@@ -953,6 +1057,10 @@ func (a *AgentLoop) persistHistory() {
 	a.mu.Unlock()
 	if err := a.deps.HistoryStore.AppendAll(sid, exports); err != nil {
 		log.Printf("[history] incremental persist failed: %v", err)
+		// Roll back persistedCount so failed messages will be retried
+		a.mu.Lock()
+		a.persistedCount = baseline
+		a.mu.Unlock()
 	}
 }
 
@@ -1005,19 +1113,206 @@ func (a *AgentLoop) fireHooks(ctx context.Context, steps int) {
 	// Snapshot history for async hooks (KI distillation)
 	historySnapshot := make([]llm.Message, len(a.history))
 	copy(historySnapshot, a.history)
+
+	// Capture evo state and clear it
+	evoEval := a.evoLastEval
+	evoPlan := a.evoLastPlan
+	evoSuccess := a.evoRepairSuccess
+	a.evoLastEval = nil
+	a.evoLastPlan = nil
+	a.evoRepairSuccess = false
 	a.mu.Unlock()
+
 	a.deps.Hooks.OnRunComplete(ctx, RunInfo{
-		SessionID:    a.SessionID(),
-		UserMessage:  userMsg,
-		Steps:        steps,
-		Mode:         a.options.Mode,
-		FinalContent: finalContent,
-		History:      historySnapshot,
-		Delta:        a.deps.Delta,
+		SessionID:        a.SessionID(),
+		UserMessage:      userMsg,
+		Steps:            steps,
+		Mode:             a.options.Mode,
+		FinalContent:     finalContent,
+		History:          historySnapshot,
+		Delta:            a.deps.Delta,
+		EvoEval:          evoEval,
+		EvoRepairSuccess: evoSuccess,
+		EvoRepairPlan:    evoPlan,
 	})
+
+	// ── Evo Mode: async evaluation (dual-process) ──
+	// Runs AFTER hooks complete, in the same goroutine (already async from main loop).
+	// Main loop has already released runMu → user can send new messages.
+	if a.PlanMode() == "evo" && a.deps.EvoEvaluator != nil && a.traceCollector != nil {
+		a.runEvoEval(ctx, userMsg)
+	}
+}
+
+// runEvoEval performs async evo evaluation + repair after the main loop completes.
+// Called from fireHooks goroutine — does NOT hold runMu.
+// Uses independent context (not runCtx) to survive user's next message.
+func (a *AgentLoop) runEvoEval(_ context.Context, userMsg string) {
+	// Independent context: main loop is done, don't inherit cancellation
+	evalCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// 1. Flush trace → persist to DB
+	traceID, err := a.traceCollector.Flush(a.SessionID(), 0)
+	if err != nil {
+		log.Printf("[evo] trace flush failed: %v", err)
+		return
+	}
+
+	// 2. Read back flushed trace JSON from DB
+	var traceJSON string
+	if a.deps.EvoStore != nil && traceID > 0 {
+		if trace, err := a.deps.EvoStore.GetTraceByID(traceID); err == nil {
+			traceJSON = trace.Steps
+		}
+	}
+	if traceJSON == "" || traceJSON == "[]" {
+		log.Printf("[evo] skipping evaluation: no tool calls recorded (traceID=%d)", traceID)
+		return
+	}
+
+	// 2.5 Filter: skip if trace only has meta-tools (no substantive work)
+	metaTools := map[string]bool{"task_boundary": true, "notify_user": true, "task_plan": true}
+	effectiveSteps := countEffectiveSteps(traceJSON, metaTools)
+	if effectiveSteps < 2 {
+		log.Printf("[evo] skipping evaluation: only %d effective tool calls (traceID=%d)", effectiveSteps, traceID)
+		return
+	}
+
+	// 3. Build evaluation context from previous rounds
+	var evoCtx *EvalContext
+	a.mu.Lock()
+	lastEval := a.evoLastEval
+	a.mu.Unlock()
+	if lastEval != nil && !lastEval.Passed {
+		var failures strings.Builder
+		fmt.Fprintf(&failures, "Previous score: %.1f, error_type: %s\n", lastEval.Score, lastEval.ErrorType)
+		for _, issue := range lastEval.Issues {
+			fmt.Fprintf(&failures, "- [%s] %s\n", issue.Severity, issue.Description)
+		}
+		evoCtx = &EvalContext{
+			PreviousFailures: failures.String(),
+			PreviousEval:     lastEval,
+		}
+	}
+
+	// 4. Evaluate — push status via WS (SSE handler already exited after OnComplete)
+	a.pushEvo("evo_eval", map[string]any{"type": "evo_eval", "text": "evaluating...", "session_id": a.SessionID()})
+	evalResult, err := a.deps.EvoEvaluator.Evaluate(
+		evalCtx, a.SessionID(), 0, userMsg, traceJSON, "", evoCtx,
+	)
+	if err != nil {
+		log.Printf("[evo] evaluation failed: %v", err)
+		return
+	}
+
+	// 4. Decide: repair needed?
+	// Repair triggers when:
+	//   (a) score < threshold (evalResult.Passed == false), OR
+	//   (b) score >= threshold but has actionable issues (severity != "info")
+	needsRepair := !evalResult.Passed
+	if evalResult.Passed && len(evalResult.Issues) > 0 {
+		for _, issue := range evalResult.Issues {
+			if issue.Severity != "info" {
+				needsRepair = true
+				break
+			}
+		}
+	}
+
+	if !needsRepair {
+		log.Printf("[evo] evaluation passed: score=%.2f issues=%d (traceID=%d)", evalResult.Score, len(evalResult.Issues), traceID)
+		a.pushEvo("evo_eval", map[string]any{"type": "evo_eval", "text": fmt.Sprintf("passed (score=%.1f)", evalResult.Score), "session_id": a.SessionID()})
+		return
+	}
+
+	// 5. Route repair
+	log.Printf("[evo] needs repair: score=%.2f issues=%v", evalResult.Score, evalResult.Issues)
+	if a.deps.EvoRepairRouter == nil {
+		return
+	}
+
+	canRepair, reason := a.deps.EvoRepairRouter.CanRepair(a.SessionID())
+	if !canRepair {
+		log.Printf("[evo] circuit breaker tripped: %s", reason)
+		a.pushEvo("evo_repair", map[string]any{"type": "evo_repair", "text": "circuit breaker: " + reason, "session_id": a.SessionID()})
+		return
+	}
+
+	plan := a.deps.EvoRepairRouter.Route(evalResult)
+	log.Printf("[evo] repair: strategy=%s desc=%s", plan.Strategy, plan.Description)
+	a.pushEvo("evo_repair", map[string]any{"type": "evo_repair", "text": plan.Description, "session_id": a.SessionID()})
+
+	// 6. Store evo context for next round's hooks
+	a.mu.Lock()
+	a.evoLastEval = evalResult
+	a.evoLastPlan = &plan
+	a.mu.Unlock()
+
+	// 7. Inject repair instructions + re-run (acquires runMu)
+	// Signal frontend: new round starting via WS push
+	a.pushEvo("auto_wake_start", map[string]string{"type": "auto_wake_start", "session_id": a.SessionID()})
+	a.InjectEphemeral(plan.Ephemeral)
+	repairCtx, repairCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer repairCancel()
+	if err := a.Run(repairCtx, ""); err != nil {
+		log.Printf("[evo] repair re-run failed: %v", err)
+	}
+}
+
+// pushEvo sends an evo event via WS push (survives SSE handler exit).
+func (a *AgentLoop) pushEvo(eventType string, data any) {
+	if a.deps.EventPusher != nil {
+		a.deps.EventPusher(a.SessionID(), eventType, data)
+	}
 }
 
 // Ensure ctxutil is used
 var _ = ctxutil.SessionIDFromContext
 
 // buildUserMessage and multimodal logic are in multimodal.go
+
+// countEffectiveSteps counts non-meta tool calls in a trace JSON string.
+// Meta tools (task_boundary, notify_user, etc.) don't represent substantive work.
+func countEffectiveSteps(traceJSON string, metaTools map[string]bool) int {
+	var steps []struct {
+		Tool string `json:"tool"`
+	}
+	if err := json.Unmarshal([]byte(traceJSON), &steps); err != nil {
+		return 0
+	}
+	count := 0
+	for _, s := range steps {
+		if !metaTools[s.Tool] {
+			count++
+		}
+	}
+	return count
+}
+
+// toolResultBudget returns the max output size (bytes) for a given tool.
+// P0-A #2: Replaces hardcoded 50KB — tools with naturally large outputs get bigger budgets.
+func toolResultBudget(toolName string) int {
+	if budget, ok := toolOutputBudgets[toolName]; ok {
+		return budget
+	}
+	return defaultToolBudget
+}
+
+const defaultToolBudget = 50 * 1024 // 50KB default
+
+var toolOutputBudgets = map[string]int{
+	// Network tools: web pages can be large, allow more
+	"web_fetch":  100 * 1024,
+	"web_search": 30 * 1024,
+	// File tools: code files can be large
+	"read_file": 80 * 1024,
+	// Execution: stack traces cluster at tail, keep more
+	"run_command":    60 * 1024,
+	"command_status": 60 * 1024,
+	// Knowledge: compact by nature
+	"save_memory":   10 * 1024,
+	"search_memory": 20 * 1024,
+	// Agent: subagent output should be summarized
+	"spawn_agent": 30 * 1024,
+}

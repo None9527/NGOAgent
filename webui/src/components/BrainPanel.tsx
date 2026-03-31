@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { MdStyles } from './shared/mdStyles'
+import { handleCopyToClipboard } from '../renderers/toolcalls/shared/copyUtils'
 
 interface BrainArtifact {
   name: string
@@ -331,21 +332,7 @@ export function BrainPanel({ sessionId, refreshTrigger = 0, focusTrigger = null,
           className="text-[11px] text-gray-500 font-mono break-all cursor-pointer hover:text-gray-300 transition-colors select-all"
           title="点击复制 Session ID"
           onClick={(e) => {
-            const text = sessionId
-            // Fallback copy for non-HTTPS
-            try {
-              const el = document.createElement('textarea')
-              el.value = text
-              el.style.position = 'fixed'
-              el.style.opacity = '0'
-              document.body.appendChild(el)
-              el.select()
-              document.execCommand('copy')
-              document.body.removeChild(el)
-            } catch {
-              navigator.clipboard?.writeText(text)
-            }
-            // Visual feedback
+            handleCopyToClipboard(sessionId, e as unknown as React.MouseEvent)
             const target = e.currentTarget
             const original = target.textContent
             target.textContent = '✓ 已复制'

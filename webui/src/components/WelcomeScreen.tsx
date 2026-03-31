@@ -1,10 +1,6 @@
 import React from 'react';
 
-export interface WelcomeScreenProps {
-  onSuggestionClick: (text: string) => void;
-}
-
-export const WelcomeScreen: React.FC<WelcomeScreenProps> = () => {
+export const WelcomeScreen: React.FC = () => {
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-4 relative overflow-hidden select-none">
       {/* Background gradient glow */}

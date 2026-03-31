@@ -28,6 +28,10 @@ func main() {
 	if app.SpawnTool != nil && app.Server != nil {
 		app.SpawnTool.SetEventPusher(app.Server.PushEvent)
 	}
+	// Wire evo async events → WS push
+	if app.Loop != nil && app.Server != nil {
+		app.Loop.SetEventPusher(app.Server.PushEvent)
+	}
 
 	// Start config hot-reload watcher
 	if err := app.Config.StartWatching(); err != nil {

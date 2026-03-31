@@ -191,7 +191,7 @@ func (ws *wsConn) onChat(s *Server, msg wsUpstream) {
 	if strings.HasPrefix(msg.Message, "/") {
 		firstWord := strings.Fields(msg.Message)[0]
 		knownCmds := map[string]bool{
-			"/model": true, "/models": true, "/set": true, "/forge": true,
+			"/model": true, "/models": true, "/set": true, "/evo": true,
 			"/plan": true, "/status": true, "/help": true, "/skill": true,
 			"/clear": true, "/compact": true, "/cron": true,
 		}

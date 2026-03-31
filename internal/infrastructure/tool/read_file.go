@@ -36,6 +36,20 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 	}
 	path = filepath.Clean(path)
 
+	// Large file protection: reject files > 10MB to prevent OOM
+	info, err := os.Stat(path)
+	if err != nil {
+		return dtool.ToolResult{Output: fmt.Sprintf("Error: %v", err)}, nil
+	}
+	if info.IsDir() {
+		return dtool.ToolResult{Output: "Error: path is a directory. Use run_command with ls to list directories."}, nil
+	}
+	if info.Size() > 10*1024*1024 {
+		return dtool.ToolResult{Output: fmt.Sprintf(
+			"Error: file is too large (%d MB). Use run_command with head/tail/sed to read specific sections.",
+			info.Size()/(1024*1024))}, nil
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return dtool.ToolResult{Output: fmt.Sprintf("Error reading file: %v", err)}, nil

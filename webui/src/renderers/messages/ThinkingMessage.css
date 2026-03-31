@@ -16,7 +16,7 @@
   user-select: text;
   align-items: flex-start;
   border-radius: 6px;
-  animation: fadeIn 0.2s ease-in;
+  /* No fadeIn animation: virtual list mount/unmount causes flicker */
 }
 
 /* Timeline connector line - full height */
@@ -133,10 +133,22 @@
   line-height: 1.5;
   color: var(--app-secondary-foreground);
   opacity: 0.8;
-  white-space: pre-wrap;
   word-break: break-word;
   padding-left: 8px;
   margin-top: 4px;
+}
+
+/* Tighten markdown spacing inside thinking blocks */
+.thinking-content p {
+  margin: 0.25em 0;
+}
+.thinking-content ul,
+.thinking-content ol {
+  margin: 0.25em 0;
+  padding-left: 1.5em;
+}
+.thinking-content li {
+  margin: 0.1em 0;
 }
 
 /* Fade in animation */

@@ -12,7 +12,7 @@
 import type { ChatMessageData, TaskSectionMeta } from './types'
 
 /**
- * Union type for Virtuoso render items.
+ * Union type for virtual list render items.
  * - `message`: a single chat message (user/assistant/thinking/system)
  * - `tool_group`: a collapsed group of tool calls within a task section
  */

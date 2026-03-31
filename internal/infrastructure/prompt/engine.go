@@ -11,10 +11,38 @@ import (
 
 // Section represents one numbered section of the system prompt.
 type Section struct {
-	Order    int    // 1-15
+	Order    int    // 1-18
 	Name     string // e.g., "Identity"
 	Content  string
 	Priority int // 0=required, 1=high, 2=medium, 3=low (for pruning)
+}
+
+// EffectivePriority returns the runtime-adjusted priority based on current step.
+// KnowledgeIndex becomes less critical after early turns (agent already read KIs).
+// Focus becomes more critical in later steps (task narrowing).
+func (s *Section) EffectivePriority(step int) int {
+	base := s.Priority
+	switch s.Name {
+	case "KnowledgeIndex":
+		if step > 5 {
+			base++ // Deprioritize after agent should have read KIs
+		}
+	case "Focus":
+		if step > 10 {
+			base-- // Prioritize as task narrows
+		}
+	case "SemanticMemory":
+		if step > 15 {
+			base++ // Less relevant in deep sessions
+		}
+	}
+	if base < 0 {
+		base = 0
+	}
+	if base > 3 {
+		base = 3
+	}
+	return base
 }
 
 // SkillInfo is skill metadata provided by the skill manager.
@@ -41,6 +69,7 @@ type Deps struct {
 	TokenBudget    int
 	Mode           string // chat
 	Runtime        string // Pre-built runtime info (OS/time/model/workspace)
+	CurrentStep    int    // Current agent step for dynamic section priority
 }
 
 // ToolDesc is a tool name + description pair for the tooling section.
@@ -77,7 +106,7 @@ func (e *Engine) DiscoverUserRules(workspaceDir string) (string, error) {
 // Returns the system prompt string and estimated token count.
 func (e *Engine) Assemble(deps Deps) (string, int) {
 	sections := e.buildSections(deps)
-	return e.prune(sections, deps.TokenBudget)
+	return e.prune(sections, deps.TokenBudget, deps.CurrentStep)
 }
 
 // AssembleSubagent builds a streamlined prompt for sub-agent workers.
@@ -93,7 +122,7 @@ func (e *Engine) AssembleSubagent(deps Deps) (string, int) {
 		{Order: 6, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
 		{Order: 7, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
 	}
-	return e.prune(sections, deps.TokenBudget)
+	return e.prune(sections, deps.TokenBudget, deps.CurrentStep)
 }
 
 // buildSections creates the first-principles ordered sections.
@@ -160,11 +189,11 @@ func (e *Engine) buildSkills(infos []SkillInfo) string {
 			b.WriteString(fmt.Sprintf("- %s [tool]: %s\n", s.Name, s.Description))
 		case s.Weight == "heavy":
 			// Heavy: trigger-inject auto-hints + run_command execution
-			b.WriteString(fmt.Sprintf("- %s [run_command]: %s. Entry: %s/run.sh. For guide: use_skill(name='%s')\n",
-				s.Name, s.Description, s.Path, s.Name))
+			b.WriteString(fmt.Sprintf("- %s [run_command]: %s. Entry: %s/run.sh. For full guide: read_file(path='%s/SKILL.md')\n",
+				s.Name, s.Description, s.Path, s.Path))
 		default:
-			// Workflow: use_skill to read guide
-			b.WriteString(fmt.Sprintf("- %s [use_skill]: %s\n", s.Name, s.Description))
+			// Workflow: read SKILL.md for guide
+			b.WriteString(fmt.Sprintf("- %s [guide]: %s. Read: %s/SKILL.md\n", s.Name, s.Description, s.Path))
 		}
 	}
 	return b.String()
@@ -224,18 +253,18 @@ func (e *Engine) buildEphemeral(msgs []string) string {
 	return b.String()
 }
 
-// prune applies 4-level budget-based pruning.
+// prune applies 4-level budget-based pruning with progressive truncation.
 // Level 0 (Normal): <50% → no pruning
-// Level 1 (Elevated): 50-70% → truncate long sections
-// Level 2 (Tight): 70-85% → drop Skills → Memory → Variants → Knowledge → ProjectContext
-// Level 3 (Critical): >85% → only Identity+Guidelines+Tooling+Runtime+Focus+Ephemeral
-func (e *Engine) prune(sections []Section, budget int) (string, int) {
+// Level 1 (Elevated): 50-70% → truncate Priority≥2 sections to 50%
+// Level 2 (Tight): 70-85% → drop Priority≥2, truncate Priority=1 to 1000 chars
+// Level 3 (Critical): >85% → only Priority=0 + UserRules kept
+func (e *Engine) prune(sections []Section, budget int, step int) (string, int) {
 	if budget <= 0 {
 		budget = 32000 // Default budget in tokens (~128K chars)
 	}
 
-	// Estimate: ~4 chars per token
-	charBudget := budget * 4
+	// CJK-aware char budget: scan content to estimate chars-per-token ratio
+	charBudget := e.estimateCharBudget(sections, budget)
 
 	// Sort by order
 	sort.Slice(sections, func(i, j int) bool {
@@ -262,27 +291,82 @@ func (e *Engine) prune(sections []Section, budget int) (string, int) {
 		pruneLevel = 3
 	}
 
-	// Apply pruning
+	// Apply pruning with dynamic priority
 	var b strings.Builder
 	kept := 0
 	for _, s := range sections {
 		if s.Content == "" {
 			continue
 		}
-		if s.Priority > 3-pruneLevel && s.Priority > 0 {
+		effPriority := s.EffectivePriority(step)
+		// UserRules never dropped — contains user's highest-priority constraints
+		if effPriority > 3-pruneLevel && effPriority > 0 && s.Name != "UserRules" {
 			continue // Drop low-priority sections
 		}
 		content := s.Content
-		if pruneLevel >= 1 && len(content) > 2000 && s.Priority > 0 {
-			// Priority 0 sections (PreferenceKI, Identity, etc.) are NEVER truncated
-			content = content[:2000] + "\n... (truncated)"
+		// Progressive truncation instead of all-or-nothing
+		if pruneLevel >= 2 && effPriority >= 1 && len(content) > 1000 {
+			content = content[:1000] + "\n... (truncated)"
+		} else if pruneLevel >= 1 && effPriority >= 2 && len(content) > 2000 {
+			// Level 1: truncate medium-priority sections to 50%
+			half := len(content) / 2
+			if half > 2000 {
+				half = 2000
+			}
+			content = content[:half] + "\n... (truncated)"
 		}
 		b.WriteString(content)
 		b.WriteString("\n\n")
 		kept += len(content)
 	}
 
-	// Rough token estimate
-	tokens := kept / 4
+	// CJK-aware token estimate for the kept content
+	tokens := estimateTokensFromChars(b.String())
 	return b.String(), tokens
+}
+
+// estimateCharBudget computes an appropriate char budget based on content CJK ratio.
+// Pure English ≈ 4 chars/token, pure CJK ≈ 1.5 chars/token, mixed ≈ weighted blend.
+func (e *Engine) estimateCharBudget(sections []Section, tokenBudget int) int {
+	// Sample content to detect CJK ratio (scan first 2000 chars for speed)
+	var sampled int
+	var cjkCount int
+	const sampleLimit = 2000
+
+	for _, s := range sections {
+		for _, r := range s.Content {
+			if sampled >= sampleLimit {
+				break
+			}
+			sampled++
+			if r >= 0x2E80 { // CJK Radicals Supplement and beyond
+				cjkCount++
+			}
+		}
+		if sampled >= sampleLimit {
+			break
+		}
+	}
+
+	if sampled == 0 {
+		return tokenBudget * 4
+	}
+
+	cjkRatio := float64(cjkCount) / float64(sampled)
+	// Blend: CJK part → 1.5 chars/token, ASCII part → 4.0 chars/token
+	charsPerToken := cjkRatio*1.5 + (1-cjkRatio)*4.0
+	return int(float64(tokenBudget) * charsPerToken)
+}
+
+// estimateTokensFromChars estimates token count with CJK awareness.
+func estimateTokensFromChars(s string) int {
+	var tokens float64
+	for _, r := range s {
+		if r >= 0x2E80 {
+			tokens += 1.5 // CJK ≈ 1.5 tokens per char
+		} else {
+			tokens += 0.25 // ASCII ≈ 0.25 tokens per char
+		}
+	}
+	return int(tokens)
 }

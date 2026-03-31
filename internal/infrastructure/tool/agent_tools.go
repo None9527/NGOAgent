@@ -15,7 +15,7 @@ import (
 )
 
 // SpawnFunc creates an independent agent loop and runs a task, returning the result.
-type SpawnFunc func(ctx context.Context, task string) (string, error)
+type SpawnFunc func(ctx context.Context, task, taskName string) (string, error)
 
 // SpawnAgentTool creates a sub-agent for independent task execution.
 type SpawnAgentTool struct {
@@ -81,40 +81,43 @@ func (t *SpawnAgentTool) Execute(ctx context.Context, args map[string]any) (dtoo
 	fmt.Printf("[spawn] Starting sub-agent: %s\n", taskName)
 
 	// Non-blocking: RunAsync returns runID immediately
-	runID, err := t.spawnFn(ctx, task)
+	runID, err := t.spawnFn(ctx, task, taskName)
 	if err != nil {
 		fmt.Printf("[spawn] Sub-agent '%s' failed to start: %v\n", taskName, err)
 		return dtool.ToolResult{Output: fmt.Sprintf("Sub-agent '%s' failed to start: %v", taskName, err)}, nil
 	}
 
 	fmt.Printf("[spawn] Sub-agent '%s' spawned → %s\n", taskName, runID)
-	return dtool.ToolResult{Output: fmt.Sprintf(
-		"[Sub-agent '%s' spawned → %s] Running asynchronously. Result will be delivered automatically when complete.",
-		taskName, runID)}, nil
+	return dtool.SpawnYieldResult(fmt.Sprintf(
+		"[Sub-agent '%s' spawned → %s]\n"+
+			"⏸ Async task running. Parent loop will pause automatically.\n"+
+			"Results arrive via auto-wake when ALL sub-agents complete.\n"+
+			"DO NOT poll this ID with command_status.",
+		taskName, runID))
 }
 
-// ForgeTool constructs, executes, and validates structured task environments.
-type ForgeTool struct {
+// EvoTool constructs, executes, and validates structured task environments.
+type EvoTool struct {
 	sandboxRoot string
 }
 
-func NewForgeTool(sandboxRoot string) *ForgeTool {
-	return &ForgeTool{sandboxRoot: sandboxRoot}
+func NewEvoTool(sandboxRoot string) *EvoTool {
+	return &EvoTool{sandboxRoot: sandboxRoot}
 }
 
-func (t *ForgeTool) Name() string        { return "forge" }
-func (t *ForgeTool) Description() string { return prompttext.ToolForge }
+func (t *EvoTool) Name() string        { return "evo" }
+func (t *EvoTool) Description() string { return prompttext.ToolEvo }
 
-func (t *ForgeTool) Schema() map[string]any {
+func (t *EvoTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"setup", "assert", "diagnose", "cleanup"},
-				"description": "Forge action",
+				"description": "Evo action",
 			},
-			"forge_id": map[string]any{"type": "string", "description": "Forge ID (from setup)"},
+			"evo_id": map[string]any{"type": "string", "description": "Evo ID (from setup)"},
 			"files": map[string]any{
 				"type":        "object",
 				"description": "Files to create (action=setup): path→content mapping",
@@ -147,7 +150,7 @@ func (t *ForgeTool) Schema() map[string]any {
 	}
 }
 
-func (t *ForgeTool) Execute(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
+func (t *EvoTool) Execute(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
 	action, _ := args["action"].(string)
 
 	switch action {
@@ -164,9 +167,9 @@ func (t *ForgeTool) Execute(ctx context.Context, args map[string]any) (dtool.Too
 	}
 }
 
-func (t *ForgeTool) doSetup(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
-	forgeID := uuid.New().String()[:8]
-	sandboxPath := filepath.Join(t.sandboxRoot, forgeID)
+func (t *EvoTool) doSetup(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
+	evoID := uuid.New().String()[:8]
+	sandboxPath := filepath.Join(t.sandboxRoot, evoID)
 
 	if err := os.MkdirAll(sandboxPath, 0755); err != nil {
 		return dtool.ToolResult{Output: fmt.Sprintf("Error creating sandbox: %v", err)}, nil
@@ -197,15 +200,15 @@ func (t *ForgeTool) doSetup(ctx context.Context, args map[string]any) (dtool.Too
 		}
 	}
 
-	return dtool.ToolResult{Output: fmt.Sprintf(`{"forge_id": "%s", "sandbox_path": "%s"}`, forgeID, sandboxPath)}, nil
+	return dtool.ToolResult{Output: fmt.Sprintf(`{"evo_id": "%s", "sandbox_path": "%s"}`, evoID, sandboxPath)}, nil
 }
 
-func (t *ForgeTool) doAssert(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
-	forgeID, _ := args["forge_id"].(string)
-	if forgeID == "" {
-		return dtool.ToolResult{Output: "Error: 'forge_id' is required"}, nil
+func (t *EvoTool) doAssert(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
+	evoID, _ := args["evo_id"].(string)
+	if evoID == "" {
+		return dtool.ToolResult{Output: "Error: 'evo_id' is required"}, nil
 	}
-	sandboxPath := filepath.Join(t.sandboxRoot, forgeID)
+	sandboxPath := filepath.Join(t.sandboxRoot, evoID)
 
 	total, passed, failed := 0, 0, 0
 	var details []string
@@ -273,7 +276,7 @@ func (t *ForgeTool) doAssert(ctx context.Context, args map[string]any) (dtool.To
 	return dtool.ToolResult{Output: result}, nil
 }
 
-func (t *ForgeTool) doDiagnose(_ context.Context, args map[string]any) (dtool.ToolResult, error) {
+func (t *EvoTool) doDiagnose(_ context.Context, args map[string]any) (dtool.ToolResult, error) {
 	failure, _ := args["failure"].(string)
 	if failure == "" {
 		return dtool.ToolResult{Output: "Error: 'failure' description is required"}, nil
@@ -302,12 +305,12 @@ func (t *ForgeTool) doDiagnose(_ context.Context, args map[string]any) (dtool.To
 	return dtool.ToolResult{Output: fmt.Sprintf(`{"category": "%s", "auto_fixable": %t, "suggestion": "%s"}`, category, autoFixable, suggestion)}, nil
 }
 
-func (t *ForgeTool) doCleanup(_ context.Context, args map[string]any) (dtool.ToolResult, error) {
-	forgeID, _ := args["forge_id"].(string)
-	if forgeID == "" {
-		return dtool.ToolResult{Output: "Error: 'forge_id' is required"}, nil
+func (t *EvoTool) doCleanup(_ context.Context, args map[string]any) (dtool.ToolResult, error) {
+	evoID, _ := args["evo_id"].(string)
+	if evoID == "" {
+		return dtool.ToolResult{Output: "Error: 'evo_id' is required"}, nil
 	}
-	sandboxPath := filepath.Join(t.sandboxRoot, forgeID)
+	sandboxPath := filepath.Join(t.sandboxRoot, evoID)
 	if err := os.RemoveAll(sandboxPath); err != nil {
 		return dtool.ToolResult{Output: fmt.Sprintf("Error cleaning up: %v", err)}, nil
 	}

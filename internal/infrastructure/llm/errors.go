@@ -45,12 +45,34 @@ func (l ErrorLevel) String() string {
 	}
 }
 
+// UserMessage returns a user-facing actionable message for this error level.
+// P0-A #6: Users see helpful guidance instead of raw error codes.
+func (l ErrorLevel) UserMessage() string {
+	switch l {
+	case ErrorTransient:
+		return "⏳ API 请求频率受限 (429)，系统将自动重试。如果持续出现，请稍等几分钟后再试。"
+	case ErrorOverload:
+		return "🔄 服务暂时过载 (503/529)，正在自动重试。通常会在 10-30 秒内恢复。"
+	case ErrorContextOverflow:
+		return "📦 对话上下文超出模型限制，正在自动压缩历史。如果频繁出现，请使用 /compact 手动压缩。"
+	case ErrorRecoverable:
+		return "⚠️ 网络或服务暂时异常，请使用 /retry 重试。如果持续失败，请检查网络连接。"
+	case ErrorBilling:
+		return "💳 API 配额耗尽或账单问题。请检查 API Key 配额状态，或切换到其他 Provider。"
+	case ErrorFatal:
+		return "🚫 认证失败或配置错误。请检查 API Key 是否正确，使用 /doctor 进行诊断。"
+	default:
+		return "❓ 未知错误，请使用 /retry 重试或联系管理员。"
+	}
+}
+
 // LLMError wraps provider errors with severity classification.
 type LLMError struct {
-	Level   ErrorLevel
-	Code    string
-	Message string
-	Err     error
+	Level        ErrorLevel
+	Code         string
+	Message      string
+	Err          error
+	IsBackground bool // P0-A #4: true for background tasks (compact/title) — skip retry on 429/529
 }
 
 func (e *LLMError) Error() string {
@@ -58,6 +80,11 @@ func (e *LLMError) Error() string {
 }
 
 func (e *LLMError) Unwrap() error { return e.Err }
+
+// UserMessage returns the user-facing error advice.
+func (e *LLMError) UserMessage() string {
+	return e.Level.UserMessage()
+}
 
 // ClassifyHTTPError maps HTTP status codes to error levels.
 // Use ClassifyByBody for more accurate classification when response body is available.
@@ -122,6 +149,20 @@ func BackoffConfig(level ErrorLevel) (base time.Duration, maxRetries int) {
 		return 0, 1 // no backoff, just compact and retry once
 	default:
 		return 0, 0 // no retry
+	}
+}
+
+// BackoffConfigForBackground returns retry params for background tasks.
+// P0-A #4: background tasks (compact, title distill) skip retries to avoid
+// retry amplification under load.
+func BackoffConfigForBackground(level ErrorLevel) (base time.Duration, maxRetries int) {
+	switch level {
+	case ErrorTransient, ErrorOverload:
+		return 0, 0 // no retry for background — avoid amplification
+	case ErrorContextOverflow:
+		return 0, 1
+	default:
+		return 0, 0
 	}
 }
 

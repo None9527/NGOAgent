@@ -44,7 +44,8 @@ export function chatStream(
   cb: StreamCallbacks,
 ): { cancel: () => void } {
   const ws = getSharedWSClient()
-  if (ws && ws.state === 'connected') {
+  // Route to WS only if connected AND healthy (recent pong received)
+  if (ws && ws.state === 'connected' && ws.isHealthy) {
     return chatStreamWS(ws, message, sessionId, mode, cb)
   }
   return chatStreamSSE(message, sessionId, mode, cb)

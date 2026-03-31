@@ -25,7 +25,7 @@
    =========================== */
 .chat-viewer-messages {
   flex: 1;
-  overflow: visible; /* Scrolling handled by outer container in App.tsx */
+  overflow: visible; /* Scrolling handled by ChatVirtualList's own container */
   padding: 0px 4px; /* match InputForm closely without breaking structure */
   display: flex;
   flex-direction: column;
@@ -44,9 +44,11 @@
 }
 
 /* Message item base styles */
+/* NOTE: fadeIn animation conflicts with virtual list mount/unmount.
+   Virtual list mounts/unmounts items on scroll → animation triggers repeatedly → flicker.
+   Remove for stable rendering. */
 .chat-viewer-messages > * {
   position: relative;
-  animation: chatViewerFadeIn 0.2s ease-in;
 }
 
 .chat-viewer-messages > .chat-viewer-scroll-anchor {

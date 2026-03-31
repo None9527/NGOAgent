@@ -137,6 +137,7 @@ func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message, mode stri
 					Role:       e.Role,
 					Content:    e.Content,
 					ToolCallID: e.ToolCallID,
+					Reasoning:  e.Reasoning,
 				}
 				if e.ToolCalls != "" {
 					json.Unmarshal([]byte(e.ToolCalls), &msgs[i].ToolCalls)
@@ -176,24 +177,26 @@ func (a *AgentAPI) SessionID(sessionID string) string {
 
 // StopRun signals the correct agent loop to stop.
 // Uses sessionID to find the pool loop that is actually running.
+// Uses GetIfExists to avoid creating a ghost loop for evicted sessions.
 func (a *AgentAPI) StopRun(sessionID string) {
-	loop := a.loop
 	if sessionID != "" && a.loopPool != nil {
-		loop = a.loopPool.Get(sessionID)
+		if loop := a.loopPool.GetIfExists(sessionID); loop != nil {
+			loop.Stop()
+			return
+		}
 	}
-	loop.Stop()
-	// Safety net: kill all active sandbox processes to prevent orphans
-	if a.sandboxMgr != nil {
-		a.sandboxMgr.KillAll()
-	}
+	a.loop.Stop()
 }
 
 // RetryRun strips the last assistant turn from the agent loop and returns
 // the last user message text. The frontend re-sends it via normal ChatStream.
 func (a *AgentAPI) RetryRun(_ context.Context, sessionID string) (string, error) {
+	// Use GetIfExists to avoid creating ghost loops for evicted sessions
 	loop := a.loop
 	if sessionID != "" && a.loopPool != nil {
-		loop = a.loopPool.Get(sessionID)
+		if existing := a.loopPool.GetIfExists(sessionID); existing != nil {
+			loop = existing
+		}
 	}
 	// Session resume: load persisted history if loop's memory is empty
 	if sessionID != "" && a.histQuery != nil && len(loop.GetHistory()) == 0 {
@@ -205,6 +208,7 @@ func (a *AgentAPI) RetryRun(_ context.Context, sessionID string) (string, error)
 					Role:       e.Role,
 					Content:    e.Content,
 					ToolCallID: e.ToolCallID,
+					Reasoning:  e.Reasoning,
 				}
 				if e.ToolCalls != "" {
 					json.Unmarshal([]byte(e.ToolCalls), &msgs[i].ToolCalls)
@@ -517,20 +521,34 @@ func (a *AgentAPI) GetSecurity() apitype.SecurityResponse {
 // GetContextStats returns context usage stats for the active session.
 func (a *AgentAPI) GetContextStats() apitype.ContextStats {
 	var history []llm.Message
+	var tokenStats service.TokenStats = service.TokenStats{}
 	sid := a.sessMgr.Active()
 	if sid != "" && a.loopPool != nil {
-		history = a.loopPool.Get(sid).GetHistory()
+		loop := a.loopPool.Get(sid)
+		history = loop.GetHistory()
+		tokenStats = loop.GetTokenStats()
 	} else {
 		history = a.loop.GetHistory()
+		tokenStats = a.loop.GetTokenStats()
 	}
 	tokenEst := 0
 	for _, m := range history {
 		tokenEst += len(m.Content) / 4
 	}
+
+	// Build per-model breakdown for JSON
+	byModel := make(map[string]any)
+	for model, mu := range tokenStats.ByModel {
+		byModel[model] = mu
+	}
+
 	return apitype.ContextStats{
 		Model:         a.router.CurrentModel(),
 		HistoryCount:  len(history),
 		TokenEstimate: tokenEst,
+		TotalCostUSD:  tokenStats.TotalCostUSD,
+		TotalCalls:    tokenStats.TotalCalls,
+		ByModel:       byModel,
 	}
 }
 
@@ -647,7 +665,7 @@ func (a *AgentAPI) ListSkills() (any, error) {
 		Path        string `json:"path"`
 		Type        string `json:"type"`
 		Enabled     bool   `json:"enabled"`
-		ForgeStatus string `json:"forge_status"`
+		EvoStatus string `json:"forge_status"`
 	}
 	var result []skillInfo
 	for _, s := range skills {
@@ -657,7 +675,7 @@ func (a *AgentAPI) ListSkills() (any, error) {
 			Path:        s.Path,
 			Type:        s.Type,
 			Enabled:     s.Enabled,
-			ForgeStatus: s.ForgeStatus,
+			EvoStatus: s.EvoStatus,
 		})
 	}
 	return result, nil

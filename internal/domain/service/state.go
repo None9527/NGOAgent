@@ -1,6 +1,6 @@
 package service
 
-// State represents the 10-state agent machine.
+// State represents the agent state machine.
 type State int
 
 const (
@@ -13,6 +13,7 @@ const (
 	StateError      State = 6  // Recoverable error
 	StateFatal      State = 7  // Unrecoverable error
 	StateDone       State = 8  // Turn complete
+	StateEvaluating State = 9  // Evo mode: evaluating execution quality
 )
 
 // String returns the human-readable state name.
@@ -36,6 +37,8 @@ func (s State) String() string {
 		return "fatal"
 	case StateDone:
 		return "done"
+	case StateEvaluating:
+		return "evaluating"
 	default:
 		return "unknown"
 	}
@@ -64,6 +67,8 @@ var ValidTransitions = []Transition{
 	{StateFatal, StateIdle},          // Reset
 	{StateDone, StateIdle},           // Reset for next turn
 	{StateDone, StatePrepare},        // PendingWake: subagent results continuation
+	{StateDone, StateEvaluating},     // Reserved: evo mode (currently unused, evaluation is async)
+	// Evaluating transitions removed: evaluation now runs async in fireHooks goroutine
 }
 
 // CanTransition checks if a state transition is valid.

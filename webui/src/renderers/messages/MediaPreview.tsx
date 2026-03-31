@@ -6,8 +6,9 @@
 
 import type { FC } from 'react';
 import { useState } from 'react';
+import { getAuthToken } from '../../chat/api.js';
 
-const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?)$/i;
+export const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif|tiff?)$/i;
 const VIDEO_EXTS = /\.(mp4|webm|mov|avi|mkv|m4v)$/i;
 const AUDIO_EXTS = /\.(mp3|wav|ogg|flac|aac|m4a|wma)$/i;
 const PDF_EXT = /\.pdf$/i;
@@ -33,13 +34,8 @@ export function toProxyUrl(path: string): string {
   if (!cleaned.startsWith('/')) cleaned = '/' + cleaned;
   // Collapse duplicate slashes (e.g. //home → /home)
   cleaned = cleaned.replace(/\/+/g, '/');
-  // Use cached token to avoid localStorage hit per render
-  const token = _cachedToken ?? ((_cachedToken = localStorage.getItem('AUTH_TOKEN') || ''), _cachedToken);
+  const token = getAuthToken();
   return `/v1/file?path=${encodeURIComponent(cleaned)}&token=${encodeURIComponent(token)}`;
-}
-let _cachedToken: string | null = null;
-if (typeof window !== 'undefined') {
-  window.addEventListener('storage', () => { _cachedToken = null; });
 }
 
 interface MediaPreviewProps {

@@ -19,6 +19,7 @@ type Delta struct {
 	OnCompleteFunc   func()
 	OnErrorFunc      func(error)
 	OnAutoWakeStartFunc func()
+	EmitFunc            func(DeltaEvent) // Generic event emitter (evo events, etc.)
 }
 
 func (d *Delta) OnText(text string) {
@@ -87,6 +88,12 @@ func (d *Delta) OnAutoWakeStart() {
 	}
 }
 
+func (d *Delta) Emit(event DeltaEvent) {
+	if d.EmitFunc != nil {
+		d.EmitFunc(event)
+	}
+}
+
 // OutputCollector is a DeltaSink that accumulates text output AND tool events.
 // Used by spawn_agent to collect sub-agent results with structured tool info.
 type OutputCollector struct {
@@ -145,6 +152,7 @@ func (c *OutputCollector) OnTitleUpdate(string, string)                       {}
 func (c *OutputCollector) OnAutoWakeStart()                                   {}
 func (c *OutputCollector) OnComplete()                                        {}
 func (c *OutputCollector) OnError(error)                                      {}
+func (c *OutputCollector) Emit(DeltaEvent)                                    {}
 
 // Result returns the accumulated text (backward compat).
 func (c *OutputCollector) Result() string { return c.buf.String() }

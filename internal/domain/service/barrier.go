@@ -25,14 +25,15 @@ import (
 // SubagentBarrier coordinates parallel subagent completion for a parent loop.
 // Thread-safe: all methods are safe for concurrent calls from multiple goroutines.
 type SubagentBarrier struct {
-	mu           sync.Mutex
-	pending      int
-	results      map[string]subagentResult
-	parentLoop   *AgentLoop
-	autoWake     func()                          // called when all subagents complete
-	pushProgress func(runID, taskName, status string, done, total int, errMsg, output string) // WS/SSE push (optional)
-	timeout      time.Duration
-	timer        *time.Timer
+	mu             sync.Mutex
+	pending        int
+	results        map[string]subagentResult
+	parentLoop     *AgentLoop
+	autoWake       func()                          // called when all subagents complete
+	pushProgress   func(runID, taskName, status string, done, total int, errMsg, output string) // WS/SSE push (optional)
+	timeout        time.Duration
+	timer          *time.Timer
+	maxConcurrent  int // S5: max concurrent subagents (0 = unlimited)
 }
 
 type subagentResult struct {
@@ -47,10 +48,11 @@ type subagentResult struct {
 // autoWake is called (once) when the last subagent completes.
 func NewSubagentBarrier(parentLoop *AgentLoop, autoWake func()) *SubagentBarrier {
 	return &SubagentBarrier{
-		results:  make(map[string]subagentResult),
-		parentLoop: parentLoop,
-		autoWake:   autoWake,
-		timeout:    5 * time.Minute,
+		results:       make(map[string]subagentResult),
+		parentLoop:    parentLoop,
+		autoWake:      autoWake,
+		timeout:       5 * time.Minute,
+		maxConcurrent: 3, // S5: default limit
 	}
 }
 
@@ -62,13 +64,29 @@ func (b *SubagentBarrier) SetProgressPush(fn func(runID, taskName, status string
 	b.pushProgress = fn
 }
 
-
-// Add registers a new subagent to track. Call before RunAsync.
-func (b *SubagentBarrier) Add(runID, taskName string) {
+// SetMaxConcurrent overrides the default concurrency limit (0 = unlimited).
+func (b *SubagentBarrier) SetMaxConcurrent(n int) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.maxConcurrent = n
+}
+
+// Add registers a new subagent to track. Call BEFORE RunAsync to prevent race.
+// Returns error if max concurrent limit reached (S5).
+func (b *SubagentBarrier) Add(runID, taskName string) error {
+	b.mu.Lock()
+
+	// S5: enforce concurrency limit
+	if b.maxConcurrent > 0 && b.pending >= b.maxConcurrent {
+		b.mu.Unlock()
+		return fmt.Errorf("max concurrent subagents (%d) reached — wait for existing agents to complete", b.maxConcurrent)
+	}
+
 	b.pending++
 	b.results[runID] = subagentResult{RunID: runID, TaskName: taskName}
 	total := len(b.results)
+	// S8: compute done inside lock
+	done := total - b.pending
 	push := b.pushProgress
 
 	// Start/reset timeout timer
@@ -82,21 +100,28 @@ func (b *SubagentBarrier) Add(runID, taskName string) {
 
 	// Push "running" progress event so the frontend knows about this subagent immediately
 	if push != nil {
-		done := total - b.pending
 		name := taskName
 		if name == "" {
 			name = runID
 		}
 		go push(runID, name, "running", done, total, "", "")
 	}
+	return nil
 }
 
 // OnComplete is called when a subagent finishes. Thread-safe.
+// Releases lock before calling external methods to prevent deadlock.
 func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
+	// S4: dedup — skip if already completed (prevents double finalize)
 	entry := b.results[runID]
+	if !entry.DoneAt.IsZero() {
+		b.mu.Unlock()
+		log.Printf("[barrier] Ignoring duplicate OnComplete for %s", runID)
+		return
+	}
+
 	entry.Output = result
 	entry.Error = err
 	entry.DoneAt = time.Now()
@@ -105,6 +130,8 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 
 	total := len(b.results)
 	done := total - b.pending
+	shouldFinalize := b.pending <= 0
+
 	log.Printf("[barrier] Subagent %s completed (%d/%d)", runID, done, total)
 
 	// Push per-completion progress event (non-blocking)
@@ -124,46 +151,60 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 		if len(outputPreview) > 500 {
 			outputPreview = outputPreview[:500] + "..."
 		}
-		// Call outside lock to avoid deadlock (capture values)
 		push := b.pushProgress
 		go push(runID, name, status, done, total, errMsg, outputPreview)
 	}
 
-	if b.pending <= 0 {
+	// Prepare finalize data while still holding the lock
+	var summary string
+	var autoWake func()
+	if shouldFinalize {
 		if b.timer != nil {
 			b.timer.Stop()
 		}
-		b.finalize()
+		summary = b.formatResults()
+		autoWake = b.autoWake
 	}
-}
 
-// finalize injects all results into parent loop and triggers wake.
-// Uses SignalWake for orchestration — if parent is running, the tail-check
-// picks it up within the same lock. If idle, autoWake fallback calls Run().
-// Caller must hold b.mu.
-func (b *SubagentBarrier) finalize() {
-	summary := b.formatResults()
-	b.parentLoop.InjectEphemeral(summary)
-	b.parentLoop.SignalWake()
-	log.Printf("[barrier] All %d subagents complete, waking parent", len(b.results))
+	b.mu.Unlock() // Release lock BEFORE external calls to prevent deadlock
 
-	if b.autoWake != nil {
-		go b.autoWake()
+	if shouldFinalize {
+		b.parentLoop.InjectEphemeral(summary)
+		b.parentLoop.SignalWake()
+		log.Printf("[barrier] All %d subagents complete, waking parent", total)
+
+		if autoWake != nil {
+			go autoWake()
+		}
 	}
 }
 
 // onTimeout fires when subagents take too long. Collects partial results.
+// S1 fix: release lock BEFORE calling external methods to prevent deadlock.
 func (b *SubagentBarrier) onTimeout() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	if b.pending <= 0 {
+		b.mu.Unlock()
 		return // Already finalized
 	}
 
 	log.Printf("[barrier] Timeout! %d/%d subagents still pending", b.pending, len(b.results))
 	b.pending = 0 // Force finalize
-	b.finalize()
+
+	// Collect data inside lock, call externals outside
+	summary := b.formatResults()
+	autoWake := b.autoWake
+	b.mu.Unlock()
+
+	// S1: external calls OUTSIDE lock — prevents deadlock
+	b.parentLoop.InjectEphemeral(summary)
+	b.parentLoop.SignalWake()
+	log.Printf("[barrier] All %d subagents complete (timeout), waking parent", len(b.results))
+
+	if autoWake != nil {
+		go autoWake()
+	}
 }
 
 // formatResults builds a structured summary of all subagent results.

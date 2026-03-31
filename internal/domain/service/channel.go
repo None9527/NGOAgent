@@ -44,12 +44,12 @@ func (c *ChatChannel) OnComplete(string, string, error) {} // Chat streams direc
 // SubagentChannel runs a child agent task and announces results to the parent.
 type SubagentChannel struct {
 	collector  *OutputCollector
-	announceFn func(runID string, result string) // Posts result to parent session
+	announceFn func(runID string, result string, err error) // S3: propagates real error
 }
 
 // NewSubagentChannel creates a subagent channel with an announce callback.
 // announceFn is called when the subagent completes, injecting results into the parent.
-func NewSubagentChannel(announceFn func(runID string, result string)) *SubagentChannel {
+func NewSubagentChannel(announceFn func(runID string, result string, err error)) *SubagentChannel {
 	return &SubagentChannel{
 		collector:  &OutputCollector{},
 		announceFn: announceFn,
@@ -65,7 +65,7 @@ func (c *SubagentChannel) OnComplete(runID string, _ string, err error) {
 		result = "Sub-agent error: " + err.Error() + "\n" + result
 	}
 	if c.announceFn != nil {
-		c.announceFn(runID, result)
+		c.announceFn(runID, result, err) // S3: propagate real error to barrier
 	}
 }
 
@@ -117,3 +117,4 @@ func (s *LogSink) OnError(err error) {
 		log.Printf("%s error: %v", s.Prefix, err)
 	}
 }
+func (s *LogSink) Emit(DeltaEvent) {}

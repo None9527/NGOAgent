@@ -15,6 +15,7 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
@@ -40,6 +41,7 @@ type DeltaSink interface {
 	OnAutoWakeStart() // Subagent results arrived, parent auto-continuing
 	OnComplete()
 	OnError(err error)
+	Emit(event DeltaEvent) // Generic event emitter for extensibility (evo, etc.)
 }
 
 // HistoryPersister saves and loads conversation history to/from durable storage.
@@ -82,11 +84,23 @@ type Deps struct {
 	FileHistory  *workspace.FileHistory // File edit history with snapshot rollback
 	Hooks        *HookManager
 	MemoryStore  MemoryStorer // Vector memory for semantic recall (nil = disabled)
+
+	// Evo Mode
+	EvoEvaluator    *EvoEvaluator                // Quality evaluation engine (nil = disabled)
+	EvoRepairRouter *RepairRouter                // Repair strategy router (nil = disabled)
+	EvoStore        *persistence.EvoStore        // Evo persistence (nil = disabled)
+	EventPusher     func(sessionID, eventType string, data any) // WS push for async events (evo, subagent)
 }
 
 // KISemanticRetriever abstracts semantic search over KIs (avoids import cycle with knowledge.Retriever).
 type KISemanticRetriever interface {
 	RetrieveForPrompt(query string, topK int, budgetChars int) string
+}
+
+// SetEventPusher injects the WS push function for async events (evo, etc.).
+// Called from main.go after Server is created to break the build-time dependency cycle.
+func (a *AgentLoop) SetEventPusher(fn func(string, string, any)) {
+	a.deps.EventPusher = fn
 }
 
 // AgentLoop manages a single agent conversation loop.
@@ -104,35 +118,31 @@ type AgentLoop struct {
 	ephemerals     []string // Pending ephemeral messages for next LLM call
 	pendingWake    atomic.Bool // Set by barrier when subagents complete; checked by runInner tail
 
-	// Task boundary state (written by task_boundary tool intercept in doToolExec).
-	// Mirrors Anti's latest_task_boundary_step tracking.
-	boundaryTaskName string
-	boundaryMode     string // "planning" / "execution" / "verification"
-	boundaryStatus   string
-	boundarySummary  string
-	previousMode     string // previous mode, for detecting transitions
-	stepsSinceUpdate int    // tool calls since last task_boundary call
-	planModified     bool   // true if plan.md was written/updated this session
-	yieldRequested   bool   // set true by notify_user(blocked_on_user=true)
-	skillLoaded      string // L2: skill name loaded via SKILL.md read (one-shot)
-	skillPath        string // L2: skill directory path
+	// Task state (extracted to reduce flat field count)
+	task *TaskTracker
+
 	pendingMedia     []map[string]string // Multimodal: media items pending injection into next LLM call
 	historicyDirty   bool                // True after compact/truncate — triggers sanitize in doGenerate
 	cachedToolDefs   []llm.ToolDef       // Cached tool definitions (rebuilt only when tools change)
+	tokenTracker     TokenTracker        // Hybrid API+estimate token tracking
+	compactCount     int                 // Consecutive compaction count — guards against recursive summary loss
 
-	// Artifact staleness tracking (Anti-style: steps since last interaction)
-	artifactLastStep map[string]int // artifact name → last step that touched it
-	currentStep      int            // global step counter across tool calls
+	// Evo state (per-run, reset on new user message)
+	evoLastEval      *EvalResult
+	evoLastPlan      *RepairPlan
+	evoRepairSuccess bool
+	traceCollector   *TraceCollectorHook // Per-loop trace collector for evo evaluation
 
-	// Runtime plan mode: "plan" | "auto" — set via API, NOT persisted to config.yaml.
+	// Runtime plan mode: "plan" | "auto" | "evo" — set via API, NOT persisted to config.yaml.
 	// Default from config.Agent.PlanningMode on startup.
 	runtimePlanMode string
 }
 
 // RunOptions configure a single run.
 type RunOptions struct {
-	Mode  string // chat / forge
-	Model string
+	Mode      string // chat / evo
+	Model     string
+	MaxTokens int // P0-A #5: overridable max_tokens for context overflow recovery (0 = use model default)
 }
 
 // NewAgentLoop creates an agent loop with injected dependencies.
@@ -150,16 +160,37 @@ func NewAgentLoop(deps Deps) *AgentLoop {
 	if deps.Config != nil && deps.Config.Agent.PlanningMode {
 		initPlanMode = "plan"
 	}
-	return &AgentLoop{
+	a := &AgentLoop{
 		deps:            deps,
 		state:           StateIdle,
 		stopCh:          make(chan struct{}),
 		guard:           NewBehaviorGuard(agentCfg),
-		artifactLastStep: make(map[string]int),
+		task:            NewTaskTracker(),
 		runtimePlanMode: initPlanMode,
 		options: RunOptions{
 			Mode: "chat",
 		},
+	}
+	// Per-loop trace collector: isolates evo trace data per session
+	if deps.EvoStore != nil {
+		a.traceCollector = NewTraceCollectorHook(deps.EvoStore)
+	}
+	return a
+}
+
+// ReloadConfig hot-swaps the loop's config references (called by agent subscriber).
+func (a *AgentLoop) ReloadConfig(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	agentCfg := cfg.Agent
+	a.guard.UpdateConfig(&agentCfg)
+	a.deps.Config = cfg
+	// Refresh plan mode if toggled via config
+	if cfg.Agent.PlanningMode {
+		a.runtimePlanMode = "plan"
+	} else {
+		a.runtimePlanMode = "auto"
 	}
 }
 
@@ -260,9 +291,14 @@ func (a *AgentLoop) ClearHistory() {
 	a.persistedCount = 0
 }
 
+// GetTokenStats returns cumulative per-model token usage and USD cost (P0-A #1).
+func (a *AgentLoop) GetTokenStats() TokenStats {
+	return a.tokenTracker.Stats()
+}
+
 // Compact triggers context compaction on the current history.
 func (a *AgentLoop) Compact() {
-	a.doCompact()
+	a.doCompact(context.Background())
 }
 
 // CompactIfNeeded estimates history token count and auto-compacts if over budget.
@@ -289,7 +325,7 @@ func (a *AgentLoop) CompactIfNeeded() {
 	if tokenEst > budget {
 		log.Printf("[compact] Auto-compacting on resume: %d tokens > %d budget (%d messages)",
 			tokenEst, budget, msgCount)
-		a.doCompact()
+		a.doCompact(context.Background()) // resume compaction uses background context
 	}
 }
 
@@ -320,12 +356,12 @@ func (a *AgentLoop) Stop() {
 	}()
 }
 
-// SetPlanMode sets the runtime planning mode ("plan" or "auto").
+// SetPlanMode sets the runtime planning mode ("plan", "auto", or "evo").
 // This is an in-memory toggle; it does NOT write to config.yaml.
 func (a *AgentLoop) SetPlanMode(mode string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if mode == "plan" || mode == "auto" {
+	if mode == "plan" || mode == "auto" || mode == "evo" {
 		a.runtimePlanMode = mode
 	}
 }
@@ -340,34 +376,22 @@ func (a *AgentLoop) PlanMode() string {
 	return a.runtimePlanMode
 }
 
-// protoState snapshots the loop's boundary fields into a dtool.LoopState
-// for the centralized protocol dispatcher.
+// protoState creates a LoopState with a shared BoundaryState pointer.
+// No copy needed — protocol handlers write directly to a.task.BoundaryState.
 func (a *AgentLoop) protoState() *dtool.LoopState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return &dtool.LoopState{
-		PlanMode:         a.runtimePlanMode,
-		PreviousMode:     a.previousMode,
-		BoundaryTaskName: a.boundaryTaskName,
-		BoundaryMode:     a.boundaryMode,
-		BoundaryStatus:   a.boundaryStatus,
-		BoundarySummary:  a.boundarySummary,
-		StepsSinceUpdate: a.stepsSinceUpdate,
-		YieldRequested:   a.yieldRequested,
+		PlanMode: a.runtimePlanMode,
+		Boundary: &a.task.BoundaryState,
 	}
 }
 
-// syncLoopState writes back the protocol dispatcher's mutations to private fields.
+// syncLoopState writes back the protocol dispatcher's non-boundary mutations.
+// Boundary fields are already shared by pointer — no copy needed.
 func (a *AgentLoop) syncLoopState(ps *dtool.LoopState) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.previousMode = ps.PreviousMode
-	a.boundaryTaskName = ps.BoundaryTaskName
-	a.boundaryMode = ps.BoundaryMode
-	a.boundaryStatus = ps.BoundaryStatus
-	a.boundarySummary = ps.BoundarySummary
-	a.stepsSinceUpdate = ps.StepsSinceUpdate
-	a.yieldRequested = ps.YieldRequested
 	// Agentic self-review: inject pending ephemerals from protocol dispatcher
 	for _, eph := range ps.PendingEphemerals {
 		a.ephemerals = append(a.ephemerals, eph)
@@ -375,8 +399,8 @@ func (a *AgentLoop) syncLoopState(ps *dtool.LoopState) {
 	ps.PendingEphemerals = nil
 	// L2 Progressive Disclosure: capture skill loaded signal
 	if ps.SkillLoaded != "" {
-		a.skillLoaded = ps.SkillLoaded
-		a.skillPath = ps.SkillPath
+		a.task.SkillLoaded = ps.SkillLoaded
+		a.task.SkillPath = ps.SkillPath
 	}
 	// Deterministic force: plan.md → must call notify_user next
 	// Skip in agentic mode — agent self-reviews, no forced yield
@@ -389,3 +413,4 @@ func (a *AgentLoop) syncLoopState(ps *dtool.LoopState) {
 		ps.PendingMedia = nil
 	}
 }
+

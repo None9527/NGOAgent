@@ -36,14 +36,15 @@ func (hs *HistoryStore) SaveAll(sessionID string, msgs []HistoryMessage) error {
 		if err := tx.Where("session_id = ?", sessionID).Delete(&HistoryMessage{}).Error; err != nil {
 			return err
 		}
-		for _, m := range msgs {
-			m.ID = 0 // Reset for insert
-			m.SessionID = sessionID
-			if err := tx.Create(&m).Error; err != nil {
-				return err
-			}
+		if len(msgs) == 0 {
+			return nil
 		}
-		return nil
+		// Prepare for bulk insert
+		for i := range msgs {
+			msgs[i].ID = 0
+			msgs[i].SessionID = sessionID
+		}
+		return tx.CreateInBatches(msgs, 100).Error
 	})
 }
 
@@ -76,18 +77,18 @@ func (hs *HistoryStore) DeleteSession(sessionID string) error {
 	return hs.db.Where("session_id = ?", sessionID).Delete(&HistoryMessage{}).Error
 }
 
-// AppendBatch inserts new messages without touching existing rows.
+// AppendBatch inserts new messages using batch insert for reduced lock contention.
 // Used for incremental persistence (normal turn endings).
 func (hs *HistoryStore) AppendBatch(sessionID string, msgs []HistoryMessage) error {
-	return hs.db.Transaction(func(tx *gorm.DB) error {
-		for _, m := range msgs {
-			m.ID = 0
-			m.SessionID = sessionID
-			if err := tx.Create(&m).Error; err != nil {
-				return err
-			}
-		}
+	if len(msgs) == 0 {
 		return nil
+	}
+	return hs.db.Transaction(func(tx *gorm.DB) error {
+		for i := range msgs {
+			msgs[i].ID = 0
+			msgs[i].SessionID = sessionID
+		}
+		return tx.CreateInBatches(msgs, 100).Error
 	})
 }
 

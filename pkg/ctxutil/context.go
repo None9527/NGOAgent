@@ -80,8 +80,8 @@ func WorkspaceDirFromContext(ctx context.Context) string {
 	return ""
 }
 
-// ActiveForgeIDFromContext returns the active forge ID. Empty means no forge in progress.
-func ActiveForgeIDFromContext(ctx context.Context) string {
+// ActiveEvoIDFromContext returns the active evo ID. Empty means no evo in progress.
+func ActiveEvoIDFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(keyActiveForgeID).(string); ok {
 		return v
 	}

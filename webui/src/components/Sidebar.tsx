@@ -9,8 +9,6 @@ export interface SidebarProps {
   onNewSession: () => void
   onDeleteSession: (id: string) => void
   onRenameSession: (id: string, newTitle: string) => void
-  onOpenHubTab: (tab: 'brain' | 'knowledge' | 'cron' | 'skills') => void
-  onOpenSettings: () => void
 }
 
 // ── Date group helper ────────────────────────────────────────
@@ -94,7 +92,7 @@ interface SessionItemProps {
   onRename: (newTitle: string) => void
 }
 
-const SessionItem: React.FC<SessionItemProps> = ({ session, isActive, onSelect, onDelete, onRename }) => {
+const SessionItem = React.memo<SessionItemProps>(({ session, isActive, onSelect, onDelete, onRename }) => {
   const [hovered, setHovered] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState(session.title || '无标题对话')
@@ -194,6 +192,7 @@ const SessionItem: React.FC<SessionItemProps> = ({ session, isActive, onSelect, 
     </div>
   )
 }
+)
 
 // ── Sidebar ─────────────────────────────────────────────────
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -202,10 +201,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onNewSession,
   onDeleteSession,
   onRenameSession,
-  onOpenHubTab: _onOpenHubTab, // reserved — tools section commented out
-  onOpenSettings: _onOpenSettings // reserved — moved to TopNavbar gear icon
 }: SidebarProps) => {
-  // isToolsExpanded removed — tools section is commented out
+  const [searchQuery, setSearchQuery] = useState('')
 
   // cron sessions shown in dedicated management page — hidden here
   const visible = [...sessions.filter(s => s.channel !== 'cron')]
@@ -215,8 +212,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       const tb = b.updated_at ? new Date(b.updated_at).getTime() : (b.created_at ? new Date(b.created_at).getTime() : Date.now())
       return tb - ta
     })
+
+  // Filter by search query
+  const filtered = searchQuery.trim()
+    ? visible.filter(s => (s.title || '无标题对话').toLowerCase().includes(searchQuery.trim().toLowerCase()))
+    : visible
+
   // Group by updated_at so sessions active today show under 今天
-  const groups = groupSessions(visible.map(s => ({ ...s, created_at: s.updated_at || s.created_at })))
+  const groups = groupSessions(filtered.map(s => ({ ...s, created_at: s.updated_at || s.created_at })))
 
   return (
     <>
@@ -249,11 +252,34 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </button>
         </div>
 
+        {/* Search bar */}
+        <div className="px-3 pb-2">
+          <div className="relative">
+            <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 pointer-events-none"
+              stroke="currentColor" fill="none" strokeWidth="2" viewBox="0 0 24 24"
+              strokeLinecap="round" strokeLinejoin="round" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="搜索对话..."
+              className="w-full glass-input rounded-lg pl-8 pr-7 py-1.5 text-xs text-gray-300 outline-none placeholder:text-gray-600"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 transition-colors text-xs leading-none"
+              >✕</button>
+            )}
+          </div>
+        </div>
+
         {/* Session list with date groups */}
-        <div className="flex-1 overflow-y-auto px-3 pb-3"
-          style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f3f #171717' }}>
-          {visible.length === 0 && (
-            <div className="text-xs text-gray-500 px-2">暂无对话</div>
+        <div className="flex-1 overflow-y-auto px-3 pb-3">
+          {filtered.length === 0 && (
+            <div className="text-xs text-gray-500 px-2">{searchQuery ? '无匹配结果' : '暂无对话'}</div>
           )}
           {groups.map(group => (
             <div key={group.label} className="mb-2">
@@ -277,76 +303,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           ))}
         </div>
-
-        {/* 工具区 — reserved for future use */}
-        {/* <div className="mt-4 px-2 space-y-0.5">
-          <button 
-            onClick={() => setIsToolsExpanded(!isToolsExpanded)}
-            className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-white/5 rounded-md transition-colors group cursor-pointer"
-          >
-            <span className="text-[10px] text-gray-500 group-hover:text-gray-300 uppercase tracking-wider font-semibold transition-colors">工具区 (Tools)</span>
-            <svg 
-              xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" 
-              className={`text-gray-500 transition-transform duration-200 ${isToolsExpanded ? 'rotate-180' : ''}`}
-            >
-              <polyline points="6 9 12 15 18 9"></polyline>
-            </svg>
-          </button>
-          
-          <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isToolsExpanded ? 'max-h-[200px] opacity-100 mt-1' : 'max-h-0 opacity-0'}`}>
-            <button onClick={() => onOpenHubTab('brain')} className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-400 hover:text-gray-200 hover:bg-white/5 rounded-lg transition-colors group">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-500 group-hover:text-blue-400 transition-colors">
-                <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/>
-                <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/>
-              </svg>
-              <span className="flex-1 text-left">Brain (工作区)</span>
-            </button>
-            
-            <button onClick={() => onOpenHubTab('knowledge')} className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-400 hover:text-gray-200 hover:bg-white/5 rounded-lg transition-colors group">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-500 group-hover:text-amber-400 transition-colors">
-                <line x1="9" y1="18" x2="15" y2="18"/>
-                <line x1="10" y1="22" x2="14" y2="22"/>
-                <path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1.45.62 2.84 1.5 3.5.76.76 1.23 1.52 1.41 2.5"/>
-              </svg>
-              <span className="flex-1 text-left">Knowledge (KI)</span>
-            </button>
-            
-            <button onClick={() => onOpenHubTab('cron')} className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-400 hover:text-gray-200 hover:bg-white/5 rounded-lg transition-colors group">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-500 group-hover:text-emerald-400 transition-colors">
-                <circle cx="12" cy="12" r="10"/>
-                <polyline points="12 6 12 12 16 14"/>
-              </svg>
-              <span className="flex-1 text-left">Cron (心跳)</span>
-            </button>
-            
-            <button onClick={() => onOpenHubTab('skills')} className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-400 hover:text-gray-200 hover:bg-white/5 rounded-lg transition-colors group">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-500 group-hover:text-purple-400 transition-colors">
-                <path d="M2 12h6"/>
-                <path d="M22 12h-6"/>
-                <path d="M12 2v6"/>
-                <path d="M12 22v-6"/>
-                <path d="m4.93 4.93 4.24 4.24"/>
-                <path d="m14.83 14.83 4.24 4.24"/>
-                <path d="m14.83 9.17 4.24-4.24"/>
-                <path d="m19.07 4.93-4.24 4.24"/>
-                <path d="m4.93 19.07 4.24-4.24"/>
-                <path d="m9.17 14.83-4.24 4.24"/>
-              </svg>
-              <span className="flex-1 text-left">Skill/MCP (扩展)</span>
-            </button>
-          </div>
-        </div> */}
-        {/* Global Settings — reserved for future user/account system */}
-        {/* <div className="p-3 mt-auto mb-2 border-t border-white/[0.04]">
-          <button onClick={onOpenSettings}
-            className="flex items-center gap-3 w-full p-2.5 rounded-lg hover:bg-white/5 transition-all text-sm group"
-            style={{ color: '#a3a3a3' }}>
-            <div className="w-7 h-7 rounded-full bg-blue-500/20 text-blue-400 group-hover:bg-blue-500/30 flex items-center justify-center font-bold text-[11px] ring-1 ring-blue-500/30 transition-colors">
-              U
-            </div>
-            <div className="truncate font-medium group-hover:text-gray-200 transition-colors tracking-wide">设置 (Settings)</div>
-          </button>
-        </div> */}
       </div>
     </>
   )

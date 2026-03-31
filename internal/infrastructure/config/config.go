@@ -64,11 +64,13 @@ func (c *Config) Sanitized() map[string]any {
 		"cron": map[string]any{
 			"enabled": c.Cron.Enabled,
 		},
-		"forge": map[string]any{
-			"sandbox_dir":          c.Forge.SandboxDir,
-			"max_retries":          c.Forge.MaxRetries,
-			"auto_forge_on_install": c.Forge.AutoForgeOnInstall,
-			"history_limit":        c.Forge.HistoryLimit,
+		"evo": map[string]any{
+			"max_retries":      c.Evo.MaxRetries,
+			"cooldown_seconds": c.Evo.CooldownSeconds,
+			"cleanup_days":     c.Evo.CleanupDays,
+			"score_threshold":  c.Evo.ScoreThreshold,
+			"eval_model":       c.Evo.EvalModel,
+			"auto_eval":        c.Evo.AutoEval,
 		},
 		"mcp": map[string]any{
 			"servers": mcpServers,
@@ -111,7 +113,7 @@ type Config struct {
 	Security  SecurityConfig  `yaml:"security"`
 	Storage   StorageConfig   `yaml:"storage"`
 	Cron      CronConfig      `yaml:"cron"`
-	Forge     ForgeConfig     `yaml:"forge"`
+	Evo       EvoConfig       `yaml:"evo"`
 	MCP       MCPConfig       `yaml:"mcp"`
 	Search    SearchConfig    `yaml:"search"`
 	Embedding EmbeddingConfig `yaml:"embedding"`
@@ -126,7 +128,8 @@ type MemoryConfig struct {
 
 // SearchConfig defines web search provider settings.
 type SearchConfig struct {
-	Endpoint string `yaml:"endpoint"` // SearXNG endpoint URL, e.g. http://localhost:8888
+	Endpoint   string `yaml:"endpoint"`    // agent-search service URL (curl_cffi+Camoufox gateway), e.g. http://localhost:8890
+	SearXNGURL string `yaml:"searxng_url"` // SearXNG direct URL for fast web_search, e.g. http://localhost:8080
 }
 
 // EmbeddingConfig defines the embedding model configuration for KI vector search.
@@ -169,14 +172,15 @@ func (c *Config) LoadLocation() *time.Location {
 // AgentConfig controls user-facing agent behavior and LLM hyperparameters.
 type AgentConfig struct {
 	DefaultModel    string  `yaml:"default_model"`
-	PlanningMode    bool    `yaml:"planning_mode"`     // true=force plan, false=auto-detect
-	MaxSteps        int     `yaml:"max_steps"`          // Max agent loop steps (default: 200)
-	Workspace       string  `yaml:"workspace"`          // Default working directory for shell commands
-	Temperature     float64 `yaml:"temperature"`        // LLM sampling temperature, 0.0-2.0 (default: 0.7)
-	TopP            float64 `yaml:"top_p"`              // Nucleus sampling threshold, 0.0-1.0 (default: 0.9)
-	MaxOutputTokens int     `yaml:"max_output_tokens"` // Max tokens per LLM response (default: 8192)
-	ContextWindow   int     `yaml:"context_window"`     // Default context window for unknown models (default: 32768)
-	CompactRatio    float64 `yaml:"compact_ratio"`      // Trigger context compact at this usage ratio (default: 0.7)
+	PlanningMode    bool    `yaml:"planning_mode"`      // true=force plan, false=auto-detect
+	MaxSteps        int     `yaml:"max_steps"`           // Max agent loop steps (default: 200)
+	MaxSubagents    int     `yaml:"max_subagents"`       // Max concurrent sub-agents per session (default: 3)
+	Workspace       string  `yaml:"workspace"`           // Default working directory for shell commands
+	Temperature     float64 `yaml:"temperature"`         // LLM sampling temperature, 0.0-2.0 (default: 0.7)
+	TopP            float64 `yaml:"top_p"`               // Nucleus sampling threshold, 0.0-1.0 (default: 0.9)
+	MaxOutputTokens int     `yaml:"max_output_tokens"`  // Max tokens per LLM response (default: 8192)
+	ContextWindow   int     `yaml:"context_window"`      // Default context window for unknown models (default: 32768)
+	CompactRatio    float64 `yaml:"compact_ratio"`       // Trigger context compact at this usage ratio (default: 0.7)
 }
 
 // LLMConfig defines LLM provider connections.
@@ -284,12 +288,14 @@ type CronConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// ForgeConfig defines settings for the capability forging engine.
-type ForgeConfig struct {
-	SandboxDir         string `yaml:"sandbox_dir"`
-	MaxRetries         int    `yaml:"max_retries"`
-	AutoForgeOnInstall bool   `yaml:"auto_forge_on_install"`
-	HistoryLimit       int    `yaml:"history_limit"`
+// EvoConfig defines settings for the evolution (self-repair) engine.
+type EvoConfig struct {
+	MaxRetries      int     `yaml:"max_retries"`      // Max auto-repair retries per session (default: 2)
+	CooldownSeconds int     `yaml:"cooldown_seconds"` // Min interval between repairs in seconds (default: 30)
+	CleanupDays     int     `yaml:"cleanup_days"`     // Trace/Eval/Repair data retention days (default: 30)
+	ScoreThreshold  float64 `yaml:"score_threshold"`  // Evaluation pass threshold 0.0-1.0 (default: 0.7)
+	EvalModel       string  `yaml:"eval_model"`       // Evaluator model (empty = use main model)
+	AutoEval        bool    `yaml:"auto_eval"`        // Auto-evaluate in evo mode (default: true)
 }
 
 // MCPConfig defines MCP server configurations.

@@ -10,19 +10,14 @@
 import type { FC } from 'react';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { ReactNode } from 'react';
+import { LinkIcon } from './icons/EditIcons.js';
 import {
   EditPencilIcon,
   AutoEditIcon,
   PlanModeIcon,
 } from './icons/EditIcons.js';
-import { CodeBracketsIcon, HideContextIcon } from './icons/EditIcons.js';
-import { LinkIcon } from './icons/EditIcons.js';
 import { ArrowUpIcon } from './icons/NavigationIcons.js';
 import { StopIcon } from './icons/StopIcon.js';
-import { CompletionMenu } from './CompletionMenu.js';
-import { ContextIndicator } from './ContextIndicator.js';
-import type { CompletionItem } from './types.js';
-import type { ContextUsage } from './ContextIndicator.js';
 import { useStream } from '../providers/StreamProvider';
 import { useConfig } from '../providers/ConfigProvider';
 import { useSession } from '../providers/SessionProvider';
@@ -184,28 +179,13 @@ export const InputForm: FC<InputFormProps> = ({
   const onToggleSecurityMode = useCallback(() => config.toggleSecurityMode(), [config]);
   const securityModeLabel = securityMode === 'allow' ? 'Allow' : 'Ask';
   const editModeInfo: EditModeInfo = {
-    label: planMode === 'plan' ? 'Plan' : planMode === 'agentic' ? 'Agentic' : 'Auto',
-    title: planMode === 'plan' ? 'Planning mode' : planMode === 'agentic' ? 'Agentic mode' : 'Auto mode',
+    label: planMode === 'plan' ? 'Plan' : planMode === 'agentic' ? 'Agentic' : planMode === 'evo' ? 'Evo' : 'Auto',
+    title: planMode === 'plan' ? 'Planning mode' : planMode === 'agentic' ? 'Agentic mode' : planMode === 'evo' ? 'Evolution mode' : 'Auto mode',
     icon: null,
   };
   const placeholder = isStreaming ? 'Agent is thinking...' : 'Message NGOAgent...';
 
-  // Internalized defaults (no-ops or constants)
-  const activeFileName: string | null = null;
-  const activeSelection: { startLine: number; endLine: number } | null = null;
-  const skipAutoActiveContext = false;
-  const contextUsage: ContextUsage | null = null;
-  const completionIsOpen = false;
-  const completionItemsResolved: CompletionItem[] = [];
-  const onToggleSkipAutoActiveContext = useCallback(() => {}, []);
-  const onCompositionStart = useCallback(() => {}, []);
-  const onCompositionEnd = useCallback(() => {}, []);
-  const onKeyDown = useCallback((_e: React.KeyboardEvent) => {}, []);
-  const onCompletionSelect = undefined as ((item: CompletionItem) => void) | undefined;
-  const onCompletionClose = undefined as (() => void) | undefined;
-
   const composerDisabled = isStreaming || isWaitingForResponse;
-  const completionActive = completionIsOpen && completionItemsResolved.length > 0 && !!onCompletionSelect && !!onCompletionClose;
 
   // Internal IME composing state — not relying on external prop
   const composingRef = useRef(false);
@@ -285,13 +265,11 @@ export const InputForm: FC<InputFormProps> = ({
 
   const handleCompositionStart = useCallback(() => {
     composingRef.current = true;
-    onCompositionStart();
-  }, [onCompositionStart]);
+  }, []);
 
   const handleCompositionEnd = useCallback(() => {
     composingRef.current = false;
-    onCompositionEnd();
-  }, [onCompositionEnd]);
+  }, []);
 
   // Sync state clearing to DOM
   useEffect(() => {
@@ -303,13 +281,6 @@ export const InputForm: FC<InputFormProps> = ({
   }, [inputText, inputFieldRef]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    // Let the completion menu handle Escape when it's active.
-    if (completionActive && e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      onCompletionClose?.();
-      return;
-    }
     // ESC should cancel the current interaction (stop generation)
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -322,10 +293,6 @@ export const InputForm: FC<InputFormProps> = ({
       if (e.nativeEvent.isComposing || composingRef.current) {
         return; // IME confirmation Enter — ignore
       }
-      // If CompletionMenu is open, let it handle Enter key
-      if (completionActive) {
-        return;
-      }
       e.preventDefault();
       // Clear contentEditable DOM before submit to prevent ghost text
       if (inputFieldRef.current) {
@@ -333,28 +300,9 @@ export const InputForm: FC<InputFormProps> = ({
       }
       onSubmit(e);
     }
-    onKeyDown(e);
   };
 
-  // Selection label like "6 lines selected"; no line numbers
-  const selectedLinesCount = activeSelection !== null
-    ? Math.max(1, (activeSelection as { startLine: number; endLine: number }).endLine - (activeSelection as { startLine: number; endLine: number }).startLine + 1)
-    : 0;
-  const selectedLinesText =
-    selectedLinesCount > 0
-      ? `${selectedLinesCount} ${selectedLinesCount === 1 ? 'line' : 'lines'} selected`
-      : '';
 
-  // Pre-compute active file title for accessibility
-  const activeFileTitle = activeFileName
-    ? skipAutoActiveContext
-      ? selectedLinesText
-        ? `Active selection will NOT be auto-loaded into context: ${selectedLinesText}`
-        : `Active file will NOT be auto-loaded into context: ${activeFileName}`
-      : selectedLinesText
-        ? `Showing your current selection: ${selectedLinesText}`
-        : `Showing your current file: ${activeFileName}`
-    : '';
 
   return (
     <div className="p-1 relative w-full"
@@ -377,15 +325,6 @@ export const InputForm: FC<InputFormProps> = ({
           <div className="input-banner" />
 
           <div className="relative flex z-[1]">
-            {completionActive && onCompletionSelect && onCompletionClose && (
-              <CompletionMenu
-                items={completionItemsResolved}
-                onSelect={onCompletionSelect}
-                onClose={onCompletionClose}
-                title={undefined}
-              />
-            )}
-
             {/* ── File Chips Preview Area ── */}
             {attachedFiles.length > 0 && (
               <div className="absolute bottom-full left-0 right-0 mb-1 px-2 flex flex-wrap gap-1.5 max-h-28 overflow-y-auto overflow-x-hidden py-1">
@@ -456,12 +395,14 @@ export const InputForm: FC<InputFormProps> = ({
                   ? 'bg-blue-600/20 border-blue-500/40 text-blue-300 hover:shadow-[0_0_15px_rgba(59,130,246,0.2)]'
                   : editModeInfo.label === 'Agentic'
                   ? 'bg-purple-600/20 border-purple-500/40 text-purple-300 hover:shadow-[0_0_15px_rgba(147,51,234,0.2)]'
+                  : editModeInfo.label === 'Evo'
+                  ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-300 hover:shadow-[0_0_15px_rgba(16,185,129,0.2)]'
                   : 'bg-white/[0.04] border-white/[0.08] text-gray-400 hover:text-gray-200 hover:bg-white/[0.08] hover:shadow-[0_0_15px_rgba(255,255,255,0.05)]'
               }`}
               title={editModeInfo.title}
               onClick={onToggleEditMode}
             >
-              {editModeInfo.label === 'Plan' ? '📋' : editModeInfo.label === 'Agentic' ? '🤖' : '⚡'} {editModeInfo.label}
+              {editModeInfo.label === 'Plan' ? '📋' : editModeInfo.label === 'Agentic' ? '🤖' : editModeInfo.label === 'Evo' ? '🧬' : '⚡'} {editModeInfo.label}
             </button>
             {onToggleSecurityMode && (
               <button
@@ -478,32 +419,8 @@ export const InputForm: FC<InputFormProps> = ({
               </button>
             )}
 
-            {/* Active file indicator */}
-            {activeFileName && (
-              <button
-                type="button"
-                className="btn-text-compact btn-text-compact--primary"
-                title={activeFileTitle}
-                aria-label={activeFileTitle}
-                onClick={onToggleSkipAutoActiveContext}
-              >
-                {skipAutoActiveContext ? (
-                  <HideContextIcon />
-                ) : (
-                  <CodeBracketsIcon />
-                )}
-                {/* Truncate file path/selection; hide label on very small screens */}
-                <span className="hidden sm:inline">
-                  {selectedLinesText || activeFileName}
-                </span>
-              </button>
-            )}
-
             {/* Spacer */}
             <div className="flex-1 min-w-0" />
-
-            {/* Context usage indicator */}
-            <ContextIndicator contextUsage={contextUsage} />
 
             {/* File attach button */}
             <input

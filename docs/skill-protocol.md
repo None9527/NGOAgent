@@ -143,7 +143,7 @@ description: |
 ```
 1. 用户消息匹配触发词（如"帮我生成一张图片" 匹配 "生图"）
 2. Agent 自动注入 ephemeral 提示：
-   "🎯 Skill available: media-studio
+   " Skill available: media-studio
     Quick usage: cd /path && ./run.sh generate "prompt"
     For full guide: use_skill(name='media-studio')"
 3. LLM 用 run_command 执行 run.sh

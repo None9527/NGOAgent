@@ -120,16 +120,24 @@ export function chatStreamSSE(
 // ─── WebSocket Singleton ──────────────────────────────────────
 
 let _sharedWS: WSClient | null = null
+let _sharedWSToken: string | null = null  // E1: track token for staleness detection
 let _wsStateListeners: ((state: string) => void)[] = []
 let _activeWSHandler: WSMessageHandler | null = null
 
 /** Get or create the shared WS client. Returns null if no auth token. */
 export function getSharedWSClient(): WSClient | null {
-  if (_sharedWS && _sharedWS.state !== 'closed') return _sharedWS
-
   const token = getAuthToken()
   if (!token) return null
 
+  // E1 fix: close stale connection if token changed (logout → login)
+  if (_sharedWS && _sharedWS.state !== 'closed') {
+    if (_sharedWSToken === token) return _sharedWS
+    // Token changed — close old connection
+    _sharedWS.close()
+    _sharedWS = null
+  }
+
+  _sharedWSToken = token
   _sharedWS = createWSClient((state) => {
     _wsStateListeners.forEach(fn => fn(state))
   })
@@ -150,9 +158,16 @@ export function onWSStateChange(fn: (state: string) => void): () => void {
 
 // ─── WebSocket Streaming ──────────────────────────────────────
 
+/** Response timeout: if no event within this time after chat send, fall back to SSE */
+const WS_RESPONSE_TIMEOUT_MS = 15_000
+
 /**
  * Chat via WebSocket. Returns cancel function.
- * The handler stays alive after 'done' to receive auto-wake events.
+ * 
+ * Robustness features:
+ * - Response timeout: if backend doesn't respond within 15s, falls back to SSE
+ * - Error isolation: after error/done, handler only passes auto_wake events
+ * - Handler cleanup: replaces any previous active handler
  */
 export function chatStreamWS(
   ws: WSClient,
@@ -163,11 +178,49 @@ export function chatStreamWS(
 ): { cancel: () => void } {
   const state = createStreamState()
   let cancelled = false
+  let receivedAnyEvent = false // Track if backend has responded at all
+  let streamEnded = false // True after done/error — only auto_wake passes through
+
+  // Response timeout — fallback to SSE if WS is silently dead
+  const responseTimer = setTimeout(() => {
+    if (!receivedAnyEvent && !cancelled) {
+      console.warn('[ws] No response within timeout, falling back to SSE')
+      // Clean up WS handler
+      cancelled = true
+      ws.removeHandler(handler)
+      if (_activeWSHandler === handler) _activeWSHandler = null
+      // Fall back to SSE
+      const sseHandle = chatStreamSSE(message, sessionId, mode, cb)
+      // Replace cancel function  
+      cancelFn = () => { sseHandle.cancel() }
+    }
+  }, WS_RESPONSE_TIMEOUT_MS)
 
   const handler: WSMessageHandler = (event) => {
     if (cancelled) return
-    processEvent(event, state, cb, false)
-    // Never remove based on return: 'done' resets UI but handler stays for auto-wake
+
+    // Track that we received at least one event
+    if (!receivedAnyEvent) {
+      receivedAnyEvent = true
+      clearTimeout(responseTimer)
+    }
+
+    // After done/error, only pass through auto_wake events
+    if (streamEnded) {
+      const type = event.type as string
+      if (type === 'auto_wake_start' || type === 'auto_wake_done') {
+        processEvent(event, state, cb, false)
+      }
+      return
+    }
+
+    const shouldEnd = processEvent(event, state, cb, false)
+    const eventType = event.type as string
+
+    // Mark stream as ended on done or error
+    if (eventType === 'done' || eventType === 'error' || shouldEnd) {
+      streamEnded = true
+    }
   }
 
   if (_activeWSHandler) {
@@ -178,14 +231,17 @@ export function chatStreamWS(
   ws.addHandler(handler)
   ws.send({ type: 'chat', message, session_id: sessionId, mode })
 
+  let cancelFn = () => {
+    cancelled = true
+    clearTimeout(responseTimer)
+    ws.removeHandler(handler)
+    if (_activeWSHandler === handler) _activeWSHandler = null
+    ws.send({ type: 'stop', session_id: sessionId })
+    cb.onEnd()
+  }
+
   return {
-    cancel: () => {
-      cancelled = true
-      ws.removeHandler(handler)
-      _activeWSHandler = null
-      ws.send({ type: 'stop', session_id: sessionId })
-      cb.onEnd()
-    },
+    cancel: () => { cancelFn() },
   }
 }
 
