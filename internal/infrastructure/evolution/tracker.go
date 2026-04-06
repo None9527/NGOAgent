@@ -13,7 +13,7 @@ type EvoRun struct {
 	At         time.Time     `json:"at"`
 	Passed     bool          `json:"passed"`
 	Retries    int           `json:"retries"`
-	Strategy   string        `json:"strategy,omitempty"`    // param_fix | tool_swap | re_route | iterate | escalate
+	Strategy   string        `json:"strategy,omitempty"` // param_fix | tool_swap | re_route | iterate | escalate
 	FailReason string        `json:"fail_reason,omitempty"`
 	Duration   time.Duration `json:"duration"`
 }

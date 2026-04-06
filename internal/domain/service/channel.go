@@ -3,7 +3,10 @@
 // controlling how an AgentLoop receives input, produces output, and handles completion.
 package service
 
-import "log"
+import (
+	"fmt"
+	"log/slog"
+)
 
 // AgentChannel defines the protocol for a specific agent execution context.
 // Different channels have different output sinks, tool policies, and completion behaviors.
@@ -33,8 +36,8 @@ func NewChatChannel(sink DeltaSink) *ChatChannel {
 	return &ChatChannel{sink: sink}
 }
 
-func (c *ChatChannel) Name() string          { return "chat" }
-func (c *ChatChannel) DeltaSink() DeltaSink  { return c.sink }
+func (c *ChatChannel) Name() string                     { return "chat" }
+func (c *ChatChannel) DeltaSink() DeltaSink             { return c.sink }
 func (c *ChatChannel) OnComplete(string, string, error) {} // Chat streams directly, no announce needed
 
 // ────────────────────────────────────────────
@@ -56,8 +59,8 @@ func NewSubagentChannel(announceFn func(runID string, result string, err error))
 	}
 }
 
-func (c *SubagentChannel) Name() string          { return "subagent" }
-func (c *SubagentChannel) DeltaSink() DeltaSink  { return c.collector }
+func (c *SubagentChannel) Name() string                { return "subagent" }
+func (c *SubagentChannel) DeltaSink() DeltaSink        { return c.collector }
 func (c *SubagentChannel) Collector() *OutputCollector { return c.collector }
 func (c *SubagentChannel) OnComplete(runID string, _ string, err error) {
 	result := c.collector.Result()
@@ -85,36 +88,36 @@ func NewForgeChannel(sink DeltaSink) *ForgeChannel {
 	return &ForgeChannel{sink: sink}
 }
 
-func (c *ForgeChannel) Name() string          { return "forge" }
-func (c *ForgeChannel) DeltaSink() DeltaSink  { return c.sink }
+func (c *ForgeChannel) Name() string                     { return "forge" }
+func (c *ForgeChannel) DeltaSink() DeltaSink             { return c.sink }
 func (c *ForgeChannel) OnComplete(string, string, error) {}
 
 // ────────────────────────────────────────────
 // LogSink: simple DeltaSink that logs output
 // ────────────────────────────────────────────
 
-// LogSink is a DeltaSink that writes to log.Printf.
+// LogSink is a DeltaSink that writes to standard logger.
 type LogSink struct {
 	Prefix string
 }
 
 func (s *LogSink) OnText(text string) {
 	if text != "" {
-		log.Printf("%s text: %s", s.Prefix, text)
+		slog.Info(fmt.Sprintf("%s text: %s", s.Prefix, text))
 	}
 }
-func (s *LogSink) OnReasoning(string)                        {}
-func (s *LogSink) OnToolStart(string, string, map[string]any)        {}
-func (s *LogSink) OnToolResult(string, string, string, error)        {}
-func (s *LogSink) OnProgress(string, string, string, string) {}
-func (s *LogSink) OnPlanReview(string, []string)              {}
+func (s *LogSink) OnReasoning(string)                                       {}
+func (s *LogSink) OnToolStart(string, string, map[string]any)               {}
+func (s *LogSink) OnToolResult(string, string, string, error)               {}
+func (s *LogSink) OnProgress(string, string, string, string)                {}
+func (s *LogSink) OnPlanReview(string, []string)                            {}
 func (s *LogSink) OnApprovalRequest(string, string, map[string]any, string) {}
-func (s *LogSink) OnTitleUpdate(string, string) {}
-func (s *LogSink) OnAutoWakeStart()              {}
-func (s *LogSink) OnComplete() {}
+func (s *LogSink) OnTitleUpdate(string, string)                             {}
+func (s *LogSink) OnAutoWakeStart()                                         {}
+func (s *LogSink) OnComplete()                                              {}
 func (s *LogSink) OnError(err error) {
 	if err != nil {
-		log.Printf("%s error: %v", s.Prefix, err)
+		slog.Info(fmt.Sprintf("%s error: %v", s.Prefix, err))
 	}
 }
 func (s *LogSink) Emit(DeltaEvent) {}

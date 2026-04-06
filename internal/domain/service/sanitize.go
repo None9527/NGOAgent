@@ -1,9 +1,10 @@
 package service
 
 import (
-	"log"
+	"fmt"
+	"log/slog"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
+	"github.com/ngoclaw/ngoagent/internal/domain/model"
 )
 
 // sanitizeMessages fixes orphan tool/assistant blocks in the message history.
@@ -14,7 +15,7 @@ import (
 //
 // This can happen after context compaction, pruning, or error recovery.
 // Ported from gateway/internal/domain/service/sanitize.go.
-func sanitizeMessages(messages []llm.Message) []llm.Message {
+func sanitizeMessages(messages []model.Message) []model.Message {
 	if len(messages) == 0 {
 		return messages
 	}
@@ -40,7 +41,7 @@ func sanitizeMessages(messages []llm.Message) []llm.Message {
 	}
 
 	// Pass 3: rebuild — fix orphans in both directions
-	result := make([]llm.Message, 0, len(messages))
+	result := make([]model.Message, 0, len(messages))
 	stripped := 0
 	for _, msg := range messages {
 		switch {
@@ -80,7 +81,7 @@ func sanitizeMessages(messages []llm.Message) []llm.Message {
 	}
 
 	if stripped > 0 {
-		log.Printf("[sanitize] fixed %d orphan messages (%d→%d)", stripped, len(messages), len(result))
+		slog.Info(fmt.Sprintf("[sanitize] fixed %d orphan messages (%d→%d)", stripped, len(messages), len(result)))
 	}
 	return result
 }
@@ -88,12 +89,12 @@ func sanitizeMessages(messages []llm.Message) []llm.Message {
 // enforceTurnOrdering merges consecutive same-role messages to ensure
 // strict user→assistant alternation. Required by some LLM APIs.
 // System and tool messages are passed through unchanged.
-func enforceTurnOrdering(messages []llm.Message) []llm.Message {
+func enforceTurnOrdering(messages []model.Message) []model.Message {
 	if len(messages) <= 1 {
 		return messages
 	}
 
-	result := make([]llm.Message, 0, len(messages))
+	result := make([]model.Message, 0, len(messages))
 	for _, msg := range messages {
 		if msg.Role == "system" || msg.Role == "tool" {
 			result = append(result, msg)

@@ -3,7 +3,7 @@ package memory
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -117,13 +117,13 @@ func (s *Store) Save(sessionID, content string) error {
 
 	// Persist both index and fragments to disk
 	if err := s.index.Save(); err != nil {
-		log.Printf("[memory] index save failed: %v", err)
+		slog.Info(fmt.Sprintf("[memory] index save failed: %v", err))
 	}
 	if err := s.saveFragments(); err != nil {
-		log.Printf("[memory] fragments save failed: %v", err)
+		slog.Info(fmt.Sprintf("[memory] fragments save failed: %v", err))
 	}
 
-	log.Printf("[memory] saved %d chunks from session %s (total: %d)", len(chunks), sessionID, len(s.contents))
+	slog.Info(fmt.Sprintf("[memory] saved %d chunks from session %s (total: %d)", len(chunks), sessionID, len(s.contents)))
 	return nil
 }
 
@@ -204,6 +204,44 @@ func (s *Store) Size() int {
 	return len(s.contents)
 }
 
+// PruneStale removes fragments older than maxAgeDays.
+// Only deletes fragments with low relevance signal (never recalled = still original).
+// Returns the number of pruned fragments.
+func (s *Store) PruneStale(maxAgeDays int) int {
+	if maxAgeDays <= 0 {
+		return 0
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cutoff := time.Now().AddDate(0, 0, -maxAgeDays)
+	var toRemove []string
+
+	for id, meta := range s.contents {
+		if meta.CreatedAt.Before(cutoff) {
+			toRemove = append(toRemove, id)
+		}
+	}
+
+	for _, id := range toRemove {
+		delete(s.contents, id)
+		s.index.Remove(id)
+	}
+
+	if len(toRemove) > 0 {
+		if err := s.index.Save(); err != nil {
+			slog.Info(fmt.Sprintf("[memory] index save after prune failed: %v", err))
+		}
+		if err := s.saveFragments(); err != nil {
+			slog.Info(fmt.Sprintf("[memory] fragments save after prune failed: %v", err))
+		}
+		slog.Info(fmt.Sprintf("[memory] pruned %d stale fragments (older than %d days)", len(toRemove), maxAgeDays))
+	}
+
+	return len(toRemove)
+}
+
 // ═══════════════════════════════════════════
 // Persistence: fragments.json
 // ═══════════════════════════════════════════
@@ -227,7 +265,7 @@ func (s *Store) loadFragments() {
 
 	var loaded map[string]fragmentMeta
 	if err := json.Unmarshal(data, &loaded); err != nil {
-		log.Printf("[memory] failed to parse fragments.json: %v", err)
+		slog.Info(fmt.Sprintf("[memory] failed to parse fragments.json: %v", err))
 		return
 	}
 
@@ -240,7 +278,7 @@ func (s *Store) loadFragments() {
 	}
 	s.nextID = maxID + 1
 
-	log.Printf("[memory] loaded %d fragments from disk", len(s.contents))
+	slog.Info(fmt.Sprintf("[memory] loaded %d fragments from disk", len(s.contents)))
 }
 
 // ═══════════════════════════════════════════
@@ -275,7 +313,7 @@ func (s *Store) evictIfNeeded() {
 		s.index.Remove(id)
 	}
 
-	log.Printf("[memory] evicted %d fragments (max=%d)", toRemove, s.maxFragments)
+	slog.Info(fmt.Sprintf("[memory] evicted %d fragments (max=%d)", toRemove, s.maxFragments))
 }
 
 // ═══════════════════════════════════════════

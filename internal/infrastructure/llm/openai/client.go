@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -19,11 +19,12 @@ import (
 
 // Client implements llm.Provider for OpenAI-compatible APIs.
 type Client struct {
-	name    string
-	baseURL string
-	apiKey  string
-	models  []string
-	client  *http.Client
+	name         string
+	baseURL      string
+	apiKey       string
+	models       []string
+	client       *http.Client
+	extraHeaders map[string]string // Provider-specific headers (e.g. DashScope implicit cache)
 }
 
 // NewClient creates an OpenAI-compatible provider.
@@ -39,7 +40,13 @@ func NewClient(name, baseURL, apiKey string, models []string) *Client {
 	}
 }
 
-func (c *Client) Name() string    { return c.name }
+// SetExtraHeaders configures provider-specific HTTP headers.
+// Example: DashScope implicit cache via {"x-dashscope-session-cache": "enable"}
+func (c *Client) SetExtraHeaders(headers map[string]string) {
+	c.extraHeaders = headers
+}
+
+func (c *Client) Name() string     { return c.name }
 func (c *Client) Models() []string { return c.models }
 
 // GenerateStream sends a chat completion request and streams the response.
@@ -96,6 +103,10 @@ func (c *Client) GenerateStream(ctx context.Context, req *llm.Request, ch chan<-
 	if req.Stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
+	// Provider-specific headers (e.g. DashScope implicit cache)
+	for k, v := range c.extraHeaders {
+		httpReq.Header.Set(k, v)
+	}
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
@@ -113,8 +124,8 @@ func (c *Client) GenerateStream(ctx context.Context, req *llm.Request, ch chan<-
 		bodyStr := string(bodyBytes)
 		level := llm.ClassifyByBody(resp.StatusCode, bodyStr)
 		// DEBUG: log the request body that caused this error
-		log.Printf("[DEBUG] HTTP %d from %s [%s]\nRequest body: %s\nResponse: %s",
-			resp.StatusCode, c.baseURL, level, string(body), bodyStr)
+		slog.Info(fmt.Sprintf("[DEBUG] HTTP %d from %s [%s]\nRequest body: %s\nResponse: %s",
+			resp.StatusCode, c.baseURL, level, string(body), bodyStr))
 		return nil, &llm.LLMError{
 			Level:   level,
 			Code:    fmt.Sprintf("http_%d", resp.StatusCode),
@@ -148,6 +159,10 @@ func (c *Client) handleSync(body io.Reader, ch chan<- llm.StreamChunk) (*llm.Res
 			CompletionTokens int `json:"completion_tokens"`
 			TotalTokens      int `json:"total_tokens"`
 		} `json:"usage"`
+		// DashScope cache details (nested in prompt_tokens_details)
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details,omitempty"` // top-level for DashScope
 	}
 
 	if err := json.NewDecoder(body).Decode(&apiResp); err != nil {
@@ -161,6 +176,10 @@ func (c *Client) handleSync(body io.Reader, ch chan<- llm.StreamChunk) (*llm.Res
 			CompletionTokens: apiResp.Usage.CompletionTokens,
 			TotalTokens:      apiResp.Usage.TotalTokens,
 		},
+	}
+	// DashScope: extract cached_tokens from prompt_tokens_details (may be top-level or nested in usage)
+	if apiResp.PromptTokensDetails != nil {
+		result.Usage.CachedTokens = apiResp.PromptTokensDetails.CachedTokens
 	}
 
 	if len(apiResp.Choices) > 0 {
@@ -250,6 +269,9 @@ func (m *openAIMapper) MapChunk(data []byte) llm.NormalizedChunk {
 			CompletionTokens int `json:"completion_tokens"`
 			TotalTokens      int `json:"total_tokens"`
 		} `json:"usage"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details,omitempty"`
 	}
 
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -263,6 +285,9 @@ func (m *openAIMapper) MapChunk(data []byte) llm.NormalizedChunk {
 				PromptTokens:     raw.Usage.PromptTokens,
 				CompletionTokens: raw.Usage.CompletionTokens,
 				TotalTokens:      raw.Usage.TotalTokens,
+			}
+			if raw.PromptTokensDetails != nil {
+				usage.CachedTokens = raw.PromptTokensDetails.CachedTokens
 			}
 			return llm.NormalizedChunk{Skip: true, Usage: &usage}
 		}

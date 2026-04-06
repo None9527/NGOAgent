@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 )
 
 func TestEvoE2E(t *testing.T) {
@@ -12,7 +14,8 @@ func TestEvoE2E(t *testing.T) {
 	os.MkdirAll(sandboxRoot, 0755)
 	defer os.RemoveAll(sandboxRoot)
 
-	evo := NewEvoTool(sandboxRoot)
+	sbMgr := sandbox.NewManager(sandboxRoot)
+	evo := NewEvoTool(sandboxRoot, sbMgr)
 	ctx := context.Background()
 
 	// Step 1: Setup
@@ -30,7 +33,7 @@ func TestEvoE2E(t *testing.T) {
 	t.Log("Setup:", result.Output)
 
 	var setup struct {
-		EvoID     string `json:"evo_id"`
+		EvoID       string `json:"evo_id"`
 		SandboxPath string `json:"sandbox_path"`
 	}
 	if err := json.Unmarshal([]byte(result.Output), &setup); err != nil {
@@ -43,7 +46,7 @@ func TestEvoE2E(t *testing.T) {
 	// Step 2: Assert (with expected pass and fail)
 	result, err = evo.Execute(ctx, map[string]any{
 		"action":      "assert",
-		"evo_id":    setup.EvoID,
+		"evo_id":      setup.EvoID,
 		"file_exists": []any{"hello.sh", "data.txt", "missing.txt"},
 		"file_contains": map[string]any{
 			"data.txt": "test content",
@@ -76,7 +79,7 @@ func TestEvoE2E(t *testing.T) {
 
 	// Step 3: Cleanup
 	result, err = evo.Execute(ctx, map[string]any{
-		"action":   "cleanup",
+		"action": "cleanup",
 		"evo_id": setup.EvoID,
 	})
 	if err != nil {
@@ -91,4 +94,3 @@ func TestEvoE2E(t *testing.T) {
 		t.Error("sandbox not cleaned up")
 	}
 }
-

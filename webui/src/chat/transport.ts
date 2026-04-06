@@ -12,9 +12,9 @@
  * - reconnectStream()      — GET /v1/chat/reconnect
  */
 
-import type { StreamCallbacks } from './types'
+import type { StreamCallbacks, WSContentPart } from './types'
 import { getApiBase, getAuthToken } from './api'
-import { createWSClient, type WSClient, type WSMessageHandler } from './wsClient'
+import { createWSClient, type WSClient, type WSMessageHandler, type WSUpstreamMsg } from './wsClient'
 import {
   createStreamState,
   processEvent,
@@ -175,6 +175,7 @@ export function chatStreamWS(
   sessionId: string,
   mode: string,
   cb: StreamCallbacks,
+  contentParts?: WSContentPart[],
 ): { cancel: () => void } {
   const state = createStreamState()
   let cancelled = false
@@ -229,7 +230,11 @@ export function chatStreamWS(
   _activeWSHandler = handler
 
   ws.addHandler(handler)
-  ws.send({ type: 'chat', message, session_id: sessionId, mode })
+  const payload: WSUpstreamMsg = { type: 'chat', message, session_id: sessionId, mode }
+  if (contentParts && contentParts.length > 0) {
+    payload.content_parts = contentParts
+  }
+  ws.send(payload)
 
   let cancelFn = () => {
     cancelled = true

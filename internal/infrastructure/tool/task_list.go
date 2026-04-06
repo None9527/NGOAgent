@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 )
 
@@ -24,8 +24,11 @@ func NewTaskListTool(brainDir string) *TaskListTool {
 	}
 }
 
-func (t *TaskListTool) Name() string        { return "task_list" }
-func (t *TaskListTool) Description() string { return prompttext.ToolTaskList }
+func (t *TaskListTool) Name() string { return "task_list" }
+func (t *TaskListTool) Description() string {
+	return `Manage a persistent task list. Tasks are stored in the brain and persist across sessions.
+Use this to track subtasks, todos, and project items.`
+}
 
 func (t *TaskListTool) Schema() map[string]any {
 	return map[string]any{
@@ -137,7 +140,9 @@ func (t *TaskListTool) load() []taskItem {
 		return nil
 	}
 	var tasks []taskItem
-	json.Unmarshal(data, &tasks)
+	if err := json.Unmarshal(data, &tasks); err != nil {
+		slog.Info(fmt.Sprintf("[task_list] WARN: corrupt task data: %v", err))
+	}
 	return tasks
 }
 

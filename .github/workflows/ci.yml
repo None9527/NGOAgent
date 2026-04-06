@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Build
+        run: go build ./cmd/...
+
+      - name: Test with race detector
+        run: go test -race -count=1 -timeout 120s ./internal/...
+
+      - name: File size check
+        run: |
+          echo "=== Go files exceeding 500 lines (excluding generated) ==="
+          OVERSIZED=$(find internal/ -name '*.go' ! -name '*_test.go' ! -name '*.pb.go' \
+            -exec awk 'END{if(NR>500) printf "%s: %d lines\n", FILENAME, NR}' {} \;)
+          if [ -n "$OVERSIZED" ]; then
+            echo "$OVERSIZED"
+            echo "::warning::Some files exceed 500 lines. Consider refactoring."
+          else
+            echo "All files within size limits ✅"
+          fi

@@ -6,15 +6,18 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
+	"github.com/ngoclaw/ngoagent/internal/domain/profile"
+	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 )
 
 // Section represents one numbered section of the system prompt.
 type Section struct {
-	Order    int    // 1-18
-	Name     string // e.g., "Identity"
-	Content  string
-	Priority int // 0=required, 1=high, 2=medium, 3=low (for pruning)
+	Order     int    // 1-18
+	Name      string // e.g., "Identity"
+	Content   string
+	Priority  int  // 0=required, 1=high, 2=medium, 3=low (for pruning)
+	Cacheable bool // content is stable across turns; eligible for provider cache
+	CacheTier int  // 0=dynamic, 1=core(immutable), 2=session(stable)
 }
 
 // EffectivePriority returns the runtime-adjusted priority based on current step.
@@ -54,6 +57,9 @@ type SkillInfo struct {
 	Content     string
 	Command     string
 	Path        string
+	WhenToUse   string
+	Context     string
+	Args        string
 }
 
 // Deps contains all data needed to assemble the system prompt.
@@ -61,8 +67,8 @@ type Deps struct {
 	UserRules      string
 	ProjectContext string
 	SkillInfos     []SkillInfo
-	ConvSummary    string   // KI index for prompt injection
-	MemoryContent  string   // Vector memory retrieval for prompt injection
+	ConvSummary    string // KI index for prompt injection
+	MemoryContent  string // Vector memory retrieval for prompt injection
 	ToolDescs      []ToolDesc
 	Ephemeral      []string
 	FocusFile      string
@@ -80,17 +86,56 @@ type ToolDesc struct {
 
 // Engine assembles the system prompt from sections.
 type Engine struct {
-	homeDir string // ~/.ngoagent/
+	homeDir     string                    // ~/.ngoagent/
+	registry    *Registry                 // Section factory registry
+	allOverlays []profile.BehaviorOverlay // All registered overlays
+	active      []profile.BehaviorOverlay // Currently active overlays
 }
 
-// NewEngine creates a prompt engine.
+// defaultOverlays returns the standard set of behavior overlays.
+func defaultOverlays() []profile.BehaviorOverlay {
+	return []profile.BehaviorOverlay{
+		&profile.CodingOverlay{},
+		&profile.ResearchOverlay{},
+	}
+}
+
+// NewEngine creates a prompt engine with the default section registry.
+// Default active overlays: CodingOverlay (backward compatible).
 func NewEngine() *Engine {
-	return &Engine{}
+	all := defaultOverlays()
+	e := &Engine{registry: NewRegistry(), allOverlays: all, active: all[:1]}
+	e.RegisterDefaults()
+	return e
 }
 
 // NewEngineWithHome creates a prompt engine with a home directory for file discovery.
 func NewEngineWithHome(homeDir string) *Engine {
-	return &Engine{homeDir: homeDir}
+	all := defaultOverlays()
+	e := &Engine{homeDir: homeDir, registry: NewRegistry(), allOverlays: all, active: all[:1]}
+	e.RegisterDefaults()
+	return e
+}
+
+// Registry exposes the section registry for external extension / testing.
+func (e *Engine) Registry() *Registry { return e.registry }
+
+// ActivateOverlays detects which overlays should be active based on user message and workspace.
+// Call this at the start of each agent turn to dynamically compose behavior.
+func (e *Engine) ActivateOverlays(userMessage string, workspaceFiles []string) {
+	e.active = profile.ActiveOverlays(e.allOverlays, userMessage, workspaceFiles)
+	e.RegisterDefaults()
+}
+
+// SetOverlays explicitly sets the active overlays (for testing or /profile command).
+func (e *Engine) SetOverlays(overlays []profile.BehaviorOverlay) {
+	e.active = overlays
+	e.RegisterDefaults()
+}
+
+// ActiveProfile returns the names of all active overlays (for logging).
+func (e *Engine) ActiveProfile() string {
+	return profile.ActiveNames(e.active)
 }
 
 // DiscoverUserRules loads user rules from global and project-level files.
@@ -102,11 +147,86 @@ func (e *Engine) DiscoverUserRules(workspaceDir string) (string, error) {
 	return d.LoadUserRules(), nil
 }
 
-// Assemble builds the complete system prompt.
+// CacheSegment represents one cache-breakpoint segment of the assembled prompt.
+// DashScope supports up to 4 cache_control markers per request.
+type CacheSegment struct {
+	Content   string // Assembled section text
+	Tokens    int    // Estimated token count
+	Cacheable bool   // Should this segment get cache_control marker?
+	Tier      int    // CacheTierCore or CacheTierSession
+}
+
+// AssembleResult carries the cache-split prompt assembly output.
+// Segments are ordered: [CoreStatic, SessionStatic, Dynamic].
+// When provider caching is unavailable, join all segments.
+type AssembleResult struct {
+	Segments    []CacheSegment // Ordered segments (up to 3)
+	Static      string         // Convenience: CoreStatic + SessionStatic concatenated
+	Dynamic     string         // Per-request sections
+	TokensTotal int            // Estimated total tokens
+	TokenStatic int            // Estimated tokens for all static segments
+}
+
+// Assemble builds the complete system prompt (all sections merged).
 // Returns the system prompt string and estimated token count.
 func (e *Engine) Assemble(deps Deps) (string, int) {
 	sections := e.buildSections(deps)
 	return e.prune(sections, deps.TokenBudget, deps.CurrentStep)
+}
+
+// AssembleSplit builds the system prompt split into tiered cache segments.
+// Returns up to 3 segments: CoreStatic (immutable), SessionStatic (per-session),
+// Dynamic (per-request). Each cacheable segment gets its own cache_control marker.
+func (e *Engine) AssembleSplit(deps Deps) AssembleResult {
+	sections := e.buildSections(deps)
+
+	var coreSecs, sessionSecs, dynamicSecs []Section
+	for _, s := range sections {
+		switch s.CacheTier {
+		case CacheTierCore:
+			coreSecs = append(coreSecs, s)
+		case CacheTierSession:
+			sessionSecs = append(sessionSecs, s)
+		default:
+			dynamicSecs = append(dynamicSecs, s)
+		}
+	}
+
+	budget := deps.TokenBudget
+
+	coreStr, coreTok := e.prune(coreSecs, budget, deps.CurrentStep)
+	budget -= coreTok
+
+	sessionStr, sessionTok := e.prune(sessionSecs, budget, deps.CurrentStep)
+	budget -= sessionTok
+
+	dynamicStr, dynamicTok := e.prune(dynamicSecs, budget, deps.CurrentStep)
+
+	var segments []CacheSegment
+	if coreStr != "" {
+		segments = append(segments, CacheSegment{
+			Content: coreStr, Tokens: coreTok, Cacheable: true, Tier: CacheTierCore,
+		})
+	}
+	if sessionStr != "" {
+		segments = append(segments, CacheSegment{
+			Content: sessionStr, Tokens: sessionTok, Cacheable: true, Tier: CacheTierSession,
+		})
+	}
+	if dynamicStr != "" {
+		segments = append(segments, CacheSegment{
+			Content: dynamicStr, Tokens: dynamicTok, Cacheable: false, Tier: CacheTierDynamic,
+		})
+	}
+
+	staticTok := coreTok + sessionTok
+	return AssembleResult{
+		Segments:    segments,
+		Static:      strings.TrimSpace(coreStr + "\n\n" + sessionStr),
+		Dynamic:     dynamicStr,
+		TokensTotal: coreTok + sessionTok + dynamicTok,
+		TokenStatic: staticTok,
+	}
 }
 
 // AssembleSubagent builds a streamlined prompt for sub-agent workers.
@@ -125,33 +245,92 @@ func (e *Engine) AssembleSubagent(deps Deps) (string, int) {
 	return e.prune(sections, deps.TokenBudget, deps.CurrentStep)
 }
 
-// buildSections creates the first-principles ordered sections.
-// Layout: Head(Identity→CoreBehavior→Safety→PreferenceKI→UserRules) → Mid(Tooling→Skills→ToolProtocol→ToolCalling→ProjectCtx) → Tail(ResponseFormat→SemanticKI→Runtime→Focus→Ephemeral)
-// Mid follows natural dependency: WHAT I can do → HOW to work
+// RegisterDefaults registers all canonical sections in order.
+// CacheTier 1 (Core): immutable framework-level content.
+// CacheTier 2 (Session): stable per-session, may change across sessions.
+// CacheTier 0 (Dynamic): per-request content.
+// External callers can call Registry().Register() to add or override sections.
+func (e *Engine) RegisterDefaults() {
+	r := e.registry
+
+	// ═══ Head: Identity + Behavior + Constraints ═══ (CORE — immutable)
+	// Architecture: Omni (universal base) + Σ(active overlays)
+	// Multiple overlays can be active simultaneously for composable behavior.
+	active := e.active // Captured by closures below
+	r.Register(SectionMeta{Name: "Identity", Order: 1, Priority: 0, CacheTier: CacheTierCore,
+		Factory: func(d Deps) Section {
+			return Section{Content: profile.ComposeIdentity(active)}
+		},
+	})
+	r.Register(SectionMeta{Name: "CoreBehavior", Order: 2, Priority: 0, CacheTier: CacheTierCore,
+		Factory: func(d Deps) Section {
+			return Section{Content: profile.OmniBehavior}
+		},
+	})
+	r.Register(SectionMeta{Name: "DoingTasks", Order: 3, Priority: 0, CacheTier: CacheTierCore,
+		Factory: func(d Deps) Section {
+			return Section{Content: profile.ComposeGuidelines(active)}
+		},
+	})
+	r.Register(SectionMeta{Name: "ToneAndStyle", Order: 4, Priority: 1, CacheTier: CacheTierCore,
+		Factory: func(d Deps) Section {
+			return Section{Content: profile.ComposeTone(active)}
+		},
+	})
+	r.Register(SectionMeta{Name: "OutputCapabilities", Order: 5, Priority: 1, CacheTier: CacheTierCore,
+		Factory: func(d Deps) Section { return Section{Content: prompttext.OutputCapabilities} },
+	})
+	r.Register(SectionMeta{Name: "Safety", Order: 6, Priority: 0, CacheTier: CacheTierCore,
+		Factory: func(d Deps) Section { return Section{Content: prompttext.Safety} },
+	})
+
+	// ═══ Mid: Session-stable content ═══ (SESSION — changes across sessions)
+	r.Register(SectionMeta{Name: "UserRules", Order: 7, Priority: 1, CacheTier: CacheTierSession,
+		Factory: func(d Deps) Section { return Section{Content: e.buildUserRules(d.UserRules)} },
+	})
+	r.Register(SectionMeta{Name: "Tooling", Order: 8, Priority: 0, CacheTier: CacheTierSession,
+		Factory: func(d Deps) Section { return Section{Content: e.buildTooling(d.ToolDescs)} },
+	})
+	r.Register(SectionMeta{Name: "Skills", Order: 9, Priority: 1, CacheTier: CacheTierSession,
+		Factory: func(d Deps) Section { return Section{Content: e.buildSkills(d.SkillInfos)} },
+	})
+	r.Register(SectionMeta{Name: "ToolProtocol", Order: 10, Priority: 0, CacheTier: CacheTierCore,
+		Factory: func(d Deps) Section { return Section{Content: prompttext.ToolProtocol} },
+	})
+	r.Register(SectionMeta{Name: "ToolCalling", Order: 11, Priority: 0, CacheTier: CacheTierCore,
+		Factory: func(d Deps) Section { return Section{Content: prompttext.ToolCalling} },
+	})
+	r.Register(SectionMeta{Name: "ProjectContext", Order: 12, Priority: 2, CacheTier: CacheTierSession,
+		Factory: func(d Deps) Section { return Section{Content: e.buildProjectContext(d.ProjectContext)} },
+	})
+	r.Register(SectionMeta{Name: "Variants", Order: 13, Priority: 3, CacheTier: CacheTierSession,
+		Factory: func(d Deps) Section { return Section{Content: ""} },
+	})
+	r.Register(SectionMeta{Name: "ResponseFormat", Order: 14, Priority: 0, CacheTier: CacheTierCore,
+		Factory: func(d Deps) Section { return Section{Content: prompttext.ResponseFormat} },
+	})
+
+	// ═══ Tail: Per-request dynamic content ═══ (DYNAMIC)
+	r.Register(SectionMeta{Name: "KnowledgeIndex", Order: 15, Priority: 1, CacheTier: CacheTierDynamic,
+		Factory: func(d Deps) Section { return Section{Content: e.buildKnowledgeIndex(d.ConvSummary)} },
+	})
+	r.Register(SectionMeta{Name: "SemanticMemory", Order: 16, Priority: 2, CacheTier: CacheTierDynamic,
+		Factory: func(d Deps) Section { return Section{Content: e.buildSemanticMemory(d.MemoryContent)} },
+	})
+	r.Register(SectionMeta{Name: "Runtime", Order: 17, Priority: 1, CacheTier: CacheTierDynamic,
+		Factory: func(d Deps) Section { return Section{Content: e.buildRuntime(d)} },
+	})
+	r.Register(SectionMeta{Name: "Focus", Order: 18, Priority: 2, CacheTier: CacheTierDynamic,
+		Factory: func(d Deps) Section { return Section{Content: e.buildFocus(d.FocusFile)} },
+	})
+	r.Register(SectionMeta{Name: "Ephemeral", Order: 19, Priority: 0, CacheTier: CacheTierDynamic,
+		Factory: func(d Deps) Section { return Section{Content: e.buildEphemeral(d.Ephemeral)} },
+	})
+}
+
+// buildSections materializes sections from the registry.
 func (e *Engine) buildSections(deps Deps) []Section {
-	sections := []Section{
-		// ═══ Head Peak: Identity + Behavior + Constraints (HIGH attention) ═══
-		{Order: 1, Name: "Identity", Content: prompttext.Identity, Priority: 0},
-		{Order: 2, Name: "CoreBehavior", Content: prompttext.CoreBehavior, Priority: 0},
-		{Order: 3, Name: "OutputCapabilities", Content: prompttext.OutputCapabilities, Priority: 1},
-		{Order: 4, Name: "Safety", Content: prompttext.Safety, Priority: 0},
-		{Order: 5, Name: "UserRules", Content: e.buildUserRules(deps.UserRules), Priority: 1},
-		// ═══ Mid Valley: Capability inventory FIRST, then protocol (natural dependency) ═══
-		{Order: 7, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
-		{Order: 8, Name: "Skills", Content: e.buildSkills(deps.SkillInfos), Priority: 1},
-		{Order: 9, Name: "ToolProtocol", Content: prompttext.ToolProtocol, Priority: 0},
-		{Order: 10, Name: "ToolCalling", Content: prompttext.ToolCalling, Priority: 0},
-		{Order: 11, Name: "ProjectContext", Content: e.buildProjectContext(deps.ProjectContext), Priority: 2},
-		{Order: 12, Name: "Variants", Content: "", Priority: 3},
-		// ═══ Tail Peak: Output format + Task Knowledge + Live Context (HIGH attention) ═══
-		{Order: 13, Name: "ResponseFormat", Content: prompttext.ResponseFormat, Priority: 0},
-		{Order: 14, Name: "KnowledgeIndex", Content: e.buildKnowledgeIndex(deps.ConvSummary), Priority: 0},
-		{Order: 15, Name: "SemanticMemory", Content: e.buildSemanticMemory(deps.MemoryContent), Priority: 2},
-		{Order: 16, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
-		{Order: 17, Name: "Focus", Content: e.buildFocus(deps.FocusFile), Priority: 2},
-		{Order: 18, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
-	}
-	return sections
+	return e.registry.Build(deps)
 }
 
 func (e *Engine) buildRuntime(deps Deps) string {
@@ -169,10 +348,11 @@ func (e *Engine) buildTooling(descs []ToolDesc) string {
 	// Only include critical usage notes that the schema can't express.
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("You have %d tools available. Key usage notes:\n", len(descs)))
-	b.WriteString("- Prefer purpose-built tools over run_command (edit_file > sed, grep_search > grep)\n")
+	b.WriteString("- Prefer purpose-built tools over run_command (edit_file > sed, grep_search > grep, tree > ls -R, diff_files > diff)\n")
 	b.WriteString("- run_command: set background=true for long-running processes (servers, builds)\n")
 	b.WriteString("- run_command: working directory PERSISTS between calls\n")
 	b.WriteString("- task_plan: NEVER use write_file for plan.md/task.md/walkthrough.md\n")
+	b.WriteString("- http_fetch: for localhost/internal APIs and simple public endpoints; use web_fetch for Cloudflare-protected or JS-heavy sites\n")
 	return b.String()
 }
 
@@ -180,23 +360,22 @@ func (e *Engine) buildSkills(infos []SkillInfo) string {
 	if len(infos) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString("Available skills:\n")
-	for _, s := range infos {
-		switch {
-		case (s.Type == "executable" || s.Type == "hybrid") && s.Weight == "light":
-			// Light executable: registered as direct ScriptTool
-			b.WriteString(fmt.Sprintf("- %s [tool]: %s\n", s.Name, s.Description))
-		case s.Weight == "heavy":
-			// Heavy: trigger-inject auto-hints + run_command execution
-			b.WriteString(fmt.Sprintf("- %s [run_command]: %s. Entry: %s/run.sh. For full guide: read_file(path='%s/SKILL.md')\n",
-				s.Name, s.Description, s.Path, s.Path))
-		default:
-			// Workflow: read SKILL.md for guide
-			b.WriteString(fmt.Sprintf("- %s [guide]: %s. Read: %s/SKILL.md\n", s.Name, s.Description, s.Path))
+	// Convert SkillInfo → prompttext.SkillEntry for budget-controlled formatting
+	entries := make([]prompttext.SkillEntry, len(infos))
+	for i, s := range infos {
+		entries[i] = prompttext.SkillEntry{
+			Name:        s.Name,
+			Description: s.Description,
+			Type:        s.Type,
+			Weight:      s.Weight,
+			Path:        s.Path,
+			Content:     s.Content,
+			WhenToUse:   s.WhenToUse,
+			Context:     s.Context,
+			Args:        s.Args,
 		}
 	}
-	return b.String()
+	return prompttext.FormatSkillsWithBudget(entries, prompttext.DefaultSkillCharBudget)
 }
 
 func (e *Engine) buildUserRules(rules string) string {
@@ -218,10 +397,11 @@ func (e *Engine) buildKnowledgeIndex(kiIndex string) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("<knowledge_items>\n")
-	b.WriteString("你的知识库索引。每个条目下的 📄 路径是完整知识文件，用 read_file 读取即可获取全部内容。\n\n")
+	// M2: <verified_knowledge> — explicitly high-trust, LLM should prefer this over working_memory
+	b.WriteString("<verified_knowledge>\n")
+	b.WriteString("以下是经过整理和验证的知识库（高可信度）。每个条目的 📄 路径是完整知识文件，用 read_file 读取完整内容。\n\n")
 	b.WriteString(kiIndex)
-	b.WriteString("</knowledge_items>")
+	b.WriteString("</verified_knowledge>")
 	return b.String()
 }
 
@@ -229,9 +409,14 @@ func (e *Engine) buildSemanticMemory(memContent string) string {
 	if memContent == "" {
 		return ""
 	}
-	return "<semantic_memory>\nThe following are fragments from previous conversations that may be relevant to the current context:\n\n" + memContent + "</semantic_memory>"
+	// M2: <working_memory> — explicitly low-trust, verify before using
+	// CC-inspired: MEMORY_DRIFT_CAVEAT + TRUSTING_RECALL_SECTION
+	return "<working_memory>\n" +
+		"以下是本会话的工作记忆片段（自动保存，未经整理，低可信度）。\n" +
+		"⚠️ 与 verified_knowledge 冲突时，以 verified_knowledge 为准。\n" +
+		"涉及文件路径、函数名、API 时，使用前必须通过工具验证其仍然存在。\n\n" +
+		memContent + "</working_memory>"
 }
-
 
 func (e *Engine) buildFocus(path string) string {
 	if path == "" {

@@ -3,6 +3,7 @@ package persistence
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,7 +13,8 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// Conversation represents a chat session.
+// Conversation represents a chat session (sidebar metadata).
+// All other tables reference this via session_id = Conversation.ID.
 type Conversation struct {
 	ID        string `gorm:"primaryKey"`
 	Channel   string `gorm:"index"`
@@ -20,27 +22,6 @@ type Conversation struct {
 	Status    string `gorm:"default:active"` // active / archived
 	CreatedAt time.Time
 	UpdatedAt time.Time
-}
-
-// Message represents a single message in a conversation.
-type Message struct {
-	ID             string `gorm:"primaryKey"`
-	ConversationID string `gorm:"index"`
-	Role           string // system / user / assistant / tool
-	Content        string `gorm:"type:text"`
-	ToolCallID     string
-	CreatedAt      time.Time
-}
-
-// Task represents a structured task item linked to a conversation.
-type Task struct {
-	ID             string `gorm:"primaryKey"`
-	ConversationID string `gorm:"index"`
-	Title          string
-	Status         string `gorm:"default:pending"` // pending / in_progress / done
-	SortOrder      int
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
 }
 
 // Open initializes the SQLite database and runs auto-migrations.
@@ -59,12 +40,19 @@ func Open(dbPath string) (*gorm.DB, error) {
 	}
 
 	// WAL mode for better concurrent read performance
-	sqlDB, _ := db.DB()
-	sqlDB.Exec("PRAGMA journal_mode=WAL")
-	sqlDB.Exec("PRAGMA synchronous=NORMAL")
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("get sql.DB: %w", err)
+	}
+	if _, err := sqlDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		slog.Info(fmt.Sprintf("[persistence] PRAGMA WAL failed: %v", err))
+	}
+	if _, err := sqlDB.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		slog.Info(fmt.Sprintf("[persistence] PRAGMA synchronous failed: %v", err))
+	}
 
-	// Auto-migrate
-	if err := db.AutoMigrate(&Conversation{}, &Message{}, &Task{}, &EvoTrace{}, &EvoEvaluation{}, &EvoRepair{}); err != nil {
+	// Auto-migrate core table only; other tables self-migrate in their NewXxxStore()
+	if err := db.AutoMigrate(&Conversation{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 

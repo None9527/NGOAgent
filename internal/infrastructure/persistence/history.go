@@ -8,14 +8,15 @@ import (
 
 // HistoryMessage is a persisted conversation message.
 type HistoryMessage struct {
-	ID         uint   `gorm:"primarykey"`
-	SessionID  string `gorm:"index"`
-	Role       string // user / assistant / tool / system
-	Content    string `gorm:"type:text"`
-	ToolCalls  string `gorm:"type:text"` // JSON-encoded tool calls
-	ToolCallID string
-	Reasoning  string `gorm:"type:text"` // Thinking/reasoning content
-	CreatedAt  time.Time
+	ID          uint   `gorm:"primarykey"`
+	SessionID   string `gorm:"index"`
+	Role        string // user / assistant / tool / system
+	Content     string `gorm:"type:text"`
+	ToolCalls   string `gorm:"type:text"` // JSON-encoded tool calls
+	ToolCallID  string
+	Reasoning   string `gorm:"type:text"` // Thinking/reasoning content
+	Attachments string `gorm:"type:text"` // B2: JSON-encoded multimodal references [{type,path,mime_type,name}]
+	CreatedAt   time.Time
 }
 
 // HistoryStore persists and retrieves conversation history.

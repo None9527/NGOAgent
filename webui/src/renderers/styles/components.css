@@ -459,7 +459,7 @@
   overflow-y: auto;
   position: relative;
   user-select: text;
-  min-height: 24px;
+  min-height: 40px;
   max-height: 200px;
   background: transparent;
   border: 0;

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 )
 
 // BrainArtifactTool lets the agent read/write versioned brain artifacts.

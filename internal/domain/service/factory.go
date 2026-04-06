@@ -8,7 +8,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -47,11 +47,11 @@ type AgentRun struct {
 // LoopFactory creates and tracks independent AgentLoop instances.
 // All consumers (chat, subagent, forge) go through this factory.
 type LoopFactory struct {
-	baseDeps      Deps           // Shared infrastructure (LLM, tools, brain, etc.)
+	baseDeps      Deps // Shared infrastructure (LLM, tools, brain, etc.)
 	mu            sync.Mutex
 	active        map[string]*AgentRun // All active runs by ID
-	maxConcurrent int                   // Global concurrency limit
-	sem           chan struct{}          // Concurrency semaphore
+	maxConcurrent int                  // Global concurrency limit
+	sem           chan struct{}        // Concurrency semaphore
 }
 
 // NewLoopFactory creates a factory with shared deps and concurrency limit.
@@ -138,6 +138,13 @@ func (f *LoopFactory) RunAsync(ctx context.Context, run *AgentRun, message strin
 		}
 
 		err := run.Loop.Run(runCtx, message)
+
+		// P2 #22: Worker Transcript — persist subagent history to DB for debugging/audit.
+		// Uses run.ID as sessionID so transcripts are queryable by parent session.
+		if run.Loop.deps.HistoryStore != nil {
+			run.Loop.persistTranscript(run.ID)
+		}
+
 		result := ""
 		if collector, ok := run.Channel.DeltaSink().(*OutputCollector); ok {
 			result = collector.StructuredResult()
@@ -186,7 +193,7 @@ func (f *LoopFactory) Stop(runID string) {
 	f.mu.Unlock()
 
 	if ok && run.cancel != nil {
-		log.Printf("[factory] Stopping run %s (%s)", runID, run.Channel.Name())
+		slog.Info(fmt.Sprintf("[factory] Stopping run %s (%s)", runID, run.Channel.Name()))
 		run.cancel()
 	}
 

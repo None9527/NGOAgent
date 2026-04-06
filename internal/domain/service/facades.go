@@ -2,12 +2,12 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/google/uuid"
+	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
 
@@ -38,22 +38,11 @@ func (ce *ChatEngine) Chat(ctx context.Context, sessionID, message string) error
 		if ce.history != nil && len(loop.GetHistory()) == 0 {
 			exports, err := ce.history.LoadAll(sessionID)
 			if err == nil && len(exports) > 0 {
-				msgs := make([]llm.Message, len(exports))
-				for i, e := range exports {
-					msgs[i] = llm.Message{
-						Role:       e.Role,
-						Content:    e.Content,
-						ToolCallID: e.ToolCallID,
-						Reasoning:  e.Reasoning,
-					}
-					if e.ToolCalls != "" {
-						json.Unmarshal([]byte(e.ToolCalls), &msgs[i].ToolCalls)
-					}
-				}
+				msgs := RestoreHistory(exports)
 				loop.SetHistory(msgs)
 				// Auto-compact on resume: prevent full-history overload
 				loop.CompactIfNeeded()
-				log.Printf("[session] Resumed %d messages for session %s", len(msgs), sessionID)
+				slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s", len(msgs), sessionID))
 			}
 		}
 	}
@@ -73,40 +62,28 @@ func (ce *ChatEngine) TouchSession(id string) {
 // RetryLastRun re-runs the last assistant turn by removing it and re-generating.
 func (ce *ChatEngine) RetryLastRun(ctx context.Context, sessionID string) error {
 	loop := ce.pool.Get(sessionID)
-	loop.mu.Lock()
-	// Remove last assistant + tool messages
-	for len(loop.history) > 0 {
-		last := loop.history[len(loop.history)-1]
-		if last.Role == "user" {
-			break
-		}
-		loop.history = loop.history[:len(loop.history)-1]
+	lastUser, err := loop.StripLastTurn()
+	if err != nil {
+		return err
 	}
-	// Get last user message
-	lastUser := ""
-	if len(loop.history) > 0 {
-		lastUser = loop.history[len(loop.history)-1].Content
-		loop.history = loop.history[:len(loop.history)-1]
-	}
-	loop.mu.Unlock()
-
 	if lastUser == "" {
-		return fmt.Errorf("no previous user message to retry")
+		return agenterr.NewValidation("retry", "no previous user message to retry")
 	}
 	return loop.Run(ctx, lastUser)
 }
 
 // StopChat signals the agent loop for a specific session to stop.
 func (ce *ChatEngine) StopChat(sessionID string) {
-	loop := ce.pool.Get(sessionID)
-	loop.Stop()
+	if loop := ce.pool.GetIfExists(sessionID); loop != nil {
+		loop.Stop()
+	}
 }
 
 // DeleteSession removes a session's history, metadata, and loop from pool.
 func (ce *ChatEngine) DeleteSession(id string) error {
 	if ce.history != nil {
 		if err := ce.history.DeleteSession(id); err != nil {
-			log.Printf("[session] delete history error: %v", err)
+			slog.Info(fmt.Sprintf("[session] delete history error: %v", err))
 		}
 	}
 	ce.pool.Remove(id)
@@ -141,7 +118,7 @@ type SessionManager struct {
 	mu           sync.RWMutex
 	sessions     map[string]*SessionState
 	active       string            // backward-compat: global active for single-user mode
-	activeByUser map[string]string  // userKey → sessionID
+	activeByUser map[string]string // userKey → sessionID
 	repo         SessionRepo
 }
 
@@ -176,7 +153,7 @@ func (sm *SessionManager) New(title string) *SessionState {
 // Returns the DB-generated ID.
 func (sm *SessionManager) CreatePersisted(channel, title string) (string, error) {
 	if sm.repo == nil {
-		return "", fmt.Errorf("no session repo")
+		return "", agenterr.NewNotFound("session_repo", "")
 	}
 	id, err := sm.repo.CreateConversation(channel, title)
 	if err != nil {

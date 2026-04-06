@@ -4,14 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
+	"log/slog"
 	"mime"
 	"os"
 	"path/filepath"
 	"strings"
 
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 )
 
 // ViewMediaTool loads media files (images, video, audio) for native VLM perception.
@@ -24,8 +23,12 @@ func NewViewMediaTool(serverAddr string) *ViewMediaTool {
 	return &ViewMediaTool{serverAddr: serverAddr}
 }
 
-func (t *ViewMediaTool) Name() string        { return "view_media" }
-func (t *ViewMediaTool) Description() string { return prompttext.ToolViewMedia }
+func (t *ViewMediaTool) Name() string { return "view_media" }
+func (t *ViewMediaTool) Description() string {
+	return `Load media files (images/videos/audio) for native multimodal perception.
+Media is injected into your next LLM call. Describe what you see after calling this tool.
+- paths: array of absolute file paths (max 8).`
+}
 
 func (t *ViewMediaTool) Schema() map[string]any {
 	return map[string]any{
@@ -156,7 +159,7 @@ func (t *ViewMediaTool) handleImage(path, ext string) (map[string]string, error)
 	}
 
 	dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
-	log.Printf("[view_media] image: %s (%s, %d bytes)", filepath.Base(path), mimeType, len(data))
+	slog.Info(fmt.Sprintf("[view_media] image: %s (%s, %d bytes)", filepath.Base(path), mimeType, len(data)))
 
 	return map[string]string{
 		"type": "image_url",
@@ -175,12 +178,12 @@ func (t *ViewMediaTool) handleVideo(path string) (map[string]string, error) {
 
 	// Warn for very large videos (>100MB)
 	if info.Size() > 100*1024*1024 {
-		log.Printf("[view_media] WARNING: large video %s (%d MB)", filepath.Base(path), info.Size()/(1024*1024))
+		slog.Info(fmt.Sprintf("[view_media] WARNING: large video %s (%d MB)", filepath.Base(path), info.Size()/(1024*1024)))
 	}
 
 	// Build accessible URL via the server's /v1/file proxy
 	fileURL := fmt.Sprintf("%s/v1/file?path=%s", t.serverAddr, path)
-	log.Printf("[view_media] video: %s → %s", filepath.Base(path), fileURL)
+	slog.Info(fmt.Sprintf("[view_media] video: %s → %s", filepath.Base(path), fileURL))
 
 	return map[string]string{
 		"type": "video",
@@ -203,7 +206,7 @@ func (t *ViewMediaTool) handleAudio(path, ext string) (map[string]string, error)
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(data)
-	log.Printf("[view_media] audio: %s (%s, %d bytes)", filepath.Base(path), format, len(data))
+	slog.Info(fmt.Sprintf("[view_media] audio: %s (%s, %d bytes)", filepath.Base(path), format, len(data)))
 
 	return map[string]string{
 		"type":   "input_audio",

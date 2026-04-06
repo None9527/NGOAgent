@@ -12,6 +12,7 @@ type Router struct {
 	modelMap  map[string]string // model → provider name
 	fallback  []string          // fallback chain of provider names
 	current   string            // current active model
+	health    *HealthChecker    // P2 E1: provider health probing (nil = skip)
 }
 
 // NewRouter creates a router from config.
@@ -91,7 +92,13 @@ func (r *Router) SetDefault(model string) error {
 }
 
 // ResolveWithFallback tries the requested model first, then walks the fallback chain.
+// P2 E1: skips providers marked unhealthy by the HealthChecker.
 func (r *Router) ResolveWithFallback(model string) (Provider, string, error) {
+	return r.ResolveWithExclusions(model, nil)
+}
+
+// ResolveWithExclusions behaves like ResolveWithFallback but skips any explicitly excluded provider names.
+func (r *Router) ResolveWithExclusions(model string, excluded []string) (Provider, string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -99,15 +106,32 @@ func (r *Router) ResolveWithFallback(model string) (Provider, string, error) {
 		model = r.current
 	}
 
-	// Try primary
-	if provName, ok := r.modelMap[model]; ok {
+	isExcluded := func(p string) bool {
+		for _, ex := range excluded {
+			if ex == p {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Try primary (if healthy and not excluded)
+	if provName, ok := r.modelMap[model]; ok && !isExcluded(provName) {
 		if prov, ok := r.providers[provName]; ok {
-			return prov, model, nil
+			if r.health == nil || r.health.IsHealthy(provName) {
+				return prov, model, nil
+			}
 		}
 	}
 
-	// Fallback: try each provider's first model
+	// Fallback: try each provider's first model (skip unhealthy and excluded)
 	for _, provName := range r.fallback {
+		if isExcluded(provName) {
+			continue
+		}
+		if r.health != nil && !r.health.IsHealthy(provName) {
+			continue
+		}
 		prov, ok := r.providers[provName]
 		if !ok {
 			continue
@@ -119,6 +143,24 @@ func (r *Router) ResolveWithFallback(model string) (Provider, string, error) {
 	}
 
 	return nil, "", fmt.Errorf("no available provider for model %s and fallback exhausted", model)
+}
+
+// SetHealthChecker injects a health checker (call after construction, before use).
+func (r *Router) SetHealthChecker(hc *HealthChecker) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.health = hc
+}
+
+// ProviderMap returns the internal providers map (for HealthChecker startup).
+func (r *Router) ProviderMap() map[string]Provider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]Provider, len(r.providers))
+	for k, v := range r.providers {
+		out[k] = v
+	}
+	return out
 }
 
 // Reload replaces providers (for hot-reload from config change).

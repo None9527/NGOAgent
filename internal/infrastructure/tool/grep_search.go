@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 )
 
@@ -17,8 +16,12 @@ import (
 // Output format mirrors CC/Anti: "File: path\nL{n}: content\n---"
 type GrepSearchTool struct{}
 
-func (t *GrepSearchTool) Name() string        { return "grep_search" }
-func (t *GrepSearchTool) Description() string { return prompttext.ToolGrepSearch }
+func (t *GrepSearchTool) Name() string { return "grep_search" }
+func (t *GrepSearchTool) Description() string {
+	return `Search file contents using ripgrep.
+- query: search term or regex (is_regex=true).
+- includes: glob filters (e.g., "*.go").`
+}
 
 func (t *GrepSearchTool) Schema() map[string]any {
 	return map[string]any{

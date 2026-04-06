@@ -6,9 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 )
 
 // RunCommandTool executes shell commands via the sandbox.
@@ -20,17 +19,23 @@ func NewRunCommandTool(sb *sandbox.Manager) *RunCommandTool {
 	return &RunCommandTool{sandbox: sb}
 }
 
-func (t *RunCommandTool) Name() string        { return "run_command" }
-func (t *RunCommandTool) Description() string { return prompttext.ToolRunCommand }
+func (t *RunCommandTool) Name() string { return "run_command" }
+func (t *RunCommandTool) Description() string {
+	return `Execute a shell command. Set background=true for long-running processes (servers, builds).
+- cwd: persists between calls automatically
+- wait_ms_before_async: wait before auto-backgrounding (use 500 for slow cmds like npm install, go build)
+- Output >50KB is truncated (head + tail)`
+}
 
 func (t *RunCommandTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"command":    map[string]any{"type": "string", "description": "Shell command to execute"},
-			"cwd":        map[string]any{"type": "string", "description": "Working directory (optional, defaults to persisted cwd)"},
-			"timeout_ms": map[string]any{"type": "integer", "description": "Timeout in milliseconds (default: 30000)"},
-			"background": map[string]any{"type": "boolean", "description": "Run in background (default: false)"},
+			"command":    map[string]any{"type": "string", "description": "Shell command to execute. Use && to chain commands, not ;", "minLength": 1},
+			"cwd":        map[string]any{"type": "string", "description": "Working directory (absolute path). Defaults to persisted cwd."},
+			"timeout_ms": map[string]any{"type": "integer", "description": "Timeout in ms. Default 30000. Use 120000 for builds.", "default": 30000},
+			"background": map[string]any{"type": "boolean", "description": "Run in background, returns command_id. Default false.", "default": false},
+			"detach":     map[string]any{"type": "boolean", "description": "Launch as detached service (survives agent restart). Use for persistent servers like uvicorn, npm run dev. No output tracking.", "default": false},
 			"wait_ms_before_async": map[string]any{
 				"type":        "integer",
 				"description": "Wait this many ms for sync completion; if not done, auto-background and return command_id. Use 500 for potentially slow commands.",
@@ -44,6 +49,7 @@ func (t *RunCommandTool) Execute(ctx context.Context, args map[string]any) (dtoo
 	command, _ := args["command"].(string)
 	cwd, _ := args["cwd"].(string)
 	background, _ := args["background"].(bool)
+	detach, _ := args["detach"].(bool)
 	timeoutMs := 30000.0
 	waitMsBeforeAsync := 0.0
 
@@ -56,6 +62,15 @@ func (t *RunCommandTool) Execute(ctx context.Context, args map[string]any) (dtoo
 
 	if command == "" {
 		return dtool.ToolResult{Output: "Error: 'command' is required"}, nil
+	}
+
+	// Detached mode: fully independent service, survives agent restart
+	if detach {
+		pid, err := t.sandbox.RunDetached(command, cwd)
+		if err != nil {
+			return dtool.ToolResult{Output: fmt.Sprintf("Error launching detached service: %v", err)}, nil
+		}
+		return dtool.ToolResult{Output: fmt.Sprintf("Service launched (detached).\nPID: %d\nNote: not tracked by agent. Use 'kill %d' to stop.", pid, pid)}, nil
 	}
 
 	// Explicit background mode

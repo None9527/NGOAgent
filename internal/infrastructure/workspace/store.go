@@ -52,6 +52,7 @@ func (s *Store) WriteContext(content string) error {
 	os.MkdirAll(s.agentDir, 0755)
 	return os.WriteFile(filepath.Join(s.agentDir, "context.md"), []byte(content), 0644)
 }
+
 // SkillsDir returns the project-level skills directory.
 func (s *Store) SkillsDir() string {
 	return filepath.Join(s.agentDir, "skills")
@@ -69,6 +70,20 @@ func (s *Store) WorkDir() string { return s.workDir }
 func (s *Store) Exists() bool {
 	_, err := os.Stat(s.agentDir)
 	return err == nil
+}
+
+// RootFiles returns the names of top-level files and directories in the workspace.
+// Used by overlay Signal detection to determine which profiles should activate.
+func (s *Store) RootFiles() []string {
+	entries, err := os.ReadDir(s.workDir)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 // AppendContext appends to context.md with dedup and 5KB max.

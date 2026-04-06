@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,10 +75,10 @@ func Bootstrap() error {
 		if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 			return fmt.Errorf("write %s: %w", configPath, err)
 		}
-		log.Printf("╔══════════════════════════════════════════════════════════════╗")
-		log.Printf("║  AUTH TOKEN GENERATED (save this for frontend connection):   ║")
-		log.Printf("║  %s  ║", token)
-		log.Printf("╚══════════════════════════════════════════════════════════════╝")
+		slog.Info("╔══════════════════════════════════════════════════════════════╗")
+		slog.Info("║  AUTH TOKEN GENERATED (save this for frontend connection):   ║")
+		slog.Info(fmt.Sprintf("║  %s  ║", token))
+		slog.Info("╚══════════════════════════════════════════════════════════════╝")
 	}
 
 	// Write other default files (only if missing)

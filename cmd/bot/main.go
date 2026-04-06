@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,14 +18,16 @@ func main() {
 
 	b, err := bot.New(cfg)
 	if err != nil {
-		log.Fatalf("[TGBot] Failed to initialize: %v", err)
+		slog.Error(fmt.Sprintf("[TGBot] Failed to initialize: %v", err))
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if err := b.Run(ctx); err != nil {
-		log.Fatalf("[TGBot] Run error: %v", err)
+		slog.Error(fmt.Sprintf("[TGBot] Run error: %v", err))
+		os.Exit(1)
 	}
 }
 

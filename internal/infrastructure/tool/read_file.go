@@ -7,15 +7,18 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 )
 
 // ReadFileTool reads file contents with optional line range.
 type ReadFileTool struct{}
 
-func (t *ReadFileTool) Name() string        { return "read_file" }
-func (t *ReadFileTool) Description() string { return prompttext.ToolReadFile }
+func (t *ReadFileTool) Name() string { return "read_file" }
+func (t *ReadFileTool) Description() string {
+	return `Read a file (text or image). Absolute path required.
+- Default: first 800 lines. Use start_line/end_line for ranges.
+- Images (PNG/JPG) are read as multimodal data. Files >10MB rejected.`
+}
 
 func (t *ReadFileTool) Schema() map[string]any {
 	return map[string]any{
@@ -35,6 +38,13 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 		return dtool.ToolResult{Output: "Error: 'path' is required"}, nil
 	}
 	path = filepath.Clean(path)
+
+	// P1-D #43: Validate path — resolve symlinks, block sensitive paths (symmetric with write/edit)
+	if resolved, err := ValidatePath(path, ""); err != nil {
+		return dtool.ToolResult{Output: fmt.Sprintf("Error: path validation failed: %v", err)}, nil
+	} else {
+		path = resolved
+	}
 
 	// Large file protection: reject files > 10MB to prevent OOM
 	info, err := os.Stat(path)
@@ -77,6 +87,9 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 		ext := filepath.Ext(path)
 		return dtool.ToolResult{Output: fmt.Sprintf("Binary file detected: %s\nSize: %d bytes\nExtension: %s\n\nThis appears to be a binary file. Use appropriate tools for binary content.", path, size, ext)}, nil
 	}
+
+	// P2 G1: Check for external modifications before reading
+	extModified, extWarning := globalFileWatcher.CheckRead(path)
 
 	// Track read for FileState (edit_file E6 checks this)
 	globalFileState.MarkRead(path, data)
@@ -122,17 +135,17 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 	}
 
 	if endLine < len(lines) {
-		b.WriteString(fmt.Sprintf("\n... (%d more lines not shown)\n", len(lines)-endLine))
+		b.WriteString(fmt.Sprintf(
+			"\n[TRUNCATED: showing lines %d-%d of %d total. To read next chunk: read_file(path='%s', start_line=%d)]\n",
+			startLine, endLine, len(lines), path, endLine+1,
+		))
 	}
 
 	output := b.String()
 
-	// L2 Progressive Disclosure: detect SKILL.md reads and emit signal
-	if filepath.Base(path) == "SKILL.md" {
-		skillDir := filepath.Dir(path)
-		skillName := filepath.Base(skillDir)
-		return dtool.SkillLoadedResult(output, skillName, skillDir)
+	// P2 G1: Prepend external modification warning if detected
+	if extModified {
+		output = extWarning + "\n\n" + output
 	}
-
 	return dtool.ToolResult{Output: output}, nil
 }

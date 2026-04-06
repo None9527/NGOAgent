@@ -17,7 +17,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Title string `json:"title"` }
+		var req struct {
+			Title string `json:"title"`
+		}
 		json.NewDecoder(r.Body).Decode(&req)
 		json.NewEncoder(w).Encode(s.api.NewSession(req.Title))
 	})
@@ -48,7 +50,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ ID string `json:"id"` }
+		var req struct {
+			ID string `json:"id"`
+		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if err := s.api.DeleteSession(req.ID); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -98,7 +102,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Name string `json:"name"` }
+		var req struct {
+			Name string `json:"name"`
+		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if err := s.api.EnableTool(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -112,7 +118,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Name string `json:"name"` }
+		var req struct {
+			Name string `json:"name"`
+		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if err := s.api.DisableTool(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -161,7 +169,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Name string `json:"name"` }
+		var req struct {
+			Name string `json:"name"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 			http.Error(w, "name required", http.StatusBadRequest)
 			return
@@ -243,7 +253,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Name string `json:"name"` }
+		var req struct {
+			Name string `json:"name"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
@@ -279,7 +291,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Name string `json:"name"` }
+		var req struct {
+			Name string `json:"name"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
@@ -356,7 +370,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ ID string `json:"id"` }
+		var req struct {
+			ID string `json:"id"`
+		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if err := s.api.DeleteKI(req.ID); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -427,7 +443,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Name string `json:"name"` }
+		var req struct {
+			Name string `json:"name"`
+		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if err := s.api.DeleteCronJob(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -441,7 +459,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Name string `json:"name"` }
+		var req struct {
+			Name string `json:"name"`
+		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if err := s.api.EnableCronJob(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -455,7 +475,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Name string `json:"name"` }
+		var req struct {
+			Name string `json:"name"`
+		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if err := s.api.DisableCronJob(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -469,7 +491,9 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Name string `json:"name"` }
+		var req struct {
+			Name string `json:"name"`
+		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if err := s.api.RunCronJobNow(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)

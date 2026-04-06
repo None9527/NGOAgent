@@ -8,42 +8,45 @@ import (
 
 // EvoTrace records the structured execution trace of a single Run.
 type EvoTrace struct {
-	ID        uint      `gorm:"primarykey"`
-	SessionID string    `gorm:"index"`
-	RunIndex  int       // Which run in this session (1, 2, 3...)
-	Steps     string    `gorm:"type:text"` // JSON: []TraceStep
-	Summary   string    `gorm:"type:text"` // LLM-compressed summary (lazy-generated)
-	TokensIn  int       // Total input tokens
-	TokensOut int       // Total output tokens
-	Duration  int       // Duration in milliseconds
-	CreatedAt time.Time
+	ID            uint   `gorm:"primarykey"`
+	SessionID     string `gorm:"index"`
+	RunIndex      int    // Which run in this session (1, 2, 3...)
+	Steps         string `gorm:"type:text"` // JSON: []TraceStep (full args + full output)
+	Summary       string `gorm:"type:text"` // LLM-compressed summary (lazy-generated)
+	TokensIn      int    // Total input tokens
+	TokensOut     int    // Total output tokens
+	Duration      int    // Duration in milliseconds
+	Model         string // Model used for execution (e.g. "qwen-72b")
+	UserMessage   string `gorm:"type:text"` // Original user task description
+	FinalResponse string `gorm:"type:text"` // Agent's final text response (for RL training)
+	CreatedAt     time.Time
 }
 
 // EvoEvaluation records the evaluation sub-agent's judgment.
 type EvoEvaluation struct {
-	ID        uint      `gorm:"primarykey"`
-	SessionID string    `gorm:"index"`
-	TraceID   uint      `gorm:"index"` // FK → EvoTrace
-	Score     float64   // Quality score 0.0-1.0
-	Passed    bool      // Whether evaluation passed
-	ErrorType string    // intent_mismatch | param_wrong | tool_wrong | capability_gap | quality_low | ""
-	Issues    string    `gorm:"type:text"` // JSON: []Issue
-	Feedback  string    `gorm:"type:text"` // Raw user feedback text
-	Model     string    // Model used for evaluation
+	ID        uint    `gorm:"primarykey"`
+	SessionID string  `gorm:"index"`
+	TraceID   uint    `gorm:"index"` // FK → EvoTrace
+	Score     float64 // Quality score 0.0-1.0
+	Passed    bool    // Whether evaluation passed
+	ErrorType string  // intent_mismatch | param_wrong | tool_wrong | capability_gap | quality_low | ""
+	Issues    string  `gorm:"type:text"` // JSON: []Issue
+	Feedback  string  `gorm:"type:text"` // Raw user feedback text
+	Model     string  // Model used for evaluation
 	CreatedAt time.Time
 }
 
 // EvoRepair records a single repair attempt.
 type EvoRepair struct {
-	ID          uint      `gorm:"primarykey"`
-	SessionID   string    `gorm:"index"`
-	EvalID      uint      `gorm:"index"` // FK → EvoEvaluation
-	Strategy    string    // param_fix | tool_swap | re_route | iterate | escalate
-	RepairTrace string    `gorm:"type:text"` // JSON: repair execution TraceStep[]
+	ID          uint   `gorm:"primarykey"`
+	SessionID   string `gorm:"index"`
+	EvalID      uint   `gorm:"index"` // FK → EvoEvaluation
+	Strategy    string // param_fix | tool_swap | re_route | iterate | escalate
+	RepairTrace string `gorm:"type:text"` // JSON: repair execution TraceStep[]
 	Success     bool
-	NewScore    float64   // Post-repair score
+	NewScore    float64 // Post-repair score
 	TokensUsed  int
-	Duration    int       // Duration in milliseconds
+	Duration    int // Duration in milliseconds
 	CreatedAt   time.Time
 }
 
@@ -119,14 +122,14 @@ func (s *EvoStore) CleanOld(days int) error {
 
 // EvoStats holds aggregated evolution metrics.
 type EvoStats struct {
-	TotalEvals        int            `json:"total_evals"`
-	PassedEvals       int            `json:"passed_evals"`
-	SuccessRate       float64        `json:"success_rate"`
-	AvgScore          float64        `json:"avg_score"`
-	RepairAttempts    int            `json:"repair_attempts"`
-	RepairSuccesses   int            `json:"repair_successes"`
-	RepairSuccessRate float64        `json:"repair_success_rate"`
-	TopErrorTypes     []ErrorCount   `json:"top_error_types"`
+	TotalEvals        int             `json:"total_evals"`
+	PassedEvals       int             `json:"passed_evals"`
+	SuccessRate       float64         `json:"success_rate"`
+	AvgScore          float64         `json:"avg_score"`
+	RepairAttempts    int             `json:"repair_attempts"`
+	RepairSuccesses   int             `json:"repair_successes"`
+	RepairSuccessRate float64         `json:"repair_success_rate"`
+	TopErrorTypes     []ErrorCount    `json:"top_error_types"`
 	TopStrategies     []StrategyCount `json:"top_strategies"`
 }
 

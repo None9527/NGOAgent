@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 )
@@ -12,6 +13,7 @@ import (
 //   - Turn level: Check() — runs after each LLM response (4 original rules)
 //   - Step level: PreToolCheck()/PostToolRecord() — runs per tool call (3 planning rules)
 type BehaviorGuard struct {
+	mu            sync.Mutex // Protects all mutable fields from concurrent access (P0-1)
 	cfg           *config.AgentConfig
 	lastResponses []string // Track last N responses for repetition detection
 	toolCallCount int
@@ -19,18 +21,25 @@ type BehaviorGuard struct {
 	highCount     int // Consecutive high-severity violations
 
 	// Step-level tracking (new — mirrors Anti's pre/post_tool hooks)
-	turnToolNames    []string // All tool names called this turn
-	hasBoundary      bool     // This turn has called task_boundary
-	hasNotify        bool     // This turn has called notify_user
-	codeModInPlan    int      // write/edit calls while isPlanning=true
-	isPlanning       bool     // Sync'd from doPrepare each turn
-	planExists       bool     // Sync'd from doPrepare each turn
-	taskMdExists     bool     // Sync'd from doPrepare each turn
-	currentMode      string   // Sync'd from doPrepare (planning/execution/verification)
-	forceToolName    string   // Non-empty → force this tool on next LLM call
-	stepsSinceBoundary int    // Tool calls since last task_boundary (for ephemeral gating)
-	recentTools      []string // Last 10 tool names for sequence cycle detection
-	pendingCycleWarn string   // Pending cycle warning message for next Check()
+	turnToolNames      []string    // All tool names called this turn
+	hasBoundary        bool        // This turn has called task_boundary
+	hasNotify          bool        // This turn has called notify_user
+	codeModInPlan      int         // write/edit calls while isPlanning=true
+	isPlanning         bool        // Sync'd from doPrepare each turn
+	planExists         bool        // Sync'd from doPrepare each turn
+	taskMdExists       bool        // Sync'd from doPrepare each turn
+	currentMode        string      // Sync'd from doPrepare (planning/execution/verification)
+	forceToolName      string      // Non-empty → force this tool on next LLM call
+	stepsSinceBoundary int         // Tool calls since last task_boundary (for ephemeral gating)
+	recentTools        []string    // Last 10 tool names for sequence cycle detection
+	pendingCycleWarn   string      // Pending cycle warning message for next Check()
+	skillReader        SkillReader // P2 G2: dynamic bundled skill reader (nil = use hardcoded fallback)
+}
+
+// SkillReader provides read access to bundled skills for Guard recovery messages.
+// Decoupled from skill.Manager to avoid import cycles.
+type SkillReader interface {
+	GetBundledContent(name string) (string, bool)
 }
 
 // GuardVerdict is the result of a guard check.
@@ -50,7 +59,26 @@ func NewBehaviorGuard(cfg *config.AgentConfig) *BehaviorGuard {
 
 // UpdateConfig hot-swaps the guard's config reference (called by agent subscriber).
 func (g *BehaviorGuard) UpdateConfig(cfg *config.AgentConfig) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.cfg = cfg
+}
+
+// SetSkillReader injects a dynamic skill reader for Guard recovery messages.
+func (g *BehaviorGuard) SetSkillReader(sr SkillReader) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.skillReader = sr
+}
+
+// getSkillContent retrieves bundled skill content dynamically, with hardcoded fallback.
+func (g *BehaviorGuard) getSkillContent(skillName, fallback string) string {
+	if g.skillReader != nil {
+		if content, ok := g.skillReader.GetBundledContent(skillName); ok {
+			return content
+		}
+	}
+	return fallback
 }
 
 // ═══════════════════════════════════════════
@@ -60,6 +88,8 @@ func (g *BehaviorGuard) UpdateConfig(cfg *config.AgentConfig) {
 // Check evaluates guard rules against the latest response.
 // Uses gradient intervention: near-repeats get warnings before termination.
 func (g *BehaviorGuard) Check(response string, toolCalls int, step int) GuardVerdict {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.stepCount = step
 	g.toolCallCount += toolCalls
 
@@ -98,9 +128,15 @@ func (g *BehaviorGuard) Check(response string, toolCalls int, step int) GuardVer
 							Message: "Agent is in a repetition loop (3 identical responses). Terminating."}
 					}
 				}
-				// 2nd exact repeat → strong warn
+				// 2nd exact repeat → strong warn with loop_breaker skill content
+				recovery := g.getSkillContent("_loop_breaker",
+					"1. STOP what you're doing\n"+
+						"2. Use read_file to see the actual current state of the file\n"+
+						"3. If edit_file keeps failing, try write_file with the FULL corrected content\n"+
+						"4. If you've tried 3+ approaches, ask the user for help")
 				return GuardVerdict{Action: "warn", Rule: "repetition_near",
-					Message: "Your last two responses are identical. You MUST take a different approach. Re-read the context and try an alternative strategy."}
+					Message: "Your last two responses are identical. You MUST take a different approach.\n\n" +
+						"RECOVERY STRATEGY (_loop_breaker):\n" + recovery}
 			}
 
 			// Near-repeat: n-gram Jaccard similarity > 0.85
@@ -115,6 +151,13 @@ func (g *BehaviorGuard) Check(response string, toolCalls int, step int) GuardVer
 	if g.pendingCycleWarn != "" {
 		msg := g.pendingCycleWarn
 		g.pendingCycleWarn = "" // consumed
+		// P2 G2: Append stuck_recovery advice from bundled skill
+		recovery := g.getSkillContent("_stuck_recovery",
+			"1. Re-read the user's request\n"+
+				"2. Check what you've already done — what files did you read?\n"+
+				"3. Run 'find . -name *.go | head -20' to understand project structure\n"+
+				"4. Start with the smallest possible change, verify it works")
+		msg += "\n\nRECOVERY STRATEGY (_stuck_recovery):\n" + recovery
 		return GuardVerdict{Action: "warn", Rule: "tool_cycle", Message: msg}
 	}
 
@@ -179,6 +222,8 @@ func ngramJaccardSimilarity(a, b string) float64 {
 
 // SetModeState is called by doPrepare to sync planning/mode context.
 func (g *BehaviorGuard) SetModeState(isPlanning, planExists, taskMdExists bool, mode string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.isPlanning = isPlanning
 	g.planExists = planExists
 	g.taskMdExists = taskMdExists
@@ -188,6 +233,8 @@ func (g *BehaviorGuard) SetModeState(isPlanning, planExists, taskMdExists bool, 
 // PreToolCheck runs before each tool execution (step-level guard).
 // Returns nil if no issue, or a verdict with an ephemeral to inject.
 func (g *BehaviorGuard) PreToolCheck(toolName string) *GuardVerdict {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.turnToolNames = append(g.turnToolNames, toolName)
 
 	// Rule 6: Planning + no plan.md + code modification → warn
@@ -218,6 +265,8 @@ func (g *BehaviorGuard) PreToolCheck(toolName string) *GuardVerdict {
 
 // PostToolRecord runs after each tool execution to track protocol compliance.
 func (g *BehaviorGuard) PostToolRecord(toolName string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.stepsSinceBoundary++
 	switch toolName {
 	case "task_boundary":
@@ -268,12 +317,16 @@ func (g *BehaviorGuard) detectToolCycle() string {
 // StepsSinceBoundary returns steps since last task_boundary call.
 // Used by doPrepare for ephemeral injection gating (Anti's num_steps pattern).
 func (g *BehaviorGuard) StepsSinceBoundary() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return g.stepsSinceBoundary
 }
 
 // ConsumeForceToolName returns and clears any pending force_tool_name.
 // Called by doGenerate to pass tool_choice to the LLM API.
 func (g *BehaviorGuard) ConsumeForceToolName() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	name := g.forceToolName
 	g.forceToolName = ""
 	return name
@@ -282,11 +335,15 @@ func (g *BehaviorGuard) ConsumeForceToolName() string {
 // SetForceToolName sets the force tool for the next LLM call.
 // Used by the plan→notify_user deterministic enforcement chain.
 func (g *BehaviorGuard) SetForceToolName(name string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.forceToolName = name
 }
 
 // ResetTurn resets per-turn counters (call at start of each Run).
 func (g *BehaviorGuard) ResetTurn() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.toolCallCount = 0
 	g.turnToolNames = g.turnToolNames[:0]
 	g.hasBoundary = false

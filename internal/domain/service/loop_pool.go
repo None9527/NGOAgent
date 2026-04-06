@@ -1,11 +1,11 @@
 package service
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 )
 
@@ -259,7 +259,7 @@ func (p *LoopPool) SetPlanModeAll(mode string) {
 }
 
 // ErrPoolFull is returned when the pool is at max capacity and no idle loops can be evicted.
-var ErrPoolFull = fmt.Errorf("session pool is full: all sessions are active")
+var ErrPoolFull = agenterr.NewBusy("session pool full: all sessions are active")
 
 // ExtractUserKey derives a user identifier from a session ID.
 // Convention: "tg-{userId}-{hash}" → "tg-{userId}", "web-{uuid}" → "web-{uuid}"
@@ -274,4 +274,3 @@ func ExtractUserKey(sid string) string {
 	// Web/CLI format: full sessionID is the user key (single user per session)
 	return sid
 }
-

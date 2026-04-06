@@ -13,8 +13,8 @@ import (
 
 // SearchResult holds a single vector search result.
 type SearchResult struct {
-	ID         string
-	Score      float64 // cosine similarity
+	ID    string
+	Score float64 // cosine similarity
 }
 
 // VectorIndex is an in-memory brute-force vector index with disk persistence.
@@ -84,6 +84,13 @@ func (idx *VectorIndex) Has(id string) bool {
 	defer idx.mu.RUnlock()
 	_, ok := idx.vectors[id]
 	return ok
+}
+
+// GetVec returns the raw vector for an ID, or nil if not found.
+func (idx *VectorIndex) GetVec(id string) []float32 {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.vectors[id]
 }
 
 // ═══════════════════════════════════════════

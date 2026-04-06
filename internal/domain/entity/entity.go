@@ -28,7 +28,7 @@ type Skill struct {
 	ID          string
 	Name        string
 	Description string
-	Type        string   // executable / workflow
+	Type        string   // pipeline / executable / workflow
 	Weight      string   // light (→ ScriptTool) / heavy (→ Trigger-Inject + run_command)
 	Triggers    []string // Trigger words extracted from description for auto-injection
 	Rules       []string // Execution rules auto-injected on trigger match
@@ -36,8 +36,17 @@ type Skill struct {
 	Command     string // Quick command extracted from SKILL.md bash block
 	Path        string
 	Enabled     bool
-	EvoStatus string // draft / evolving / evolved / degraded / re-evolving
+	EvoStatus   string // draft / evolving / evolved / degraded / re-evolving
 	InstalledAt time.Time
+
+	// Skill discovery + execution metadata (from SKILL.md frontmatter)
+	WhenToUse string // precise trigger condition for skill listing
+	Context   string // "inline" (default) | "fork" (spawn sub-agent)
+	Args      string // parameter hint (e.g. "[topic] [style?]")
+
+	// P3 L3: KI categorization
+	Category string   // auto-classified: "infra" | "web" | "data" | "ai" | "devops" | "util"
+	KIRef    []string // paths to associated KI artifact files
 }
 
 // EvoRun records a single evolution execution result.
@@ -46,7 +55,7 @@ type EvoRun struct {
 	SkillID       string
 	Success       bool
 	Retries       int
-	Strategy      string   // param_fix | tool_swap | re_route | iterate | escalate
+	Strategy      string // param_fix | tool_swap | re_route | iterate | escalate
 	FailureReason string
 	Timestamp     time.Time
 }

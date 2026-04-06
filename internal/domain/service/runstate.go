@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
+	"github.com/ngoclaw/ngoagent/internal/domain/model"
 )
 
 // RunState tracks the independent per-run execution state.
@@ -132,7 +132,7 @@ func (da *DeltaAdapter) Emit(event DeltaEvent) {
 
 // HistoryEntry wraps an LLM message for run state tracking.
 type HistoryEntry struct {
-	llm.Message
+	model.Message
 	Step int
 }
 

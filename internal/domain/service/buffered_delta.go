@@ -2,7 +2,8 @@ package service
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -30,9 +31,9 @@ type BufferedDelta struct {
 	mu       sync.Mutex
 	events   []BufferedEvent
 	seqID    int
-	writer   SSEWriter // nil = detached (buffering mode)
-	done     bool      // true after OnComplete/OnError
-	expireAt time.Time // auto-cleanup deadline after done
+	writer   SSEWriter     // nil = detached (buffering mode)
+	done     bool          // true after OnComplete/OnError
+	expireAt time.Time     // auto-cleanup deadline after done
 	doneCh   chan struct{} // closed when done=true, for select-based waiters
 
 	// Text throttling: merge high-frequency token deltas into 50ms batches
@@ -73,7 +74,7 @@ func (bd *BufferedDelta) emit(eventType string, data any) {
 	if bd.writer != nil {
 		if !bd.writer(payload) {
 			// Write failed → client disconnected, switch to buffer mode
-			log.Printf("[BufferedDelta] SSE write failed, detaching (seq=%d)", bd.seqID)
+			slog.Info(fmt.Sprintf("[delta] SSE write failed, detaching (seq=%d)", bd.seqID))
 			bd.writer = nil
 		}
 	}
@@ -317,7 +318,7 @@ func (rt *RunTracker) cleanupLoop() {
 		rt.mu.Lock()
 		for sid, run := range rt.runs {
 			if run.Buffer.IsExpired() {
-				log.Printf("[RunTracker] Cleaning up expired run for session %s", sid)
+				slog.Info(fmt.Sprintf("[loop-pool] Cleaning up expired run for session %s", sid))
 				delete(rt.runs, sid)
 			}
 		}

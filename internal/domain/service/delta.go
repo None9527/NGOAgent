@@ -8,18 +8,18 @@ import (
 // Delta is a default DeltaSink implementation that records events.
 // Server layer creates its own protocol-specific sink (SSE, gRPC, etc.)
 type Delta struct {
-	OnTextFunc       func(string)
-	OnReasoningFunc  func(string)
-	OnToolStartFunc  func(string, string, map[string]any)
-	OnToolResultFunc func(string, string, string, error)
-	OnProgressFunc   func(taskName, status, summary, mode string)
-	OnPlanReviewFunc func(message string, paths []string)
+	OnTextFunc            func(string)
+	OnReasoningFunc       func(string)
+	OnToolStartFunc       func(string, string, map[string]any)
+	OnToolResultFunc      func(string, string, string, error)
+	OnProgressFunc        func(taskName, status, summary, mode string)
+	OnPlanReviewFunc      func(message string, paths []string)
 	OnApprovalRequestFunc func(approvalID, toolName string, args map[string]any, reason string)
-	OnTitleUpdateFunc func(sessionID, title string)
-	OnCompleteFunc   func()
-	OnErrorFunc      func(error)
-	OnAutoWakeStartFunc func()
-	EmitFunc            func(DeltaEvent) // Generic event emitter (evo events, etc.)
+	OnTitleUpdateFunc     func(sessionID, title string)
+	OnCompleteFunc        func()
+	OnErrorFunc           func(error)
+	OnAutoWakeStartFunc   func()
+	EmitFunc              func(DeltaEvent) // Generic event emitter (evo events, etc.)
 }
 
 func (d *Delta) OnText(text string) {
@@ -97,11 +97,11 @@ func (d *Delta) Emit(event DeltaEvent) {
 // OutputCollector is a DeltaSink that accumulates text output AND tool events.
 // Used by spawn_agent to collect sub-agent results with structured tool info.
 type OutputCollector struct {
-	buf        strings.Builder
-	events     []ToolEvent
-	pending    map[string]pendingTool // callID → start info
-	StepPush   func(toolName string)  // optional: push current step to parent (for SubagentDock)
-	toolCount  int                    // total tools executed (for step counting)
+	buf       strings.Builder
+	events    []ToolEvent
+	pending   map[string]pendingTool // callID → start info
+	StepPush  func(toolName string)  // optional: push current step to parent (for SubagentDock)
+	toolCount int                    // total tools executed (for step counting)
 }
 
 // ToolEvent records a single tool invocation by the sub-agent.
@@ -145,14 +145,14 @@ func (c *OutputCollector) OnToolResult(callID string, name string, output string
 	}
 	c.events = append(c.events, ev)
 }
-func (c *OutputCollector) OnProgress(string, string, string, string)          {}
-func (c *OutputCollector) OnPlanReview(string, []string)                      {}
+func (c *OutputCollector) OnProgress(string, string, string, string)                {}
+func (c *OutputCollector) OnPlanReview(string, []string)                            {}
 func (c *OutputCollector) OnApprovalRequest(string, string, map[string]any, string) {}
-func (c *OutputCollector) OnTitleUpdate(string, string)                       {}
-func (c *OutputCollector) OnAutoWakeStart()                                   {}
-func (c *OutputCollector) OnComplete()                                        {}
-func (c *OutputCollector) OnError(error)                                      {}
-func (c *OutputCollector) Emit(DeltaEvent)                                    {}
+func (c *OutputCollector) OnTitleUpdate(string, string)                             {}
+func (c *OutputCollector) OnAutoWakeStart()                                         {}
+func (c *OutputCollector) OnComplete()                                              {}
+func (c *OutputCollector) OnError(error)                                            {}
+func (c *OutputCollector) Emit(DeltaEvent)                                          {}
 
 // Result returns the accumulated text (backward compat).
 func (c *OutputCollector) Result() string { return c.buf.String() }

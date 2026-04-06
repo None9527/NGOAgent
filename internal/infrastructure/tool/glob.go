@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 )
 
@@ -16,8 +15,12 @@ import (
 // Uses fd (fast, supports ** globs, respects .gitignore) with fallback to find.
 type GlobTool struct{}
 
-func (t *GlobTool) Name() string        { return "glob" }
-func (t *GlobTool) Description() string { return prompttext.ToolGlob }
+func (t *GlobTool) Name() string { return "glob" }
+func (t *GlobTool) Description() string {
+	return `Find files matching a glob pattern.
+- Searches recursively from the given path
+- Returns matching file paths`
+}
 
 func (t *GlobTool) Schema() map[string]any {
 	return map[string]any{

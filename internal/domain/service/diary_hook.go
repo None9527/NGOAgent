@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -48,7 +48,7 @@ func (h *DiaryHook) OnRunComplete(ctx context.Context, info RunInfo) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[hook] panic in DiaryHook: %v", r)
+				slog.Info(fmt.Sprintf("[hook] panic in DiaryHook: %v", r))
 			}
 		}()
 
@@ -68,9 +68,9 @@ func (h *DiaryHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		}
 
 		if err := h.diary.Append(entry); err != nil {
-			log.Printf("[hook] diary append failed: %v", err)
+			slog.Info(fmt.Sprintf("[hook] diary append failed: %v", err))
 		} else {
-			log.Printf("[hook] diary entry added: session=%s task=%q", info.SessionID, task)
+			slog.Info(fmt.Sprintf("[hook] diary entry added: session=%s task=%q", info.SessionID, task))
 		}
 	}()
 }

@@ -76,17 +76,29 @@ export default function App() {
   // Phase 3: scroll control is fully managed by ScrollProvider.
   // ChatVirtualList registers virtualizer capability; StreamProvider consumes it.
 
-  // Measure floating composer height for dynamic footer spacer
+  // Measure floating composer height for dynamic footer spacer.
+  // Debounced: only update when height changes ≥20px to prevent
+  // scroll jitter from micro-resizes (TaskProgressBar/SubagentDock).
   const composerRef = useRef<HTMLDivElement>(null)
   const [composerHeight, setComposerHeight] = useState(200)
+  const composerHeightRef = useRef(200)
   useEffect(() => {
     const el = composerRef.current
     if (!el) return
+    let rafId = 0
     const ro = new ResizeObserver(([entry]) => {
-      setComposerHeight(Math.ceil(entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height))
+      const h = Math.ceil(entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height)
+      // Ignore micro-resizes: only update when change ≥ 20px
+      if (Math.abs(h - composerHeightRef.current) < 20) return
+      composerHeightRef.current = h
+      if (rafId) cancelAnimationFrame(rafId)
+      rafId = requestAnimationFrame(() => {
+        rafId = 0
+        setComposerHeight(h)
+      })
     })
     ro.observe(el)
-    return () => ro.disconnect()
+    return () => { ro.disconnect(); if (rafId) cancelAnimationFrame(rafId) }
   }, [])
 
   // Reactive scroll-to-end: fires after React commits state from loadHistory
@@ -235,9 +247,14 @@ export default function App() {
     const uploadedFiles = attachedFiles.filter(f => f.status === 'uploaded' && f.path)
     let finalText = textToSend
     if (uploadedFiles.length > 0) {
-      const isImage = (t: string) => t.startsWith('image/')
+      const getRole = (t: string) => {
+        if (t.startsWith('image/'))  return 'reference_image'
+        if (t.startsWith('audio/'))  return 'reference_audio'
+        if (t.startsWith('video/'))  return 'reference_video'
+        return 'reference_file'
+      }
       const fileEntries = uploadedFiles
-        .map(f => `  <file name="${f.name}" path="${f.path}" type="${f.type}" role="${isImage(f.type) ? 'reference_image' : 'reference_file'}" />`)
+        .map(f => `  <file name="${f.name}" path="${f.path}" type="${f.type}" role="${getRole(f.type)}" />`)
         .join('\n')
       finalText = `<user_attachments>\n${fileEntries}\n</user_attachments>\n\n${textToSend}`
       setAttachedFiles([])

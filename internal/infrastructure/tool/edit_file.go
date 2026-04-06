@@ -7,28 +7,33 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
 )
 
 // EditFileTool performs string replacement editing on files.
 type EditFileTool struct {
-	WorkDir     string                  // If set, enforces path within workspace (E5)
-	FileHistory *workspace.FileHistory  // If set, backs up files before edit
+	WorkDir     string                 // If set, enforces path within workspace (E5)
+	FileHistory *workspace.FileHistory // If set, backs up files before edit
 }
 
-func (t *EditFileTool) Name() string        { return "edit_file" }
-func (t *EditFileTool) Description() string { return prompttext.ToolEditFile }
+func (t *EditFileTool) Name() string { return "edit_file" }
+func (t *EditFileTool) Description() string {
+	return `Edit a file via exact string replacement.
+- old_string: must match verbatim (whitespace/indentation).
+- new_string: replacement content.
+- Replace new file: set old_string="" (file must be empty/new).
+- Replace all: set replace_all=true.`
+}
 
 func (t *EditFileTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":        map[string]any{"type": "string", "description": "Absolute file path"},
-			"old_string":  map[string]any{"type": "string", "description": "Exact string to find and replace"},
-			"new_string":  map[string]any{"type": "string", "description": "Replacement string"},
-			"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences (default: false)"},
+			"path":        map[string]any{"type": "string", "description": "Absolute file path (must start with /)", "minLength": 2},
+			"old_string":  map[string]any{"type": "string", "description": "Exact string to find in the file. Must match verbatim including whitespace.", "minLength": 1},
+			"new_string":  map[string]any{"type": "string", "description": "Replacement string. Can be empty to delete old_string."},
+			"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences. Default false (replace first only).", "default": false},
 		},
 		"required": []string{"path", "old_string", "new_string"},
 	}
@@ -48,6 +53,13 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 		return dtool.ToolResult{Output: "Error: 'path' is required"}, nil
 	}
 	path = filepath.Clean(path)
+
+	// P2: Validate path — resolve symlinks, block sensitive paths
+	if resolved, err := ValidatePath(path, ""); err != nil {
+		return dtool.ToolResult{Output: fmt.Sprintf("Error: path validation failed: %v", err)}, nil
+	} else {
+		path = resolved
+	}
 
 	// Error code 1: No change needed
 	if oldStr == newStr {
@@ -103,6 +115,7 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 			return dtool.ToolResult{Output: fmt.Sprintf("Error writing file: %v", err)}, nil
 		}
 		globalFileState.MarkModified(path, []byte(newStr))
+		globalFileWatcher.RecordWrite(path) // P2 G1
 		return dtool.ToolResult{Output: fmt.Sprintf("Created new file: %s", path)}, nil
 	}
 
@@ -189,6 +202,7 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (dtool.
 		return dtool.ToolResult{Output: fmt.Sprintf("Error writing file: %v", err)}, nil
 	}
 	globalFileState.MarkModified(path, []byte(newContent))
+	globalFileWatcher.RecordWrite(path) // P2 G1
 
 	if replaceAll {
 		msg := fmt.Sprintf("Successfully replaced %d occurrences in %s", count, path)

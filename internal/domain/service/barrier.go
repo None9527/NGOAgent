@@ -5,35 +5,40 @@
 // triggers a parent-loop auto-wake once ALL have completed.
 //
 // Flow:
-//   parent spawns A, B, C → barrier.pending = 3
-//   C completes → pending = 2, progress pushed
-//   A completes → pending = 1, progress pushed
-//   B completes → pending = 0 → InjectEphemeral(allResults) → autoWake()
+//
+//	parent spawns A, B, C → barrier.pending = 3
+//	C completes → pending = 2, progress pushed
+//	A completes → pending = 1, progress pushed
+//	B completes → pending = 0 → InjectEphemeral(allResults) → autoWake()
 package service
 
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
+	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
+	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 )
 
 // SubagentBarrier coordinates parallel subagent completion for a parent loop.
 // Thread-safe: all methods are safe for concurrent calls from multiple goroutines.
 type SubagentBarrier struct {
-	mu             sync.Mutex
-	pending        int
-	results        map[string]subagentResult
-	parentLoop     *AgentLoop
-	autoWake       func()                          // called when all subagents complete
-	pushProgress   func(runID, taskName, status string, done, total int, errMsg, output string) // WS/SSE push (optional)
-	timeout        time.Duration
-	timer          *time.Timer
-	maxConcurrent  int // S5: max concurrent subagents (0 = unlimited)
+	mu              sync.Mutex
+	pending         int
+	finalized       bool // P0-3: prevents double finalize after timeout
+	results         map[string]subagentResult
+	parentLoop      *AgentLoop
+	autoWake        func()                                                                       // called when all subagents complete
+	pushProgress    func(runID, taskName, status string, done, total int, errMsg, output string) // WS/SSE push (optional)
+	timeout         time.Duration
+	timer           *time.Timer
+	maxConcurrent   int                                                     // S5: max concurrent subagents (0 = unlimited)
+	saveTranscript  func(sessionID, taskName, runID, status, output string) // P2 F1: worker transcript saver (nil = disabled)
+	parentSessionID string                                                  // P2 F1: parent session ID for transcript storage
 }
 
 type subagentResult struct {
@@ -71,6 +76,15 @@ func (b *SubagentBarrier) SetMaxConcurrent(n int) {
 	b.maxConcurrent = n
 }
 
+// SetTranscriptSaver configures a function to persist worker transcripts on completion.
+// The saver receives (parentSessionID, taskName, runID, status, output).
+func (b *SubagentBarrier) SetTranscriptSaver(sessionID string, saver func(string, string, string, string, string)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.parentSessionID = sessionID
+	b.saveTranscript = saver
+}
+
 // Add registers a new subagent to track. Call BEFORE RunAsync to prevent race.
 // Returns error if max concurrent limit reached (S5).
 func (b *SubagentBarrier) Add(runID, taskName string) error {
@@ -79,7 +93,7 @@ func (b *SubagentBarrier) Add(runID, taskName string) error {
 	// S5: enforce concurrency limit
 	if b.maxConcurrent > 0 && b.pending >= b.maxConcurrent {
 		b.mu.Unlock()
-		return fmt.Errorf("max concurrent subagents (%d) reached — wait for existing agents to complete", b.maxConcurrent)
+		return agenterr.NewBusy(fmt.Sprintf("max concurrent subagents (%d) reached", b.maxConcurrent))
 	}
 
 	b.pending++
@@ -118,7 +132,7 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 	entry := b.results[runID]
 	if !entry.DoneAt.IsZero() {
 		b.mu.Unlock()
-		log.Printf("[barrier] Ignoring duplicate OnComplete for %s", runID)
+		slog.Info(fmt.Sprintf("[barrier] Ignoring duplicate OnComplete for %s", runID))
 		return
 	}
 
@@ -128,11 +142,21 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 	b.results[runID] = entry
 	b.pending--
 
+	// P0-3: Guard against negative pending (timeout already finalized)
+	if b.finalized {
+		b.mu.Unlock()
+		slog.Info(fmt.Sprintf("[barrier] Ignoring late OnComplete for %s (already finalized)", runID))
+		return
+	}
+
 	total := len(b.results)
 	done := total - b.pending
 	shouldFinalize := b.pending <= 0
+	if shouldFinalize {
+		b.finalized = true
+	}
 
-	log.Printf("[barrier] Subagent %s completed (%d/%d)", runID, done, total)
+	slog.Info(fmt.Sprintf("[barrier] Subagent %s completed (%d/%d)", runID, done, total))
 
 	// Push per-completion progress event (non-blocking)
 	if b.pushProgress != nil {
@@ -155,6 +179,19 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 		go push(runID, name, status, done, total, errMsg, outputPreview)
 	}
 
+	// P2 F1: Persist worker transcript to DB (non-blocking)
+	if b.saveTranscript != nil {
+		status := "completed"
+		if err != nil {
+			status = "failed"
+		}
+		saver := b.saveTranscript
+		sid := b.parentSessionID
+		name := entry.TaskName
+		output := entry.Output
+		go saver(sid, name, runID, status, output)
+	}
+
 	// Prepare finalize data while still holding the lock
 	var summary string
 	var autoWake func()
@@ -171,7 +208,7 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 	if shouldFinalize {
 		b.parentLoop.InjectEphemeral(summary)
 		b.parentLoop.SignalWake()
-		log.Printf("[barrier] All %d subagents complete, waking parent", total)
+		slog.Info(fmt.Sprintf("[barrier] All %d subagents complete, waking parent", total))
 
 		if autoWake != nil {
 			go autoWake()
@@ -189,8 +226,9 @@ func (b *SubagentBarrier) onTimeout() {
 		return // Already finalized
 	}
 
-	log.Printf("[barrier] Timeout! %d/%d subagents still pending", b.pending, len(b.results))
-	b.pending = 0 // Force finalize
+	slog.Info(fmt.Sprintf("[barrier] Timeout! %d/%d subagents still pending", b.pending, len(b.results)))
+	b.pending = 0      // Force finalize
+	b.finalized = true // P0-3: Mark as finalized
 
 	// Collect data inside lock, call externals outside
 	summary := b.formatResults()
@@ -200,7 +238,7 @@ func (b *SubagentBarrier) onTimeout() {
 	// S1: external calls OUTSIDE lock — prevents deadlock
 	b.parentLoop.InjectEphemeral(summary)
 	b.parentLoop.SignalWake()
-	log.Printf("[barrier] All %d subagents complete (timeout), waking parent", len(b.results))
+	slog.Info(fmt.Sprintf("[barrier] All %d subagents complete (timeout), waking parent", len(b.results)))
 
 	if autoWake != nil {
 		go autoWake()

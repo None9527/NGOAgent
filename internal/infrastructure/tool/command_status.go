@@ -4,9 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 )
 
 // CommandStatusTool gets the status and output of a background command.
@@ -18,8 +17,13 @@ func NewCommandStatusTool(sb *sandbox.Manager) *CommandStatusTool {
 	return &CommandStatusTool{sandbox: sb}
 }
 
-func (t *CommandStatusTool) Name() string        { return "command_status" }
-func (t *CommandStatusTool) Description() string { return prompttext.ToolCommandStatus }
+func (t *CommandStatusTool) Name() string { return "command_status" }
+func (t *CommandStatusTool) Description() string {
+	return `Get the status and output of a background command.
+- command_id: the ID returned from a background run_command
+- output_tail: number of lines from the end to return
+- wait_seconds: wait for completion before checking`
+}
 
 func (t *CommandStatusTool) Schema() map[string]any {
 	return map[string]any{

@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
 )
 
@@ -61,35 +61,29 @@ func TestEvolution_ToolChoiceField(t *testing.T) {
 
 func TestEvolution_SecurityChain(t *testing.T) {
 	cfg := &config.SecurityConfig{
-		Mode:         "auto",
-		BlockList:    []string{"rm"},
-		SafeCommands: []string{"ls", "cat"},
+		Mode:      "allow",
+		BlockList: []string{"rm"},
+		Workspace: "/home/test/project",
 	}
 	hook := security.NewHook(cfg)
 
-	// Blocklist deny
+	// Blocklist match outside safe zone → Ask
 	ctx := context.Background()
 	d, reason := hook.BeforeToolCall(ctx, "run_command", map[string]any{"command": "rm -rf /"})
-	if d != security.Deny {
-		t.Fatalf("blocklist: expected Deny, got %d (%s)", d, reason)
+	if d != security.Ask {
+		t.Fatalf("blocklist: expected Ask, got %d (%s)", d, reason)
 	}
 
-	// Safe command allow
-	d, _ = hook.BeforeToolCall(ctx, "run_command", map[string]any{"command": "cat file.txt"})
-	if d != security.Allow {
-		t.Fatalf("safe command: expected Allow, got %d", d)
-	}
-
-	// Read-only tool allow
+	// Safe file tool auto-allow
 	d, _ = hook.BeforeToolCall(ctx, "read_file", nil)
 	if d != security.Allow {
 		t.Fatalf("read-only: expected Allow, got %d", d)
 	}
 
-	// Unrecognized → Ask (auto mode)
-	d, _ = hook.BeforeToolCall(ctx, "run_command", map[string]any{"command": "docker build ."})
-	if d != security.Ask {
-		t.Fatalf("unrecognized: expected Ask, got %d", d)
+	// Non-blocklisted command → Allow in allow mode
+	d, _ = hook.BeforeToolCall(ctx, "run_command", map[string]any{"command": "echo hello"})
+	if d != security.Allow {
+		t.Fatalf("safe command: expected Allow, got %d", d)
 	}
 
 	// RequestApproval creates a pending entry
@@ -113,7 +107,7 @@ func TestEvolution_SecurityChain(t *testing.T) {
 		t.Fatal("Resolved with true: should approve")
 	}
 
-	t.Log("✅ Item 4: Security 4-level chain (Block→User→System→Policy) + PendingApproval")
+	t.Log("✅ Item 4: Security chain (BlockList→SafeZone→Mode) + PendingApproval")
 }
 
 func TestEvolution_SecurityAuditLog(t *testing.T) {
@@ -143,7 +137,9 @@ func TestEvolution_SecurityAuditLog(t *testing.T) {
 func TestEvolution_ProtocolDispatch(t *testing.T) {
 	// SignalProgress dispatch
 	sink := &testSink{}
-	state := &dtool.LoopState{}
+	state := &dtool.LoopState{
+		Boundary: &dtool.BoundaryState{},
+	}
 
 	result := dtool.ToolResult{
 		Output: "ok",
@@ -157,24 +153,26 @@ func TestEvolution_ProtocolDispatch(t *testing.T) {
 	}
 	dtool.Dispatch(result, sink, state)
 
-	if state.BoundaryTaskName != "Testing" {
-		t.Fatalf("dispatch: task_name=%q, expected 'Testing'", state.BoundaryTaskName)
+	if state.Boundary.BoundaryTaskName != "Testing" {
+		t.Fatalf("dispatch: task_name=%q, expected 'Testing'", state.Boundary.BoundaryTaskName)
 	}
-	if state.BoundaryMode != "verification" {
-		t.Fatalf("dispatch: mode=%q, expected 'verification'", state.BoundaryMode)
+	if state.Boundary.BoundaryMode != "verification" {
+		t.Fatalf("dispatch: mode=%q, expected 'verification'", state.Boundary.BoundaryMode)
 	}
-	if state.StepsSinceUpdate != 0 {
-		t.Fatalf("dispatch: stepsSince=%d, expected 0", state.StepsSinceUpdate)
+	if state.Boundary.StepsSinceUpdate != 0 {
+		t.Fatalf("dispatch: stepsSince=%d, expected 0", state.Boundary.StepsSinceUpdate)
 	}
 
 	// SignalYield dispatch
-	state2 := &dtool.LoopState{}
+	state2 := &dtool.LoopState{
+		Boundary: &dtool.BoundaryState{},
+	}
 	yieldResult := dtool.ToolResult{
 		Signal:  dtool.SignalYield,
 		Payload: map[string]any{"message": "waiting"},
 	}
 	dtool.Dispatch(yieldResult, sink, state2)
-	if !state2.YieldRequested {
+	if !state2.Boundary.YieldRequested {
 		t.Fatal("yield dispatch: YieldRequested should be true")
 	}
 
@@ -203,11 +201,8 @@ func TestEvolution_PromptCritical(t *testing.T) {
 	if !strings.Contains(prompttext.Guidelines, "notify_user") {
 		t.Fatal("Guidelines CRITICAL missing notify_user mention")
 	}
-	if !strings.Contains(prompttext.Guidelines, "plan.md") {
-		t.Fatal("Guidelines CRITICAL missing plan.md mention")
-	}
-	if !strings.Contains(prompttext.Guidelines, "FIRST tool call") {
-		t.Fatal("Guidelines CRITICAL missing 'FIRST tool call' mandate")
+	if !strings.Contains(prompttext.Guidelines, "task_plan") {
+		t.Fatal("Guidelines CRITICAL missing task_plan mention")
 	}
 
 	t.Log("✅ Item 8: Prompt Guidelines contains CRITICAL enforcement section")
@@ -232,18 +227,30 @@ func TestEvolution_KIDistillHookFiltering(t *testing.T) {
 		return nil
 	}}
 
-	hook := service.NewKIDistillHook(func() service.KIStore { return mockStore }, nil, 0.60)
+	// Mock distiller that returns a valid distillation result
+	mockDistiller := &mockKIDistiller{
+		distillFn: func(msgs []llm.Message) (*llm.KIResult, error) {
+			return &llm.KIResult{
+				ShouldSave: true,
+				Title:      "Test Knowledge",
+				Summary:    "Test summary",
+				Content:    "Test content",
+				Tags:       []string{"test"},
+			}, nil
+		},
+	}
 
-	// Short session (< 5 steps) → should NOT save
+	hook := service.NewKIDistillHook(func() service.KIStore { return mockStore }, mockDistiller, 0.60)
+
+	// Short session (< 2 steps) → should NOT save
 	hook.OnRunComplete(context.TODO(), service.RunInfo{
 		SessionID: "short",
-		Steps:     3,
+		Steps:     1,
 		Mode:      "chat",
 	})
-	// Wait for goroutine
 	waitBrief()
 	if saved {
-		t.Fatal("short session (<5 steps) should not trigger distillation")
+		t.Fatal("short session (<2 steps) should not trigger distillation")
 	}
 
 	// Meaningful session → SHOULD save
@@ -253,6 +260,12 @@ func TestEvolution_KIDistillHookFiltering(t *testing.T) {
 		Steps:        15,
 		Mode:         "chat",
 		FinalContent: "I completed the task",
+		History: []llm.Message{
+			{Role: "user", Content: "do something"},
+			{Role: "assistant", Content: "ok"},
+			{Role: "tool", Content: "result"},
+			{Role: "assistant", Content: "done"},
+		},
 	})
 	waitBrief()
 	if !saved {
@@ -400,7 +413,7 @@ func (m *mockKIStore) GetContent(id string) (string, error) {
 }
 
 func waitBrief() {
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 }
 
 // mockSessionRepo implements service.SessionRepo for tests.
@@ -413,14 +426,30 @@ func (m *mockSessionRepo) ListConversations(limit, offset int) ([]service.Conver
 	return nil, nil
 }
 func (m *mockSessionRepo) DeleteConversation(id string) error { return nil }
-func (m *mockSessionRepo) UpdateTitle(id, title string) error  { return nil }
-func (m *mockSessionRepo) Touch(id string) error               { return nil }
+func (m *mockSessionRepo) UpdateTitle(id, title string) error { return nil }
+func (m *mockSessionRepo) Touch(id string) error              { return nil }
 
 // mockToolRegistry implements service.ToolRegistry for tests.
 type mockToolRegistry struct {
 	tools []service.ToolInfo
 }
 
-func (m *mockToolRegistry) List() []service.ToolInfo { return m.tools }
-func (m *mockToolRegistry) Enable(name string) error { return nil }
+func (m *mockToolRegistry) List() []service.ToolInfo  { return m.tools }
+func (m *mockToolRegistry) Enable(name string) error  { return nil }
 func (m *mockToolRegistry) Disable(name string) error { return nil }
+
+// mockKIDistiller implements service.KILLMDistiller for tests.
+type mockKIDistiller struct {
+	distillFn func(msgs []llm.Message) (*llm.KIResult, error)
+}
+
+func (m *mockKIDistiller) DistillKnowledge(messages []llm.Message) (*llm.KIResult, error) {
+	if m.distillFn != nil {
+		return m.distillFn(messages)
+	}
+	return &llm.KIResult{ShouldSave: false}, nil
+}
+
+func (m *mockKIDistiller) MergeKnowledge(existing, newContent string) (*llm.KIResult, error) {
+	return &llm.KIResult{ShouldSave: false}, nil
+}

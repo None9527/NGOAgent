@@ -328,4 +328,3 @@ func (m *Manager) RemoveMCPServer(name string) error {
 	m.current.MCP.Servers = filtered
 	return m.saveAndNotify(&old, "mcp")
 }
-

@@ -7,7 +7,7 @@ package workspace
 import (
 	"crypto/sha256"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -26,17 +26,17 @@ type BackupEntry struct {
 
 // Snapshot captures the state of all tracked files at a specific message point.
 type Snapshot struct {
-	MessageID string                  // Associated message identifier
-	Backups   map[string]BackupEntry  // normalizedPath → backup entry
+	MessageID string                 // Associated message identifier
+	Backups   map[string]BackupEntry // normalizedPath → backup entry
 	Timestamp time.Time
 }
 
 // FileHistory manages file edit history with backup and rollback support.
 type FileHistory struct {
 	mu           sync.Mutex
-	baseDir      string            // .ngoagent/workspace/.file-history/<sessionID>/
+	baseDir      string // .ngoagent/workspace/.file-history/<sessionID>/
 	sessionID    string
-	trackedFiles map[string]bool   // Set of tracked file paths
+	trackedFiles map[string]bool // Set of tracked file paths
 	snapshots    []Snapshot
 	pendingEdits map[string]BackupEntry // Edits since last snapshot
 }
@@ -77,7 +77,7 @@ func (fh *FileHistory) TrackEdit(filePath string) error {
 			BackupTime: time.Now(),
 			IsNew:      true,
 		}
-		log.Printf("[file-history] tracked new file: %s", normalized)
+		slog.Info(fmt.Sprintf("[file-history] tracked new file: %s", normalized))
 		return nil
 	} else if statErr != nil {
 		return fmt.Errorf("file-history: stat %s: %w", normalized, statErr)
@@ -103,7 +103,7 @@ func (fh *FileHistory) TrackEdit(filePath string) error {
 		BackupTime: time.Now(),
 		IsNew:      false,
 	}
-	log.Printf("[file-history] backed up %s → %s (v%d, %d bytes)", normalized, backupName, version, len(data))
+	slog.Info(fmt.Sprintf("[file-history] backed up %s → %s (v%d, %d bytes)", normalized, backupName, version, len(data)))
 	return nil
 }
 
@@ -139,7 +139,7 @@ func (fh *FileHistory) Snapshot(messageID string) error {
 	// Clear pending edits
 	fh.pendingEdits = make(map[string]BackupEntry)
 
-	log.Printf("[file-history] snapshot %s: %d files", messageID, len(backups))
+	slog.Info(fmt.Sprintf("[file-history] snapshot %s: %d files", messageID, len(backups)))
 	return nil
 }
 
@@ -169,21 +169,21 @@ func (fh *FileHistory) Rewind(messageID string) ([]string, error) {
 				// File was created by agent — delete it
 				if err := os.Remove(path); err == nil {
 					restored = append(restored, path)
-					log.Printf("[file-history] rewind: deleted %s (was new)", path)
+					slog.Info(fmt.Sprintf("[file-history] rewind: deleted %s (was new)", path))
 				}
 			} else if entry.BackupPath != "" {
 				// Restore from backup
 				data, err := os.ReadFile(entry.BackupPath)
 				if err != nil {
-					log.Printf("[file-history] rewind: failed to read backup %s: %v", entry.BackupPath, err)
+					slog.Info(fmt.Sprintf("[file-history] rewind: failed to read backup %s: %v", entry.BackupPath, err))
 					continue
 				}
 				if err := os.WriteFile(path, data, 0644); err != nil {
-					log.Printf("[file-history] rewind: failed to restore %s: %v", path, err)
+					slog.Info(fmt.Sprintf("[file-history] rewind: failed to restore %s: %v", path, err))
 					continue
 				}
 				restored = append(restored, path)
-				log.Printf("[file-history] rewind: restored %s from v%d", path, entry.Version)
+				slog.Info(fmt.Sprintf("[file-history] rewind: restored %s from v%d", path, entry.Version))
 			}
 		}
 	}
@@ -192,7 +192,7 @@ func (fh *FileHistory) Rewind(messageID string) ([]string, error) {
 	fh.snapshots = fh.snapshots[:targetIdx]
 	fh.pendingEdits = make(map[string]BackupEntry)
 
-	log.Printf("[file-history] rewind to %s complete: %d files restored", messageID, len(restored))
+	slog.Info(fmt.Sprintf("[file-history] rewind to %s complete: %d files restored", messageID, len(restored)))
 	return restored, nil
 }
 

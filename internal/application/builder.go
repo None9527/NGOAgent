@@ -4,25 +4,28 @@ package application
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/cron"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/memory"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm/anthropic"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm/google"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm/openai"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/mcp"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/memory"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/notify" // P3 M1
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
@@ -62,7 +65,7 @@ func Build() (*App, error) {
 	// Phase 1: Foundation
 	// ═══════════════════════════════════════════
 	if err := config.Bootstrap(); err != nil {
-		log.Printf("Warning: bootstrap: %v", err)
+		slog.Info(fmt.Sprintf("Warning: bootstrap: %v", err))
 	}
 	cfgMgr := config.NewManager(config.ConfigPath())
 	cfg := cfgMgr.Get()
@@ -74,29 +77,49 @@ func Build() (*App, error) {
 	}
 	repo := persistence.NewRepository(db)
 	historyStore := persistence.NewHistoryStore(db)
-	evoStore := persistence.NewEvoStore(db) // Evo tables: evo_traces, evo_evaluations, evo_repairs
+	evoStore := persistence.NewEvoStore(db)               // Evo tables: evo_traces, evo_evaluations, evo_repairs
+	transcriptStore := persistence.NewTranscriptStore(db) // P2 F1: subagent transcripts
 
 	// ═══════════════════════════════════════════
 	// Phase 2: Core Infrastructure
 	// ═══════════════════════════════════════════
 	var providers []llm.Provider
 	for _, pd := range cfg.LLM.Providers {
-		if pd.Type == "" || pd.Type == "openai" {
-			providers = append(providers, openai.NewClient(pd.Name, pd.BaseURL, pd.APIKey, pd.Models))
-		} else {
-			p := llm.BuildProviderFromConfig(pd.Type, pd.Name, pd.BaseURL, pd.APIKey, pd.Models)
-			if p != nil {
-				providers = append(providers, p)
+		provType := pd.Type
+		if provType == "" {
+			provType = "openai"
+		}
+		baseURL := pd.BaseURL
+		if preset, ok := llm.GetPresetProvider(provType); ok {
+			if baseURL == "" {
+				baseURL = preset.DefaultBaseURL
 			}
+		}
+
+		switch provType {
+		case "anthropic":
+			providers = append(providers, anthropic.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models))
+		case "google":
+			providers = append(providers, google.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models))
+		default:
+			// Fallback to OpenAI-compatible client natively for (DashScope, Volcengine, Mistral, Ollama, DeepSeek, etc.)
+			cli := openai.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models)
+			if provType == "dashscope" {
+				cli.SetExtraHeaders(map[string]string{"X-DashScope-Session-Cache": "enable"}) // implicitly enable cache for qwen
+			}
+			providers = append(providers, cli)
 		}
 	}
 	router := llm.NewRouter(providers)
 	// Apply configured default model (without this, router uses first provider's first model)
 	if cfg.Agent.DefaultModel != "" {
 		if err := router.SetDefault(cfg.Agent.DefaultModel); err != nil {
-			log.Printf("Warning: default_model %q not found in providers, using fallback", cfg.Agent.DefaultModel)
+			slog.Info(fmt.Sprintf("Warning: default_model %q not found in providers, using fallback", cfg.Agent.DefaultModel))
 		}
 	}
+
+	// P3 J3: Initialize global telemetry collector
+	llm.GlobalTelemetry = llm.NewTelemetryCollector()
 
 	homeDir := config.HomeDir()
 	promptEngine := prompt.NewEngineWithHome(homeDir)
@@ -113,6 +136,21 @@ func Build() (*App, error) {
 	sbMgr := sandbox.NewManager(workspaceDir)
 	cfg.Security.Workspace = workspaceDir // Inject resolved workspace path for safe-zone checks
 	secHook := security.NewHook(&cfg.Security)
+
+	// P3 K1: Wire AI Safety Classifier strategy (pattern | llm | hybrid)
+	if mode := cfg.Security.ClassifierMode; mode == "llm" || mode == "hybrid" {
+		// Use first available LLM provider for classifier (prefer small/fast models)
+		clsModel := cfg.Security.ClassifierModel
+		if clsModel == "" {
+			clsModel = cfg.Agent.DefaultModel // fallback to default model
+		}
+		if len(providers) > 0 {
+			clsProvider := providers[0] // first provider
+			cls := security.NewClassifier(mode, secHook, clsProvider, clsModel)
+			secHook.SetClassifier(cls)
+			slog.Info(fmt.Sprintf("[security] classifier strategy: %s (model: %s)", mode, clsModel))
+		}
+	}
 
 	// ═══════════════════════════════════════════
 	// Phase 3: Storage Layer
@@ -137,14 +175,14 @@ func Build() (*App, error) {
 		)
 		vecIndex := knowledge.NewVectorIndex(dims, filepath.Join(kiDir, "index"))
 		if err := vecIndex.Load(); err != nil {
-			log.Printf("Warning: vector index load: %v", err)
+			slog.Info(fmt.Sprintf("Warning: vector index load: %v", err))
 		}
 		kiRetriever = knowledge.NewRetriever(kiStore, embedder, vecIndex)
 		if err := kiRetriever.BuildIndex(); err != nil {
-			log.Printf("Warning: KI index build: %v", err)
+			slog.Info(fmt.Sprintf("Warning: KI index build: %v", err))
 		}
-		log.Printf("[ki] Embedding pipeline active: provider=%s model=%s dims=%d",
-			cfg.Embedding.Provider, cfg.Embedding.Model, dims)
+		slog.Info(fmt.Sprintf("[ki] Embedding pipeline active: provider=%s model=%s dims=%d",
+			cfg.Embedding.Provider, cfg.Embedding.Model, dims))
 	}
 
 	// Memory store — reuses same embedder as KI for vector conversation memory
@@ -164,14 +202,14 @@ func Build() (*App, error) {
 			MaxFragments: cfg.Memory.MaxFragments,
 		}
 		memStore = memory.NewStore(memEmbedder, memDir, memCfg)
-		log.Printf("[memory] Vector memory active: dir=%s halfLife=%d maxFrag=%d",
-			memDir, memCfg.HalfLifeDays, memCfg.MaxFragments)
+		slog.Info(fmt.Sprintf("[memory] Vector memory active: dir=%s halfLife=%d maxFrag=%d",
+			memDir, memCfg.HalfLifeDays, memCfg.MaxFragments))
 	}
 
 	// Diary store — daily markdown entries under memory/diary/
 	diaryDir := filepath.Join(config.HomeDir(), "memory", "diary")
 	diaryStore := memory.NewDiaryStore(diaryDir)
-	log.Printf("[diary] Diary store active: dir=%s", diaryDir)
+	slog.Info(fmt.Sprintf("[diary] Diary store active: dir=%s", diaryDir))
 
 	workDir := workspaceDir
 	if workDir == "" {
@@ -181,10 +219,11 @@ func Build() (*App, error) {
 
 	// FileHistory: snapshot-based file edit rollback
 	fileHistory := workspace.NewFileHistory(workDir, sessionID)
-	log.Printf("[file-history] initialized: dir=%s session=%s", fileHistory.BaseDir(), sessionID)
+	slog.Info(fmt.Sprintf("[file-history] initialized: dir=%s session=%s", fileHistory.BaseDir(), sessionID))
 
 	skillsDir := config.ResolvePath(cfg.Storage.SkillsDir)
 	skillMgr := skill.NewManager(skillsDir)
+	skillMgr.RegisterBundled() // P1 #49: load built-in recovery skills
 
 	mcpMgr := mcp.NewManager()
 
@@ -200,13 +239,11 @@ func Build() (*App, error) {
 	registry.Register(&tool.GrepSearchTool{})
 	registry.Register(tool.NewRunCommandTool(sbMgr))
 	registry.Register(tool.NewCommandStatusTool(sbMgr))
-	searxngURLB := cfg.Search.SearXNGURL
-	if searxngURLB == "" {
-		searxngURLB = cfg.Search.Endpoint
-	}
-	registry.Register(tool.NewWebSearchTool(searxngURLB))
-	registry.Register(tool.NewWebFetchTool(cfg.Search.Endpoint))
-	registry.Register(tool.NewDeepResearchTool(cfg.Search.Endpoint))
+	// All web tools route through the agent-search pipeline (unified endpoint)
+	agentSearchURLB := cfg.Search.Endpoint
+	registry.Register(tool.NewWebSearchTool(agentSearchURLB))
+	registry.Register(tool.NewWebFetchTool(agentSearchURLB))
+	registry.Register(tool.NewDeepResearchTool(agentSearchURLB))
 	registry.Register(tool.NewTaskPlanTool(brainDir))
 	registry.Register(tool.NewTaskBoundaryTool())
 	registry.Register(tool.NewNotifyUserTool())
@@ -217,16 +254,31 @@ func Build() (*App, error) {
 	registry.Register(tool.NewTaskListTool(brainDir))
 	spawnTool := tool.NewSpawnAgentTool(nil) // Lazy: SpawnFunc set after loop creation
 	registry.Register(spawnTool)
-	registry.Register(tool.NewEvoTool("/tmp/ngoagent-evo"))
+	skillTool := tool.NewSkillTool(skillMgr) // Lazy: SpawnFunc set after loop creation
+	registry.Register(skillTool)
+	registry.Register(tool.NewEvoTool("/tmp/ngoagent-evo", sbMgr))
 	brainArtifactTool := tool.NewBrainArtifactTool(nil) // Lazy: Brain set per-session
 	registry.Register(brainArtifactTool)
 	registry.Register(tool.NewUndoEditTool(fileHistory))
+	// P1-D #71: Git integration tools
+	registry.Register(&tool.GitStatusTool{})
+	registry.Register(&tool.GitDiffTool{})
+	registry.Register(&tool.GitLogTool{})
+	registry.Register(&tool.GitCommitTool{})
+	registry.Register(&tool.GitBranchTool{})
 	// Multimodal: view_media tool for native VLM perception
 	viewMediaAddr := fmt.Sprintf("http://localhost:%d", cfg.Server.HTTPPort)
 	if cfg.Server.HTTPPort == 0 {
 		viewMediaAddr = "http://localhost:19996"
 	}
 	registry.Register(tool.NewViewMediaTool(viewMediaAddr))
+	// P3 M2 (#45): 6 new tools — expands tool matrix to CC parity
+	registry.Register(&tool.TreeTool{})
+	registry.Register(&tool.FindFilesTool{})
+	registry.Register(&tool.CountLinesTool{})
+	registry.Register(&tool.DiffFilesTool{})
+	registry.Register(tool.NewHTTPFetchTool())
+	registry.Register(&tool.ClipboardTool{})
 	// manage_cron tool is registered after CronManager creation (Phase 7)
 
 	// ═══════════════════════════════════════════
@@ -260,33 +312,33 @@ func Build() (*App, error) {
 		if evalProvider, err := router.Resolve(evalModel); err == nil {
 			evoEvaluator = service.NewEvoEvaluator(evalProvider, cfg.Evo, evoStore)
 			evoRepairRouter = service.NewRepairRouter(cfg.Evo, evoStore)
-			log.Printf("[evo] Evaluator active: model=%s threshold=%.1f maxRetries=%d",
-				evalModel, cfg.Evo.ScoreThreshold, cfg.Evo.MaxRetries)
+			slog.Info(fmt.Sprintf("[evo] Evaluator active: model=%s threshold=%.1f maxRetries=%d",
+				evalModel, cfg.Evo.ScoreThreshold, cfg.Evo.MaxRetries))
 		} else {
-			log.Printf("[evo] Warning: eval model %q not found, evo disabled: %v", evalModel, err)
+			slog.Info(fmt.Sprintf("[evo] Warning: eval model %q not found, evo disabled: %v", evalModel, err))
 		}
 	}
 
 	baseDeps := service.Deps{
-		Config:       cfg,
-		ConfigMgr:    cfgMgr,
-		LLMRouter:    router,
-		PromptEngine: promptEngine,
-		ToolExec:     registry,
-		Security:     secHook,
-		Delta:        &service.Delta{}, // Overridden per-channel
-		Brain:        brainStore,
-		KIStore:      kiStore,
-		KIRetriever:  kiRetriever,
-		Workspace:    wsStore,
-		SkillMgr:     skillMgr,
-		HistoryStore: &historyAdapter{store: historyStore},
+		Config:          cfg,
+		LLMRouter:       router,
+		PromptEngine:    promptEngine,
+		ToolExec:        registry,
+		Security:        &securityAdapter{hook: secHook},
+		Delta:           &service.Delta{}, // Overridden per-channel
+		Brain:           brainStore,
+		KIStore:         kiStore,
+		KIRetriever:     kiRetriever,
+		Workspace:       wsStore,
+		SkillMgr:        skillMgr,
+		HistoryStore:    &historyAdapter{store: historyStore},
 		FileHistory:     fileHistory,
 		Hooks:           hookChain,
 		MemoryStore:     memStore,
 		EvoEvaluator:    evoEvaluator,
 		EvoRepairRouter: evoRepairRouter,
 		EvoStore:        evoStore,
+		WebhookHook:     buildWebhookHook(cfg, sessionID),
 	}
 	factory := service.NewLoopFactory(baseDeps, 8) // max 8 concurrent runs
 
@@ -337,7 +389,7 @@ func Build() (*App, error) {
 				// The loop's Delta is still the one set by the original ChatStream.
 				// For WS: wsWriter is still valid (no MarkDone), events flow through.
 				go func() {
-					log.Printf("[barrier] Auto-waking parent loop for session %s", capturedSID)
+					slog.Info(fmt.Sprintf("[barrier] Auto-waking parent loop for session %s", capturedSID))
 					var wakeLoop *service.AgentLoop
 					if loopPool != nil {
 						wakeLoop = loopPool.GetIfExists(capturedSID)
@@ -346,7 +398,7 @@ func Build() (*App, error) {
 						wakeLoop = capturedLoop
 					}
 					if err := wakeLoop.Run(context.Background(), ""); err != nil {
-						log.Printf("[barrier] Auto-wake failed for session %s: %v (pendingWake likely handled it)", capturedSID, err)
+						slog.Info(fmt.Sprintf("[barrier] Auto-wake failed for session %s: %v (pendingWake likely handled it)", capturedSID, err))
 					} else {
 						// Only signal frontend if fallback Run actually succeeded.
 						// If Run failed ("agent is busy"), pendingWake already handled it
@@ -383,6 +435,15 @@ func Build() (*App, error) {
 			if cfg.Agent.MaxSubagents > 0 {
 				b.SetMaxConcurrent(cfg.Agent.MaxSubagents)
 			}
+			// P2 F1: Wire transcript persistence via TranscriptStore.SaveSimple
+			if transcriptStore != nil {
+				ts := transcriptStore // capture for closure
+				b.SetTranscriptSaver(runtimeSID, func(sid, name, rid, status, output string) {
+					if err := ts.SaveSimple(sid, name, rid, status, output); err != nil {
+						slog.Info(fmt.Sprintf("[barrier] Transcript save failed for %s: %v", rid, err))
+					}
+				})
+			}
 		}
 		barrierMu.Unlock()
 
@@ -398,7 +459,13 @@ func Build() (*App, error) {
 		run := factory.Create(runtimeSID, ch)
 		run.Loop.InjectEphemeral(prompttext.EphSubAgentContext)
 
-		// S2: Register in barrier BEFORE RunAsync to prevent race
+		// P1-B #54: Inject coordinator mode into the PARENT loop.
+		// This activates orchestrator-mode rules: synthesize research before delegating,
+		// write self-contained specs, never lazy-delegate. Mirrors CC's Coordinator Prompt.
+		if parentLoop != nil {
+			parentLoop.InjectEphemeral(prompttext.EphCoordinatorMode)
+		}
+
 		// (fast-completing subagent could call OnComplete before Add)
 		if err := b.Add(run.ID, taskName); err != nil {
 			// S5: concurrency limit reached
@@ -429,6 +496,25 @@ func Build() (*App, error) {
 		}
 		return runID, nil
 	})
+	// Wire same SpawnFunc to skillTool for fork-mode skill execution
+	skillTool.SetSpawnFunc(spawnTool.GetSpawnFunc())
+
+	// Sprint 1-1 / 2-2 / 3-1: Wire runtime context for conditional tool descriptions
+	hasGit := false
+	if cwd, err := os.Getwd(); err == nil {
+		if _, err := os.Stat(filepath.Join(cwd, ".git")); err == nil {
+			hasGit = true
+		}
+	}
+	spawnTool.ToolCtx = prompttext.ToolContext{
+		HasGit:     hasGit,
+		HasSandbox: sbMgr != nil,
+		SkillCount: len(skillMgr.List()),
+		HasBrain:   brainDir != "",
+	}
+	if brainDir != "" {
+		spawnTool.ScratchDir = filepath.Join(brainDir, sessionID, "scratchpad")
+	}
 
 	// Per-session loop pool (uses factory baseDeps)
 	// NOTE: must be assigned AFTER spawnTool.SetSpawnFunc so the closure captures the pointer correctly.
@@ -456,28 +542,43 @@ func Build() (*App, error) {
 	// Phase 6: Hot-Reload Subscriptions
 	// ═══════════════════════════════════════════
 	cfgMgr.Subscribe("llm", func(old, new *config.Config) {
-		log.Println("[hot-reload] LLM config changed, rebuilding providers")
+		slog.Info(fmt.Sprint("[hot-reload] LLM config changed, rebuilding providers"))
 		var newProviders []llm.Provider
 		for _, pd := range new.LLM.Providers {
-			if pd.Type == "" || pd.Type == "openai" {
-				newProviders = append(newProviders, openai.NewClient(pd.Name, pd.BaseURL, pd.APIKey, pd.Models))
-			} else {
-				p := llm.BuildProviderFromConfig(pd.Type, pd.Name, pd.BaseURL, pd.APIKey, pd.Models)
-				if p != nil {
-					newProviders = append(newProviders, p)
+			provType := pd.Type
+			if provType == "" {
+				provType = "openai"
+			}
+			baseURL := pd.BaseURL
+			if preset, ok := llm.GetPresetProvider(provType); ok {
+				if baseURL == "" {
+					baseURL = preset.DefaultBaseURL
 				}
+			}
+
+			switch provType {
+			case "anthropic":
+				newProviders = append(newProviders, anthropic.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models))
+			case "google":
+				newProviders = append(newProviders, google.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models))
+			default:
+				cli := openai.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models)
+				if provType == "dashscope" {
+					cli.SetExtraHeaders(map[string]string{"X-DashScope-Session-Cache": "enable"})
+				}
+				newProviders = append(newProviders, cli)
 			}
 		}
 		router.Reload(newProviders)
 	})
 
 	cfgMgr.Subscribe("security", func(old, new *config.Config) {
-		log.Println("[hot-reload] Security config changed")
+		slog.Info(fmt.Sprint("[hot-reload] Security config changed"))
 		secHook.ReloadChain(&new.Security)
 	})
 
 	cfgMgr.Subscribe("mcp", func(old, new *config.Config) {
-		log.Println("[hot-reload] MCP config changed, reloading servers")
+		slog.Info(fmt.Sprint("[hot-reload] MCP config changed, reloading servers"))
 		var inline []mcp.ServerConfig
 		for _, s := range new.MCP.Servers {
 			inline = append(inline, mcp.ServerConfig{
@@ -492,8 +593,8 @@ func Build() (*App, error) {
 	})
 
 	cfgMgr.Subscribe("agent", func(old, new *config.Config) {
-		log.Printf("[hot-reload] Agent config changed: planning=%v max_steps=%d max_subagents=%d",
-			new.Agent.PlanningMode, new.Agent.MaxSteps, new.Agent.MaxSubagents)
+		slog.Info(fmt.Sprintf("[hot-reload] Agent config changed: planning=%v max_steps=%d max_subagents=%d",
+			new.Agent.PlanningMode, new.Agent.MaxSteps, new.Agent.MaxSubagents))
 		// Push to main loop
 		loop.ReloadConfig(new)
 		// Push to all active session loops
@@ -510,7 +611,7 @@ func Build() (*App, error) {
 
 	// Start config file watching
 	if err := cfgMgr.StartWatching(); err != nil {
-		log.Printf("Warning: config watch: %v", err)
+		slog.Info(fmt.Sprintf("Warning: config watch: %v", err))
 	}
 
 	// ═══════════════════════════════════════════
@@ -534,15 +635,22 @@ func Build() (*App, error) {
 		return cronLoop
 	})
 	if err != nil {
-		log.Printf("Warning: cron manager init: %v", err)
+		slog.Info(fmt.Sprintf("Warning: cron manager init: %v", err))
 	} else {
 		if cfg.Cron.Enabled {
 			if err := cronMgr.Start(); err != nil {
-				log.Printf("Warning: cron start: %v", err)
+				slog.Info(fmt.Sprintf("Warning: cron start: %v", err))
 			}
 		}
 		// Register manage_cron tool now that manager is ready
 		registry.Register(tool.NewManageCronTool(cronMgr))
+
+		// Register native callbacks for system maintenance (zero LLM cost)
+		if kiRetriever != nil {
+			cronMgr.RegisterNative("_ki_consolidate", func(ctx context.Context) {
+				kiRetriever.ConsolidateDuplicates(0.60)
+			})
+		}
 	}
 
 	// Start skill file watcher
@@ -566,17 +674,17 @@ func Build() (*App, error) {
 	}
 	// Skill registration:
 	// - light + executable: register as ScriptTool (LLM calls directly)
-	// - heavy + executable: trigger-inject + run_command (LLM uses run_command after ephemeral hint)
+	// - heavy + executable: agent-discoverable (listed in skill listing, agent reads SKILL.md via read_file)
 	// - workflow: agent uses read_file on SKILL.md when needed (no dedicated tool)
 	for _, sk := range skillMgr.AutoPromote() {
 		if (sk.Type == "executable" || sk.Type == "hybrid") && sk.Weight == "light" {
 			registry.Register(tool.NewScriptTool(sk))
-			log.Printf("[skill] Registered light ScriptTool: %s", sk.Name)
+			slog.Info(fmt.Sprintf("[skill] Registered light ScriptTool: %s", sk.Name))
 		} else if sk.Weight == "heavy" {
-			log.Printf("[skill] Heavy skill (trigger-inject): %s [%d triggers]", sk.Name, len(sk.Triggers))
+			slog.Info(fmt.Sprintf("[skill] Heavy skill (agent-discoverable): %s", sk.Name))
 		}
 	}
-	log.Printf("[skill] %d skills discovered (YAML pre-read, no use_skill tool)", len(skillMgr.List()))
+	slog.Info(fmt.Sprintf("[skill] %d skills discovered (YAML pre-read, no use_skill tool)", len(skillMgr.List())))
 
 	// ═══════════════════════════════════════════
 	// Phase 8: Unified API + Server
@@ -596,6 +704,11 @@ func Build() (*App, error) {
 		kiStore,
 		sbMgr,
 	)
+
+	// P2 H2: Wire persistent token usage store
+	tokenUsageStore := persistence.NewTokenUsageStore(db)
+	agentAPI.SetTokenUsageStore(tokenUsageStore)
+
 	srv := server.NewServer(agentAPI, addr, cfg.Server.AuthToken)
 
 	// gRPC server — defaults to :19998
@@ -637,7 +750,7 @@ func (app *App) Shutdown() {
 	if app.CronMgr != nil {
 		app.CronMgr.Stop()
 	}
-	log.Println("[app] Shutdown complete")
+	slog.Info(fmt.Sprint("[app] Shutdown complete"))
 }
 
 func generateSessionID() string {
@@ -645,3 +758,28 @@ func generateSessionID() string {
 }
 
 // Adapter types are in adapters.go
+
+// buildWebhookHook creates a notify.Hook if webhooks are configured; returns nil otherwise.
+// P3 M1.
+func buildWebhookHook(cfg *config.Config, sessionID string) service.WebhookNotifyHook {
+	if len(cfg.Notifications.Webhooks) == 0 {
+		return nil
+	}
+	var targets []*notify.WebhookTarget
+	for _, wh := range cfg.Notifications.Webhooks {
+		if wh.URL == "" {
+			continue
+		}
+		targets = append(targets, &notify.WebhookTarget{
+			URL:    wh.URL,
+			Events: wh.Events,
+			Secret: wh.Secret,
+			Retry:  wh.Retry,
+		})
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	n := notify.NewWebhookNotifier(targets, sessionID)
+	return notify.NewHook(n)
+}

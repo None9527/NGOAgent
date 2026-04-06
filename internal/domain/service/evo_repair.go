@@ -13,11 +13,11 @@ import (
 type RepairStrategy string
 
 const (
-	StrategyParamFix RepairStrategy = "param_fix"  // Fix parameters, retry same tool
-	StrategyToolSwap RepairStrategy = "tool_swap"  // Use different tool
-	StrategyReRoute  RepairStrategy = "re_route"   // Re-interpret user intent
-	StrategyIterate  RepairStrategy = "iterate"    // Refine existing output
-	StrategyEscalate RepairStrategy = "escalate"   // Give up, ask user
+	StrategyParamFix RepairStrategy = "param_fix" // Fix parameters, retry same tool
+	StrategyToolSwap RepairStrategy = "tool_swap" // Use different tool
+	StrategyReRoute  RepairStrategy = "re_route"  // Re-interpret user intent
+	StrategyIterate  RepairStrategy = "iterate"   // Refine existing output
+	StrategyEscalate RepairStrategy = "escalate"  // Give up, ask user
 )
 
 // RepairPlan describes the repair action to take.

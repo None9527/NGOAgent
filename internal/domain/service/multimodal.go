@@ -3,7 +3,7 @@ package service
 import (
 	"encoding/base64"
 	"fmt"
-	"log"
+	"log/slog"
 	"mime"
 	"os"
 	"path/filepath"
@@ -42,6 +42,7 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 
 	// Parse each <file .../> tag
 	var parts []llm.ContentPart
+	var attachments []llm.Attachment // B2: durable references for persistence
 	var nonImageFiles []string
 	var imageFiles []string
 
@@ -55,10 +56,16 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 		filePath := attrs["path"]
 		fileRole := attrs["role"]
 
-		if fileRole == "reference_image" && filePath != "" {
+		if filePath == "" {
+			nonImageFiles = append(nonImageFiles, attrs["name"])
+			continue
+		}
+
+		switch fileRole {
+		case "reference_image":
 			data, err := os.ReadFile(filePath)
 			if err != nil {
-				log.Printf("[multimodal] failed to read image %s: %v", filePath, err)
+				slog.Info(fmt.Sprintf("[multimodal] failed to read image %s: %v", filePath, err))
 				nonImageFiles = append(nonImageFiles, filePath)
 				continue
 			}
@@ -91,8 +98,38 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 				ImageURL: &llm.ImageURL{URL: dataURL},
 			})
 			imageFiles = append(imageFiles, filePath)
-			log.Printf("[multimodal] attached image: %s (%s, %d bytes)", attrs["name"], mimeType, len(data))
-		} else {
+			attachments = append(attachments, llm.Attachment{Type: "image", Path: filePath, MimeType: mimeType, Name: attrs["name"]})
+			slog.Info(fmt.Sprintf("[multimodal] attached image: %s (%s, %d bytes)", attrs["name"], mimeType, len(data)))
+
+		case "reference_audio":
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				slog.Info(fmt.Sprintf("[multimodal] failed to read audio %s: %v", filePath, err))
+				nonImageFiles = append(nonImageFiles, filePath)
+				continue
+			}
+			ext := strings.ToLower(filepath.Ext(filePath))
+			format := audioFormatFromExt(ext)
+			b64 := base64.StdEncoding.EncodeToString(data)
+			parts = append(parts, llm.ContentPart{
+				Type:       "input_audio",
+				InputAudio: &llm.InputAudio{Data: b64, Format: format},
+			})
+			imageFiles = append(imageFiles, filePath) // track as "media file" for summary
+			attachments = append(attachments, llm.Attachment{Type: "audio", Path: filePath, MimeType: "audio/" + format, Name: attrs["name"]})
+			slog.Info(fmt.Sprintf("[multimodal] attached audio: %s (%s, %d bytes)", attrs["name"], format, len(data)))
+
+		case "reference_video":
+			// Video is too large for base64 inline — use file URL reference
+			parts = append(parts, llm.ContentPart{
+				Type:  "video",
+				Video: "file://" + filePath,
+			})
+			imageFiles = append(imageFiles, filePath)
+			attachments = append(attachments, llm.Attachment{Type: "video", Path: filePath, MimeType: attrs["type"], Name: attrs["name"]})
+			slog.Info(fmt.Sprintf("[multimodal] attached video: %s", attrs["name"]))
+
+		default:
 			nonImageFiles = append(nonImageFiles, filePath)
 		}
 	}
@@ -122,5 +159,75 @@ func (a *AgentLoop) buildUserMessage(raw string) llm.Message {
 		Role:         "user",
 		Content:      textOnly,
 		ContentParts: parts,
+		Attachments:  attachments,
+	}
+}
+
+// RebuildContentParts reconstructs ephemeral ContentParts from durable Attachments.
+// Called on session reload: messages have Attachments (from DB) but ContentParts is empty.
+func RebuildContentParts(msg *llm.Message) {
+	if len(msg.Attachments) == 0 || len(msg.ContentParts) > 0 {
+		return // nothing to rebuild or already built
+	}
+	var parts []llm.ContentPart
+	for _, att := range msg.Attachments {
+		switch att.Type {
+		case "image":
+			data, err := os.ReadFile(att.Path)
+			if err != nil {
+				slog.Info(fmt.Sprintf("[multimodal] rebuild: failed to read %s: %v", att.Path, err))
+				continue
+			}
+			mimeType := att.MimeType
+			if mimeType != "image/svg+xml" && mimeType != "image/gif" {
+				data, mimeType = itool.ResizeForVLM(data, mimeType, 1024)
+			}
+			dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
+			parts = append(parts, llm.ContentPart{
+				Type:     "image_url",
+				ImageURL: &llm.ImageURL{URL: dataURL},
+			})
+		case "audio":
+			data, err := os.ReadFile(att.Path)
+			if err != nil {
+				slog.Info(fmt.Sprintf("[multimodal] rebuild: failed to read %s: %v", att.Path, err))
+				continue
+			}
+			ext := strings.ToLower(filepath.Ext(att.Path))
+			parts = append(parts, llm.ContentPart{
+				Type:       "input_audio",
+				InputAudio: &llm.InputAudio{Data: base64.StdEncoding.EncodeToString(data), Format: audioFormatFromExt(ext)},
+			})
+		case "video":
+			parts = append(parts, llm.ContentPart{
+				Type:  "video",
+				Video: "file://" + att.Path,
+			})
+		}
+	}
+	if len(parts) > 0 {
+		if msg.Content != "" {
+			parts = append([]llm.ContentPart{{Type: "text", Text: msg.Content}}, parts...)
+		}
+		msg.ContentParts = parts
+		slog.Info(fmt.Sprintf("[multimodal] rebuilt %d content parts from attachments", len(parts)))
+	}
+}
+
+// audioFormatFromExt maps file extensions to OpenAI-compatible audio format strings.
+func audioFormatFromExt(ext string) string {
+	switch ext {
+	case ".wav":
+		return "wav"
+	case ".mp3":
+		return "mp3"
+	case ".ogg", ".oga":
+		return "ogg"
+	case ".flac":
+		return "flac"
+	case ".m4a", ".aac":
+		return "mp3" // closest supported format
+	default:
+		return "wav"
 	}
 }

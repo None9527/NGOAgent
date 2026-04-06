@@ -6,9 +6,10 @@
 package tool
 
 import (
-	"log"
+	"fmt"
+	"log/slog"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
+	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 )
 
 // ─── Signal Enum ─────────────────────────────────────────────
@@ -73,13 +74,15 @@ type BoundaryState struct {
 // LoopState is a mutable bag of state the dispatcher writes back.
 // The agent loop provides a concrete implementation.
 type LoopState struct {
-	PlanMode          string              // "auto" | "plan" | "agentic" — from chat request
+	AutoApprove       bool                // agentic: skip human approval for tools
+	SelfReview        bool                // agentic: self-review plans, don't yield to user
 	PendingEphemerals []string            // Ephemeral messages to inject for next LLM turn
 	PendingMedia      []map[string]string // Multimodal: media items to inject {"type", "url"/"data", "path", "format"}
 	Boundary          *BoundaryState      // Shared pointer — eliminates protoState/syncLoopState copy
 	ForceNextTool     string              // Force next LLM call to use this tool (via tool_choice)
 	SkillLoaded       string              // L2: skill name just loaded via SKILL.md read
 	SkillPath         string              // L2: skill directory path
+	ActiveSkills      map[string]string   // Compression protection: skill name → content
 }
 
 // ─── Signal Handlers ─────────────────────────────────────────
@@ -122,8 +125,8 @@ func handleYield(result ToolResult, sink DeltaSink, state *LoopState) {
 	msg, _ := result.Payload["message"].(string)
 	paths := extractStringSlice(result.Payload["paths_to_review"])
 
-	// Agentic mode: agent self-reviews plan, don't stop loop or show banner
-	if state.PlanMode == "agentic" {
+	// SelfReview mode: agent self-reviews plan, don't stop loop or show banner
+	if state.SelfReview {
 		state.PendingEphemerals = append(state.PendingEphemerals, prompttext.EphAgenticSelfReview)
 		// YieldRequested stays false → loop continues
 		return
@@ -162,6 +165,13 @@ func extractStringSlice(v any) []string {
 func handleSkillLoaded(result ToolResult, _ DeltaSink, state *LoopState) {
 	state.SkillLoaded, _ = result.Payload["skill_name"].(string)
 	state.SkillPath, _ = result.Payload["skill_path"].(string)
+	// Compression protection: register active skill content
+	if content, ok := result.Payload["skill_content"].(string); ok && state.SkillLoaded != "" {
+		if state.ActiveSkills == nil {
+			state.ActiveSkills = make(map[string]string)
+		}
+		state.ActiveSkills[state.SkillLoaded] = content
+	}
 }
 
 func handleMediaLoaded(result ToolResult, _ DeltaSink, state *LoopState) {
@@ -181,7 +191,7 @@ func Dispatch(result ToolResult, sink DeltaSink, state *LoopState) {
 	if h, ok := handlers[result.Signal]; ok {
 		h(result, sink, state)
 	} else if result.Signal != SignalNone {
-		log.Printf("[protocol] unhandled signal: %d", result.Signal)
+		slog.Info(fmt.Sprintf("[protocol] unhandled signal: %d", result.Signal))
 	}
 }
 
@@ -203,13 +213,14 @@ func YieldResult(output string, payload map[string]any) (ToolResult, error) {
 	return ToolResult{Output: output, Signal: SignalYield, Payload: payload}, nil
 }
 
-func SkillLoadedResult(output, skillName, skillPath string) (ToolResult, error) {
+func SkillLoadedResult(output, skillName, skillPath, skillContent string) (ToolResult, error) {
 	return ToolResult{
 		Output: output,
 		Signal: SignalSkillLoaded,
 		Payload: map[string]any{
-			"skill_name": skillName,
-			"skill_path": skillPath,
+			"skill_name":    skillName,
+			"skill_path":    skillPath,
+			"skill_content": skillContent,
 		},
 	}, nil
 }
@@ -232,4 +243,3 @@ func SpawnYieldResult(output string) (ToolResult, error) {
 func handleSpawnYield(_ ToolResult, _ DeltaSink, state *LoopState) {
 	state.Boundary.YieldRequested = true
 }
-

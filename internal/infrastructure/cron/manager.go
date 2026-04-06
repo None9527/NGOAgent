@@ -7,7 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,7 +21,7 @@ import (
 // Job represents a cron job stored as job.json in its directory.
 type Job struct {
 	Name      string     `json:"name"`
-	Schedule  string     `json:"schedule"`    // interval like "30s", "5m", "1h"
+	Schedule  string     `json:"schedule"` // interval like "30s", "5m", "1h"
 	Prompt    string     `json:"prompt"`
 	Enabled   bool       `json:"enabled"`
 	Internal  bool       `json:"internal,omitempty"` // true = system heartbeat job, cannot be deleted
@@ -62,12 +62,13 @@ type activeJob struct {
 
 // Manager provides dynamic cron job management with file-based persistence.
 type Manager struct {
-	baseDir       string // ~/.ngoagent/cron/
-	runnerFactory RunnerFactory
-	active        map[string]*activeJob // name → running job
-	mu            sync.RWMutex
-	ctx           context.Context
-	cancel        context.CancelFunc
+	baseDir         string // ~/.ngoagent/cron/
+	runnerFactory   RunnerFactory
+	nativeCallbacks map[string]func(context.Context) // job name → Go callback (no LLM)
+	active          map[string]*activeJob            // name → running job
+	mu              sync.RWMutex
+	ctx             context.Context
+	cancel          context.CancelFunc
 }
 
 // NewManager creates a cron manager with file-based storage.
@@ -78,16 +79,26 @@ func NewManager(baseDir string, factory RunnerFactory) (*Manager, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		baseDir:       baseDir,
-		runnerFactory: factory,
-		active:        make(map[string]*activeJob),
-		ctx:           ctx,
-		cancel:        cancel,
+		baseDir:         baseDir,
+		runnerFactory:   factory,
+		nativeCallbacks: make(map[string]func(context.Context)),
+		active:          make(map[string]*activeJob),
+		ctx:             ctx,
+		cancel:          cancel,
 	}, nil
 }
 
 // BaseDir returns the cron base directory.
 func (m *Manager) BaseDir() string { return m.baseDir }
+
+// RegisterNative registers a pure-Go callback for a system job.
+// Native callbacks execute directly without spawning an LLM agent session,
+// making them ideal for maintenance tasks like KI consolidation.
+func (m *Manager) RegisterNative(jobName string, fn func(context.Context)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nativeCallbacks[jobName] = fn
+}
 
 // Start loads all enabled jobs from disk and schedules them.
 // Also ensures internal heartbeat jobs are registered.
@@ -107,7 +118,7 @@ func (m *Manager) Start() error {
 		}
 	}
 
-	log.Printf("[cron] Started with %d active jobs", count)
+	slog.Info(fmt.Sprintf("[cron] Started with %d active jobs", count))
 	return nil
 }
 
@@ -129,6 +140,13 @@ func (m *Manager) ensureHeartbeatJobs() {
 			Enabled:  true,
 			Internal: true,
 		},
+		{
+			Name:     "_ki_consolidate",
+			Schedule: "6h",
+			Prompt:   "KI 知识库整合（native callback，不消耗 LLM token）",
+			Enabled:  true,
+			Internal: true,
+		},
 	}
 	for _, hb := range heartbeats {
 		if _, err := m.getJob(hb.Name); err != nil {
@@ -136,9 +154,9 @@ func (m *Manager) ensureHeartbeatJobs() {
 			hb.UpdatedAt = time.Now()
 			os.MkdirAll(filepath.Join(m.baseDir, hb.Name, "logs"), 0755)
 			if err := m.saveJob(hb); err != nil {
-				log.Printf("[cron] failed to create heartbeat job %q: %v", hb.Name, err)
+				slog.Info(fmt.Sprintf("[cron] failed to create heartbeat job %q: %v", hb.Name, err))
 			} else {
-				log.Printf("[cron] registered heartbeat job %q (schedule=%s)", hb.Name, hb.Schedule)
+				slog.Info(fmt.Sprintf("[cron] registered heartbeat job %q (schedule=%s)", hb.Name, hb.Schedule))
 			}
 		}
 	}
@@ -153,7 +171,7 @@ func (m *Manager) Stop() {
 		aj.cancel()
 		delete(m.active, name)
 	}
-	log.Println("[cron] Stopped")
+	slog.Info(fmt.Sprint("[cron] Stopped"))
 }
 
 // ─── CRUD Operations ─────────────────────────────────
@@ -193,7 +211,7 @@ func (m *Manager) Create(name, schedule, prompt string) error {
 	}
 
 	m.schedule(job)
-	log.Printf("[cron] Created job %q (schedule=%s)", name, schedule)
+	slog.Info(fmt.Sprintf("[cron] Created job %q (schedule=%s)", name, schedule))
 	return nil
 }
 
@@ -212,7 +230,7 @@ func (m *Manager) Delete(name string) error {
 	if err := os.RemoveAll(jobDir); err != nil {
 		return fmt.Errorf("delete job %q: %w", name, err)
 	}
-	log.Printf("[cron] Deleted job %q", name)
+	slog.Info(fmt.Sprintf("[cron] Deleted job %q", name))
 	return nil
 }
 
@@ -228,7 +246,7 @@ func (m *Manager) Enable(name string) error {
 		return err
 	}
 	m.schedule(job)
-	log.Printf("[cron] Enabled job %q", name)
+	slog.Info(fmt.Sprintf("[cron] Enabled job %q", name))
 	return nil
 }
 
@@ -244,7 +262,7 @@ func (m *Manager) Disable(name string) error {
 	if err := m.saveJob(job); err != nil {
 		return err
 	}
-	log.Printf("[cron] Disabled job %q", name)
+	slog.Info(fmt.Sprintf("[cron] Disabled job %q", name))
 	return nil
 }
 
@@ -372,7 +390,7 @@ func (m *Manager) schedule(job Job) {
 
 	interval, err := parseInterval(job.Schedule)
 	if err != nil {
-		log.Printf("[cron] Invalid schedule for %q: %v", job.Name, err)
+		slog.Info(fmt.Sprintf("[cron] Invalid schedule for %q: %v", job.Name, err))
 		return
 	}
 
@@ -395,7 +413,7 @@ func (m *Manager) schedule(job Job) {
 				// Re-read job from disk to get latest config
 				latest, err := m.getJob(aj.job.Name)
 				if err != nil {
-					log.Printf("[cron] Job %q disappeared, stopping", aj.job.Name)
+					slog.Info(fmt.Sprintf("[cron] Job %q disappeared, stopping", aj.job.Name))
 					return
 				}
 				if !latest.Enabled {
@@ -417,22 +435,39 @@ func (m *Manager) unschedule(name string) {
 }
 
 func (m *Manager) execute(job Job) {
-	log.Printf("[cron] Executing job %q", job.Name)
+	slog.Info(fmt.Sprintf("[cron] Executing job %q", job.Name))
 
 	tickCtx, cancel := context.WithTimeout(m.ctx, 5*time.Minute)
 	defer cancel()
 
-	runner := m.runnerFactory(job.Name)
+	// Native callback path: run Go function directly, no LLM cost.
+	m.mu.RLock()
+	nativeFn, isNative := m.nativeCallbacks[job.Name]
+	m.mu.RUnlock()
+
+	var err error
+	if isNative {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("native callback panic: %v", r)
+				}
+			}()
+			nativeFn(tickCtx)
+		}()
+	} else {
+		runner := m.runnerFactory(job.Name)
+		err = runner.Run(tickCtx, job.Prompt)
+	}
+
 	now := time.Now()
 	timestamp := now.Format("2006-01-02T15-04-05")
-
-	err := runner.Run(tickCtx, job.Prompt)
 
 	// Write execution log
 	suffix := "_ok"
 	if err != nil {
 		suffix = "_fail"
-		log.Printf("[cron] Job %q failed: %v", job.Name, err)
+		slog.Info(fmt.Sprintf("[cron] Job %q failed: %v", job.Name, err))
 	}
 
 	logFile := filepath.Join(m.baseDir, job.Name, "logs", timestamp+suffix+".md")

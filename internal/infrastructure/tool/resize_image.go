@@ -2,11 +2,12 @@ package tool
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/jpeg"
-	"log"
+	"log/slog"
 
-	_ "image/gif"  // register decoders
+	_ "image/gif" // register decoders
 	_ "image/png"
 
 	"golang.org/x/image/draw"
@@ -17,7 +18,7 @@ import (
 func ResizeForVLM(data []byte, mimeType string, maxDim int) ([]byte, string) {
 	img, format, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		log.Printf("[view_media] failed to decode image for resizing (%s): %v", mimeType, err)
+		slog.Info(fmt.Sprintf("[view_media] failed to decode image for resizing (%s): %v", mimeType, err))
 		return data, mimeType
 	}
 
@@ -49,7 +50,7 @@ func ResizeForVLM(data []byte, mimeType string, maxDim int) ([]byte, string) {
 
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 85}); err != nil {
-		log.Printf("[view_media] failed to encode resized image: %v", err)
+		slog.Info(fmt.Sprintf("[view_media] failed to encode resized image: %v", err))
 		return data, mimeType
 	}
 

@@ -2,7 +2,7 @@ package knowledge
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 )
 
@@ -124,7 +124,7 @@ func (r *Retriever) EmbedAndIndexByID(id string) error {
 }
 
 // BuildIndex generates embeddings for all existing KIs that aren't already indexed.
-// Called on startup.
+// Called on startup. After indexing, runs ConsolidateDuplicates to merge similar KIs.
 func (r *Retriever) BuildIndex() error {
 	items, err := r.store.List()
 	if err != nil {
@@ -137,17 +137,113 @@ func (r *Retriever) BuildIndex() error {
 			continue
 		}
 		if err := r.EmbedAndIndex(item); err != nil {
-			log.Printf("[ki-index] failed to embed %s: %v", item.ID, err)
+			slog.Info(fmt.Sprintf("[ki-index] failed to embed %s: %v", item.ID, err))
 			continue
 		}
 		newCount++
 	}
 
 	if newCount > 0 {
-		log.Printf("[ki-index] indexed %d new KIs (total: %d)", newCount, r.index.Size())
+		slog.Info(fmt.Sprintf("[ki-index] indexed %d new KIs (total: %d)", newCount, r.index.Size()))
 		if err := r.index.Save(); err != nil {
-			log.Printf("[ki-index] save failed: %v", err)
+			slog.Info(fmt.Sprintf("[ki-index] save failed: %v", err))
 		}
 	}
+
 	return nil
+}
+
+// ConsolidateDuplicates scans all indexed KIs for duplicate pairs (cosine > threshold)
+// and merges the shorter into the longer, deleting the redundant one.
+// This is the system-level mechanism that prevents KI sprawl — runs at every startup.
+func (r *Retriever) ConsolidateDuplicates(threshold float64) {
+	items, err := r.store.List()
+	if err != nil {
+		return
+	}
+
+	// Build a set of all KI IDs for quick lookup
+	type kiInfo struct {
+		id    string
+		title string
+		len   int // content length, as a proxy for "completeness"
+	}
+
+	var kis []kiInfo
+	for _, item := range items {
+		full, err := r.store.GetWithContent(item.ID)
+		if err != nil {
+			continue
+		}
+		kis = append(kis, kiInfo{id: item.ID, title: item.Title, len: len(full.Content)})
+	}
+
+	deleted := make(map[string]bool)
+	merged := 0
+
+	for i := 0; i < len(kis); i++ {
+		if deleted[kis[i].id] {
+			continue
+		}
+
+		// Search for the best match of this KI in the index
+		vec := r.index.GetVec(kis[i].id)
+		if vec == nil {
+			continue
+		}
+
+		results := r.index.Search(vec, 5) // top 5 to find all near-duplicates
+		for _, res := range results {
+			if res.ID == kis[i].id || deleted[res.ID] || res.Score < threshold {
+				continue
+			}
+
+			// Found a duplicate pair: merge shorter into longer
+			var keeper, victim kiInfo
+			// Find the victim info
+			var victimInfo kiInfo
+			for _, k := range kis {
+				if k.id == res.ID {
+					victimInfo = k
+					break
+				}
+			}
+
+			if kis[i].len >= victimInfo.len {
+				keeper, victim = kis[i], victimInfo
+			} else {
+				keeper, victim = victimInfo, kis[i]
+			}
+
+			// Merge: append victim's unique content into keeper
+			victimFull, err := r.store.GetWithContent(victim.id)
+			if err != nil {
+				continue
+			}
+
+			appendContent := fmt.Sprintf("\n\n---\n\n## Consolidated from: %s\n\n%s", victim.title, victimFull.Content)
+			if err := r.store.UpdateMerge(keeper.id, appendContent, keeper.title); err != nil {
+				slog.Info(fmt.Sprintf("[ki-consolidate] merge failed %s←%s: %v", keeper.id, victim.id, err))
+				continue
+			}
+
+			// Delete victim and remove from index
+			if err := r.store.Delete(victim.id); err != nil {
+				slog.Info(fmt.Sprintf("[ki-consolidate] delete failed %s: %v", victim.id, err))
+				continue
+			}
+			r.index.Remove(victim.id)
+			deleted[victim.id] = true
+			merged++
+
+			slog.Info(fmt.Sprintf("[ki-consolidate] merged %q into %q (score=%.2f)", victim.title, keeper.title, res.Score))
+		}
+	}
+
+	if merged > 0 {
+		slog.Info(fmt.Sprintf("[ki-consolidate] consolidated %d duplicate KIs", merged))
+		if err := r.index.Save(); err != nil {
+			slog.Info(fmt.Sprintf("[ki-consolidate] index save failed: %v", err))
+		}
+	}
 }

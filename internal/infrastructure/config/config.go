@@ -107,23 +107,38 @@ func maskKey(key string) string {
 
 // Config is the root configuration structure, mapped from config.yaml.
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	Agent     AgentConfig     `yaml:"agent"`
-	LLM       LLMConfig       `yaml:"llm"`
-	Security  SecurityConfig  `yaml:"security"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Cron      CronConfig      `yaml:"cron"`
-	Evo       EvoConfig       `yaml:"evo"`
-	MCP       MCPConfig       `yaml:"mcp"`
-	Search    SearchConfig    `yaml:"search"`
-	Embedding EmbeddingConfig `yaml:"embedding"`
-	Memory    MemoryConfig    `yaml:"memory"`
+	Server        ServerConfig        `yaml:"server"`
+	Agent         AgentConfig         `yaml:"agent"`
+	LLM           LLMConfig           `yaml:"llm"`
+	Security      SecurityConfig      `yaml:"security"`
+	Storage       StorageConfig       `yaml:"storage"`
+	Cron          CronConfig          `yaml:"cron"`
+	Evo           EvoConfig           `yaml:"evo"`
+	MCP           MCPConfig           `yaml:"mcp"`
+	Search        SearchConfig        `yaml:"search"`
+	Embedding     EmbeddingConfig     `yaml:"embedding"`
+	Memory        MemoryConfig        `yaml:"memory"`
+	Notifications NotificationsConfig `yaml:"notifications"` // P3 M1
+}
+
+// NotificationsConfig holds outbound webhook targets (P3 M1).
+type NotificationsConfig struct {
+	Webhooks []WebhookTargetConfig `yaml:"webhooks"`
+}
+
+// WebhookTargetConfig is one webhook endpoint in config.yaml.
+type WebhookTargetConfig struct {
+	URL    string   `yaml:"url"`
+	Events []string `yaml:"events,omitempty"` // nil = all
+	Secret string   `yaml:"secret,omitempty"` // HMAC-SHA256 signing key
+	Retry  int      `yaml:"retry,omitempty"`  // extra retries (def: 0)
 }
 
 // MemoryConfig defines settings for the vector memory and diary subsystem.
 type MemoryConfig struct {
 	HalfLifeDays int `yaml:"half_life_days" json:"half_life_days"` // Time-decay half-life in days (default: 30, 0=no decay)
 	MaxFragments int `yaml:"max_fragments" json:"max_fragments"`   // Capacity limit (default: 0=unlimited)
+	MaxAgeDays   int `yaml:"max_age_days" json:"max_age_days"`     // P2 F2: Auto-prune fragments older than this (default: 90, 0=no prune)
 }
 
 // SearchConfig defines web search provider settings.
@@ -172,15 +187,15 @@ func (c *Config) LoadLocation() *time.Location {
 // AgentConfig controls user-facing agent behavior and LLM hyperparameters.
 type AgentConfig struct {
 	DefaultModel    string  `yaml:"default_model"`
-	PlanningMode    bool    `yaml:"planning_mode"`      // true=force plan, false=auto-detect
-	MaxSteps        int     `yaml:"max_steps"`           // Max agent loop steps (default: 200)
-	MaxSubagents    int     `yaml:"max_subagents"`       // Max concurrent sub-agents per session (default: 3)
-	Workspace       string  `yaml:"workspace"`           // Default working directory for shell commands
-	Temperature     float64 `yaml:"temperature"`         // LLM sampling temperature, 0.0-2.0 (default: 0.7)
-	TopP            float64 `yaml:"top_p"`               // Nucleus sampling threshold, 0.0-1.0 (default: 0.9)
-	MaxOutputTokens int     `yaml:"max_output_tokens"`  // Max tokens per LLM response (default: 8192)
-	ContextWindow   int     `yaml:"context_window"`      // Default context window for unknown models (default: 32768)
-	CompactRatio    float64 `yaml:"compact_ratio"`       // Trigger context compact at this usage ratio (default: 0.7)
+	PlanningMode    bool    `yaml:"planning_mode"`     // true=force plan, false=auto-detect
+	MaxSteps        int     `yaml:"max_steps"`         // Max agent loop steps (default: 200)
+	MaxSubagents    int     `yaml:"max_subagents"`     // Max concurrent sub-agents per session (default: 3)
+	Workspace       string  `yaml:"workspace"`         // Default working directory for shell commands
+	Temperature     float64 `yaml:"temperature"`       // LLM sampling temperature, 0.0-2.0 (default: 0.7)
+	TopP            float64 `yaml:"top_p"`             // Nucleus sampling threshold, 0.0-1.0 (default: 0.9)
+	MaxOutputTokens int     `yaml:"max_output_tokens"` // Max tokens per LLM response (default: 8192)
+	ContextWindow   int     `yaml:"context_window"`    // Default context window for unknown models (default: 32768)
+	CompactRatio    float64 `yaml:"compact_ratio"`     // Trigger context compact at this usage ratio (default: 0.7)
 }
 
 // LLMConfig defines LLM provider connections.
@@ -199,13 +214,19 @@ type ProviderDef struct {
 }
 
 // ModelOverride allows per-model configuration of LLM parameters.
-// Values here take priority over AgentConfig globals and built-in DefaultPolicies.
+// Values here take priority over AgentConfig globals and hardcoded fallback.
 // Resolution order: ModelOverride > AgentConfig > hardcoded fallback.
+// P3-1: Pointer types for Temperature/TopP to distinguish 0.0 from unset.
 type ModelOverride struct {
-	ContextWindow   int     `yaml:"context_window" json:"context_window"`
-	MaxOutputTokens int     `yaml:"max_output_tokens" json:"max_output_tokens"`
-	Temperature     float64 `yaml:"temperature" json:"temperature"`
-	TopP            float64 `yaml:"top_p" json:"top_p"`
+	ContextWindow   int      `yaml:"context_window" json:"context_window"`
+	MaxOutputTokens int      `yaml:"max_output_tokens" json:"max_output_tokens"`
+	Temperature     *float64 `yaml:"temperature,omitempty" json:"temperature,omitempty"`
+	TopP            *float64 `yaml:"top_p,omitempty" json:"top_p,omitempty"`
+	// Capability flags — pointer types to distinguish unset (nil) from explicit false.
+	SupportsTools    *bool `yaml:"supports_tools,omitempty" json:"supports_tools,omitempty"`
+	SupportsThinking *bool `yaml:"supports_thinking,omitempty" json:"supports_thinking,omitempty"`
+	SupportsVision   *bool `yaml:"supports_vision,omitempty" json:"supports_vision,omitempty"`
+	SupportsCache    *bool `yaml:"supports_cache,omitempty" json:"supports_cache,omitempty"`
 }
 
 // ModelParams holds resolved parameters for a specific model.
@@ -248,11 +269,12 @@ func (c *Config) ResolveModelParams(model string) ModelParams {
 	// Override with per-model config (highest priority)
 	for _, prov := range c.LLM.Providers {
 		if mc, ok := prov.ModelConfig[model]; ok {
-			if mc.Temperature > 0 {
-				p.Temperature = mc.Temperature
+			// P3-1: Pointer check — nil means unset, non-nil 0.0 is intentional
+			if mc.Temperature != nil {
+				p.Temperature = *mc.Temperature
 			}
-			if mc.TopP > 0 {
-				p.TopP = mc.TopP
+			if mc.TopP != nil {
+				p.TopP = *mc.TopP
 			}
 			if mc.MaxOutputTokens > 0 {
 				p.MaxOutputTokens = mc.MaxOutputTokens
@@ -272,6 +294,12 @@ type SecurityConfig struct {
 	BlockList    []string `yaml:"block_list"`
 	SafeCommands []string `yaml:"safe_commands"`
 	Workspace    string   `yaml:"-"` // populated from AgentConfig.Workspace at startup (not persisted)
+
+	// P3 K1: AI Safety Classifier strategy
+	// ClassifierMode: "pattern" (default) | "llm" | "hybrid"
+	// ClassifierModel: small fast model for llm/hybrid (e.g., "claude-haiku-4-5")
+	ClassifierMode  string `yaml:"classifier_mode,omitempty"`
+	ClassifierModel string `yaml:"classifier_model,omitempty"`
 }
 
 // StorageConfig defines paths for data storage.

@@ -49,7 +49,7 @@ type ChunkMapper interface {
 // It handles <think>...</think> tags that may span multiple streaming chunks.
 // Content inside <think> tags is routed to reasoning; content outside is routed to text.
 type thinkParser struct {
-	inThink bool           // are we currently inside a <think> block?
+	inThink bool            // are we currently inside a <think> block?
 	pending strings.Builder // buffered partial tag fragment (e.g. "<thi" not yet confirmed)
 }
 

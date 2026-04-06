@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 )
 
@@ -22,8 +21,11 @@ func NewSendMessageTool(brainDir string) *SendMessageTool {
 	return &SendMessageTool{brainDir: brainDir}
 }
 
-func (t *SendMessageTool) Name() string        { return "send_message" }
-func (t *SendMessageTool) Description() string { return prompttext.ToolSendMessage }
+func (t *SendMessageTool) Name() string { return "send_message" }
+func (t *SendMessageTool) Description() string {
+	return `Send a notification message. Messages are saved to the brain for later review.
+Use this to report task completion, alert on issues, or communicate results.`
+}
 
 func (t *SendMessageTool) Schema() map[string]any {
 	return map[string]any{

@@ -20,22 +20,22 @@ const (
 // envBlacklist contains env vars that should never be captured from command output.
 // These are transient, session-specific, or security-sensitive.
 var envBlacklist = map[string]bool{
-	"_":            true, // last command
-	"SHLVL":        true, // shell nesting level
-	"OLDPWD":       true, // tracked via cwd
-	"PWD":          true, // tracked via cwd
-	"BASH_FUNC_%":  true, // shell functions (prefix match handled separately)
-	"BASHOPTS":     true,
+	"_":             true, // last command
+	"SHLVL":         true, // shell nesting level
+	"OLDPWD":        true, // tracked via cwd
+	"PWD":           true, // tracked via cwd
+	"BASH_FUNC_%":   true, // shell functions (prefix match handled separately)
+	"BASHOPTS":      true,
 	"BASH_VERSINFO": true,
-	"BASH_VERSION": true,
-	"SHELLOPTS":    true,
-	"RANDOM":       true,
-	"LINENO":       true,
-	"SECONDS":      true,
-	"EPOCHSECONDS": true,
+	"BASH_VERSION":  true,
+	"SHELLOPTS":     true,
+	"RANDOM":        true,
+	"LINENO":        true,
+	"SECONDS":       true,
+	"EPOCHSECONDS":  true,
 	"EPOCHREALTIME": true,
-	"BASHPID":      true,
-	"PPID":         true,
+	"BASHPID":       true,
+	"PPID":          true,
 }
 
 // ShellState tracks persistent shell context across independent bash processes.

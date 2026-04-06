@@ -15,7 +15,7 @@
  * ConnectionProvider. streamHandler.ts can then be deleted.
  */
 
-import type { StreamCallbacks } from './types'
+import type { StreamCallbacks, WSContentPart } from './types'
 import { getApiBase, getAuthToken } from './api'
 import {
   chatStreamSSE,
@@ -42,11 +42,12 @@ export function chatStream(
   sessionId: string,
   mode: string,
   cb: StreamCallbacks,
+  contentParts?: WSContentPart[],
 ): { cancel: () => void } {
   const ws = getSharedWSClient()
   // Route to WS only if connected AND healthy (recent pong received)
   if (ws && ws.state === 'connected' && ws.isHealthy) {
-    return chatStreamWS(ws, message, sessionId, mode, cb)
+    return chatStreamWS(ws, message, sessionId, mode, cb, contentParts)
   }
   return chatStreamSSE(message, sessionId, mode, cb)
 }

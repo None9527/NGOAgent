@@ -4,16 +4,16 @@ package service
 type State int
 
 const (
-	StateIdle       State = 0  // Waiting for input
-	StatePrepare    State = 1  // Building system prompt + context
-	StateGenerate   State = 2  // Calling LLM
-	StateToolExec   State = 3  // Executing tool calls
-	StateGuardCheck State = 4  // Behavior guardrails check
-	StateCompact    State = 5  // Context compaction
-	StateError      State = 6  // Recoverable error
-	StateFatal      State = 7  // Unrecoverable error
-	StateDone       State = 8  // Turn complete
-	StateEvaluating State = 9  // Evo mode: evaluating execution quality
+	StateIdle       State = 0 // Waiting for input
+	StatePrepare    State = 1 // Building system prompt + context
+	StateGenerate   State = 2 // Calling LLM
+	StateToolExec   State = 3 // Executing tool calls
+	StateGuardCheck State = 4 // Behavior guardrails check
+	StateCompact    State = 5 // Context compaction
+	StateError      State = 6 // Recoverable error
+	StateFatal      State = 7 // Unrecoverable error
+	StateDone       State = 8 // Turn complete
+	StateEvaluating State = 9 // Evo mode: evaluating execution quality
 )
 
 // String returns the human-readable state name.
@@ -54,8 +54,8 @@ type Transition struct {
 var ValidTransitions = []Transition{
 	{StateIdle, StatePrepare},
 	{StatePrepare, StateGenerate},
-	{StateGenerate, StateToolExec},   // Tool calls present
-	{StateGenerate, StateDone},       // No tool calls → done
+	{StateGenerate, StateToolExec}, // Tool calls present
+	{StateGenerate, StateDone},     // No tool calls → done
 	{StateToolExec, StateGuardCheck},
 	{StateGuardCheck, StateGenerate}, // Loop back for next turn
 	{StateGuardCheck, StateDone},     // Max steps reached

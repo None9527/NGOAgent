@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 )
 
 // TaskBoundaryTool indicates task state transitions and reports structured progress.
@@ -17,8 +16,13 @@ func NewTaskBoundaryTool() *TaskBoundaryTool {
 	return &TaskBoundaryTool{}
 }
 
-func (t *TaskBoundaryTool) Name() string        { return "task_boundary" }
-func (t *TaskBoundaryTool) Description() string { return prompttext.ToolTaskBoundary }
+func (t *TaskBoundaryTool) Name() string { return "task_boundary" }
+func (t *TaskBoundaryTool) Description() string {
+	return `Report task progress.
+- status: describe NEXT steps.
+- summary: cumulative accomplishments.
+- mode: planning/execution/verification.`
+}
 
 func (t *TaskBoundaryTool) Schema() map[string]any {
 	return map[string]any{
@@ -74,8 +78,8 @@ func (t *TaskBoundaryTool) Execute(ctx context.Context, args map[string]any) (dt
 	// Mode-specific instructions are handled by EphPlanningMode/EphExitingPlanningMode.
 	// Avoid duplicating them here to prevent LLM attention dilution.
 	return dtool.ToolResult{
-		Output:  output,
-		Signal:  dtool.SignalProgress,
+		Output: output,
+		Signal: dtool.SignalProgress,
 		Payload: map[string]any{
 			"task_name": taskName,
 			"status":    status,

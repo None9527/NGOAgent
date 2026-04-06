@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -55,19 +55,19 @@ type ToolAnnotations struct {
 
 // MCPTool represents a tool discovered from an MCP server.
 type MCPTool struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	InputSchema map[string]any    `json:"inputSchema"`
-	Annotations *ToolAnnotations  `json:"annotations,omitempty"`
-	ServerName  string            // populated at discovery time
+	Name        string           `json:"name"`
+	Description string           `json:"description"`
+	InputSchema map[string]any   `json:"inputSchema"`
+	Annotations *ToolAnnotations `json:"annotations,omitempty"`
+	ServerName  string           // populated at discovery time
 }
 
 // MCPContent is a single item in an MCP tools/call response.
 type MCPContent struct {
-	Type     string `json:"type"`               // "text" | "image" | "resource"
-	Text     string `json:"text,omitempty"`     // type=text
-	Data     string `json:"data,omitempty"`     // type=image (base64)
-	MimeType string `json:"mimeType,omitempty"` // type=image
+	Type     string               `json:"type"`               // "text" | "image" | "resource"
+	Text     string               `json:"text,omitempty"`     // type=text
+	Data     string               `json:"data,omitempty"`     // type=image (base64)
+	MimeType string               `json:"mimeType,omitempty"` // type=image
 	Resource *MCPEmbeddedResource `json:"resource,omitempty"` // type=resource
 }
 
@@ -90,9 +90,9 @@ type MCPResource struct {
 
 // MCPPrompt represents a prompt template from an MCP server.
 type MCPPrompt struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description,omitempty"`
-	Arguments   []PromptArgument  `json:"arguments,omitempty"`
+	Name        string           `json:"name"`
+	Description string           `json:"description,omitempty"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
 	ServerName  string
 }
 
@@ -206,7 +206,7 @@ func (m *Manager) Stop(name string) error {
 func (m *Manager) StartAll(ctx context.Context, configs []ServerConfig) {
 	for _, cfg := range configs {
 		if err := m.Start(ctx, cfg.Name, cfg.Command, cfg.Args, cfg.Env); err != nil {
-			log.Printf("[mcp] Failed to start %q: %v", cfg.Name, err)
+			slog.Info(fmt.Sprintf("[mcp] Failed to start %q: %v", cfg.Name, err))
 		}
 	}
 }
@@ -413,12 +413,12 @@ func (m *Manager) spawnServer(ctx context.Context, srv *Server) error {
 
 	// Perform MCP handshake + capability discovery
 	if err := m.initialize(srv); err != nil {
-		log.Printf("[mcp] Server %q initialize failed: %v", srv.Name, err)
+		slog.Info(fmt.Sprintf("[mcp] Server %q initialize failed: %v", srv.Name, err))
 		// Non-fatal — server might still be usable
 	}
 
-	log.Printf("[mcp] Server %q started: %d tools, %d resources, %d prompts",
-		srv.Name, len(srv.tools), len(srv.resources), len(srv.prompts))
+	slog.Info(fmt.Sprintf("[mcp] Server %q started: %d tools, %d resources, %d prompts",
+		srv.Name, len(srv.tools), len(srv.resources), len(srv.prompts)))
 	return nil
 }
 
@@ -451,7 +451,7 @@ func (m *Manager) refreshServer(srv *Server) {
 		srv.mu.Lock()
 		srv.tools = tools
 		srv.mu.Unlock()
-		log.Printf("[mcp] Server %q tools refreshed: %d tools", srv.Name, len(tools))
+		slog.Info(fmt.Sprintf("[mcp] Server %q tools refreshed: %d tools", srv.Name, len(tools)))
 	}
 }
 
@@ -526,7 +526,7 @@ func (m *Manager) readLoop(srv *Server) {
 			srv.mu.Lock()
 			srv.running = false
 			srv.mu.Unlock()
-			log.Printf("[mcp] Server %q reader error: %v", srv.Name, err)
+			slog.Info(fmt.Sprintf("[mcp] Server %q reader error: %v", srv.Name, err))
 			// Drain pending
 			srv.pendingMu.Lock()
 			for id, call := range srv.pending {
@@ -539,7 +539,7 @@ func (m *Manager) readLoop(srv *Server) {
 
 		var resp rpcResponse
 		if err := json.Unmarshal(data, &resp); err != nil {
-			log.Printf("[mcp] Server %q bad message: %v", srv.Name, err)
+			slog.Info(fmt.Sprintf("[mcp] Server %q bad message: %v", srv.Name, err))
 			continue
 		}
 
@@ -569,16 +569,16 @@ func (m *Manager) readLoop(srv *Server) {
 func (m *Manager) handleNotification(srv *Server, method string) {
 	switch method {
 	case "notifications/tools/list_changed":
-		log.Printf("[mcp] Server %q: tools list changed, refreshing...", srv.Name)
+		slog.Info(fmt.Sprintf("[mcp] Server %q: tools list changed, refreshing...", srv.Name))
 		go srv.onToolsChanged()
 	case "notifications/resources/list_changed":
-		log.Printf("[mcp] Server %q: resources list changed", srv.Name)
+		slog.Info(fmt.Sprintf("[mcp] Server %q: resources list changed", srv.Name))
 		// Future: refresh resources
 	case "notifications/prompts/list_changed":
-		log.Printf("[mcp] Server %q: prompts list changed", srv.Name)
+		slog.Info(fmt.Sprintf("[mcp] Server %q: prompts list changed", srv.Name))
 		// Future: refresh prompts
 	default:
-		log.Printf("[mcp] Server %q: unhandled notification %q", srv.Name, method)
+		slog.Info(fmt.Sprintf("[mcp] Server %q: unhandled notification %q", srv.Name, method))
 	}
 }
 
@@ -634,7 +634,7 @@ func sendRPC(ctx context.Context, srv *Server, method string, params any) (json.
 func sendNotification(srv *Server, method string, params any) {
 	req := rpcRequest{JSONRPC: "2.0", Method: method, Params: params}
 	if err := writeRPC(srv, req); err != nil {
-		log.Printf("[mcp] Failed to send notification %q to %q: %v", method, srv.Name, err)
+		slog.Info(fmt.Sprintf("[mcp] Failed to send notification %q to %q: %v", method, srv.Name, err))
 	}
 }
 
@@ -671,7 +671,7 @@ func (m *Manager) initialize(srv *Server) error {
 		defer wg.Done()
 		tools, err := discoverTools(ctx, srv)
 		if err != nil {
-			log.Printf("[mcp] %q tools/list error: %v", srv.Name, err)
+			slog.Info(fmt.Sprintf("[mcp] %q tools/list error: %v", srv.Name, err))
 			return
 		}
 		srv.mu.Lock()
@@ -683,7 +683,7 @@ func (m *Manager) initialize(srv *Server) error {
 		defer wg.Done()
 		resources, err := discoverResources(ctx, srv)
 		if err != nil {
-			log.Printf("[mcp] %q resources/list error (server may not support): %v", srv.Name, err)
+			slog.Info(fmt.Sprintf("[mcp] %q resources/list error (server may not support): %v", srv.Name, err))
 			return
 		}
 		srv.mu.Lock()
@@ -695,7 +695,7 @@ func (m *Manager) initialize(srv *Server) error {
 		defer wg.Done()
 		prompts, err := discoverPrompts(ctx, srv)
 		if err != nil {
-			log.Printf("[mcp] %q prompts/list error (server may not support): %v", srv.Name, err)
+			slog.Info(fmt.Sprintf("[mcp] %q prompts/list error (server may not support): %v", srv.Name, err))
 			return
 		}
 		srv.mu.Lock()

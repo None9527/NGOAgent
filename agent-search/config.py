@@ -11,8 +11,12 @@ LLM_URL = os.getenv(
     "LLM_URL",
     "https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("DASHSCOPE_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen-turbo")
+
+# Asset cache — binary downloads (images, video, audio) land here instead of being decoded to text
+# Structure: data/cache/{type}/{YYYY-MM}/{sha256[:16]}_{filename}.{ext}
+CACHE_DIR = os.getenv("CACHE_DIR", "data/cache")
 
 # Prefilter tuning
 MAX_RESULTS_FROM_SEARXNG = 30
@@ -45,3 +49,15 @@ HIGH_AUTHORITY_DOMAINS: set[str] = {
 LOW_QUALITY_DOMAINS: set[str] = {
     "pinterest.com",
 }
+
+# ---------------------------------------------------------------------------
+# Startup validation
+# ---------------------------------------------------------------------------
+import logging as _logging
+_log = _logging.getLogger("agent-search.config")
+
+if not LLM_API_KEY:
+    _log.warning(
+        "⚠ LLM_API_KEY / DASHSCOPE_API_KEY not set — "
+        "LLM reranker (Stage 2) will fail, search will degrade to prefilter-only"
+    )

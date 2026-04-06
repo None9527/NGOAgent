@@ -4,22 +4,20 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
 )
 
 // ToolExecutor is the interface for executing tools.
@@ -54,42 +52,81 @@ type HistoryPersister interface {
 
 // HistoryExport is a serializable snapshot of a single message for persistence.
 type HistoryExport struct {
-	Role       string
-	Content    string
-	ToolCalls  string // JSON-encoded
-	ToolCallID string
-	Reasoning  string // Thinking/reasoning content (assistant messages only)
+	Role        string
+	Content     string
+	ToolCalls   string // JSON-encoded
+	ToolCallID  string
+	Reasoning   string // Thinking/reasoning content (assistant messages only)
+	Attachments string // B2: JSON-encoded [{type,path,mime_type,name}] multimodal references
+}
+
+// RestoreHistory converts persisted HistoryExport records back to llm.Message slice.
+// Centralizes ToolCalls/Attachments JSON deserialization and multimodal ContentParts rebuild.
+// All callers (ChatStream, RetryRun, ChatEngine.Chat) MUST use this instead of inline conversion.
+func RestoreHistory(exports []HistoryExport) []llm.Message {
+	msgs := make([]llm.Message, len(exports))
+	for i, e := range exports {
+		msgs[i] = llm.Message{
+			Role:       e.Role,
+			Content:    e.Content,
+			ToolCallID: e.ToolCallID,
+			Reasoning:  e.Reasoning,
+		}
+		if e.ToolCalls != "" {
+			if err := json.Unmarshal([]byte(e.ToolCalls), &msgs[i].ToolCalls); err != nil {
+				slog.Info(fmt.Sprintf("[history] WARN: unmarshal ToolCalls msg %d: %v", i, err))
+			}
+		}
+		if e.Attachments != "" {
+			if err := json.Unmarshal([]byte(e.Attachments), &msgs[i].Attachments); err != nil {
+				slog.Info(fmt.Sprintf("[history] WARN: unmarshal Attachments msg %d: %v", i, err))
+			}
+		}
+		RebuildContentParts(&msgs[i])
+	}
+	return msgs
 }
 
 // Deps groups all dependencies injected into the AgentLoop.
 type Deps struct {
-	// Core
+	// Core (still concrete — too entangled for clean interface extraction)
 	Config       *config.Config
-	ConfigMgr    *config.Manager
-	LLMRouter    *llm.Router
+	LLMRouter    ModelRouter // was: *llm.Router
 	PromptEngine *prompt.Engine
 	ToolExec     ToolExecutor
-	Security     *security.Hook
+	Security     SecurityChecker // was: *security.Hook
 	Delta        DeltaSink
 
-	// Storage (data sources for prompt assembly)
-	Brain       *brain.ArtifactStore
-	KIStore     *knowledge.Store
+	// Storage (data sources for prompt assembly) — abstracted via ports.go interfaces
+	Brain       ArtifactReader      // was: *brain.ArtifactStore
+	KIStore     KIIndexer           // was: *knowledge.Store
 	KIRetriever KISemanticRetriever // Embedding-based KI search (nil = disabled)
-	Workspace   *workspace.Store
-	SkillMgr    *skill.Manager
+	Workspace   WorkspaceReader     // was: *workspace.Store
+	SkillMgr    SkillLister         // was: *skill.Manager
 
 	// Persistence + Hooks
 	HistoryStore HistoryPersister
-	FileHistory  *workspace.FileHistory // File edit history with snapshot rollback
+	FileHistory  FileEditTracker // was: *workspace.FileHistory
 	Hooks        *HookManager
 	MemoryStore  MemoryStorer // Vector memory for semantic recall (nil = disabled)
 
 	// Evo Mode
-	EvoEvaluator    *EvoEvaluator                // Quality evaluation engine (nil = disabled)
-	EvoRepairRouter *RepairRouter                // Repair strategy router (nil = disabled)
-	EvoStore        *persistence.EvoStore        // Evo persistence (nil = disabled)
+	EvoEvaluator    *EvoEvaluator                               // Quality evaluation engine (nil = disabled)
+	EvoRepairRouter *RepairRouter                               // Repair strategy router (nil = disabled)
+	EvoStore        *persistence.EvoStore                       // Evo persistence (nil = disabled)
 	EventPusher     func(sessionID, eventType string, data any) // WS push for async events (evo, subagent)
+
+	// P3 M1: Outbound webhook notifications (nil = disabled)
+	WebhookHook WebhookNotifyHook
+}
+
+// WebhookNotifyHook is implemented by notify.Hook to receive agent lifecycle events.
+// Using an interface here avoids an import cycle between domain/service and infrastructure/notify.
+type WebhookNotifyHook interface {
+	OnComplete(sessionID string)
+	OnError(sessionID string, err error)
+	OnToolResult(sessionID, toolName, output string, err error)
+	OnProgress(sessionID, taskName, status, summary string)
 }
 
 // KISemanticRetriever abstracts semantic search over KIs (avoids import cycle with knowledge.Retriever).
@@ -105,37 +142,48 @@ func (a *AgentLoop) SetEventPusher(fn func(string, string, any)) {
 
 // AgentLoop manages a single agent conversation loop.
 type AgentLoop struct {
-	deps           Deps
+	deps Deps
+
+	// ── Lifecycle & Synchronization ──
+	state     State
+	mu        sync.Mutex // Protects: history, ephemerals, task, evo state, historyDirty
+	runMu     sync.Mutex // Backpressure: prevents concurrent Run()
+	stopCh    chan struct{}
+	runCancel context.CancelFunc // Cancels the running context on Stop()
+	options   RunOptions
+	guard     *BehaviorGuard
+
+	// ── History & Persistence ──
 	history        []llm.Message
-	persistedCount int // number of messages already persisted to DB (incremental write baseline)
-	state          State
-	mu             sync.Mutex
-	runMu          sync.Mutex // Backpressure: prevents concurrent Run() (Anti's BUSY state)
-	stopCh         chan struct{}
-	runCancel      context.CancelFunc // Cancels the running context on Stop()
-	options        RunOptions
-	guard          *BehaviorGuard
-	ephemerals     []string // Pending ephemeral messages for next LLM call
-	pendingWake    atomic.Bool // Set by barrier when subagents complete; checked by runInner tail
+	persistedCount int         // Messages already persisted to DB (incremental write baseline)
+	ephemerals     []string    // Pending ephemeral messages for next LLM call
+	pendingWake    atomic.Bool // Set by barrier when subagents complete
 
-	// Task state (extracted to reduce flat field count)
-	task *TaskTracker
+	// ── Context Tracking (per-run, protected by mu) ──
+	task                *TaskTracker        // Task state (step count, artifacts, plan status)
+	pendingMedia        []map[string]string // Multimodal media items pending injection
+	historyDirty        bool                // True after compact/truncate → triggers sanitize
+	cachedToolDefs      []llm.ToolDef       // Tool definitions cache (rebuilt on change)
+	tokenTracker        TokenTracker        // Hybrid API+estimate token tracking
+	compactCount        int                 // Consecutive compaction count (guards summary loss)
+	outputContinuations int                 // Auto-continue count when LLM output is truncated
+	cacheTracker        llm.CacheTracker    // System prompt hash stability tracking
 
-	pendingMedia     []map[string]string // Multimodal: media items pending injection into next LLM call
-	historicyDirty   bool                // True after compact/truncate — triggers sanitize in doGenerate
-	cachedToolDefs   []llm.ToolDef       // Cached tool definitions (rebuilt only when tools change)
-	tokenTracker     TokenTracker        // Hybrid API+estimate token tracking
-	compactCount     int                 // Consecutive compaction count — guards against recursive summary loss
+	// ── Phase Detection & Dream ──
+	phaseDetector *PhaseDetector
+	dream         *DreamTask
 
-	// Evo state (per-run, reset on new user message)
+	// ── Evo State (per-run, reset on new user message) ──
 	evoLastEval      *EvalResult
 	evoLastPlan      *RepairPlan
 	evoRepairSuccess bool
-	traceCollector   *TraceCollectorHook // Per-loop trace collector for evo evaluation
+	traceCollector   *TraceCollectorHook
 
-	// Runtime plan mode: "plan" | "auto" | "evo" — set via API, NOT persisted to config.yaml.
-	// Default from config.Agent.PlanningMode on startup.
-	runtimePlanMode string
+	// ── Runtime Config ──
+	mode ModePermissions // Execution mode permissions — set via API, NOT persisted
+
+	// ── Compression Protection ──
+	activeSkills map[string]string // skill name → content (re-injected after compact)
 }
 
 // RunOptions configure a single run.
@@ -155,18 +203,20 @@ func NewAgentLoop(deps Deps) *AgentLoop {
 	if deps.Brain != nil && deps.Workspace != nil {
 		deps.Brain.SetWorkspaceDir(deps.Workspace.WorkDir())
 	}
-	// Derive initial plan mode from config (bool → string)
-	initPlanMode := "auto"
+	// Derive initial mode from config
+	initMode := ModeFromString("auto", false)
 	if deps.Config != nil && deps.Config.Agent.PlanningMode {
-		initPlanMode = "plan"
+		initMode = ModeFromString("plan", false)
 	}
 	a := &AgentLoop{
-		deps:            deps,
-		state:           StateIdle,
-		stopCh:          make(chan struct{}),
-		guard:           NewBehaviorGuard(agentCfg),
-		task:            NewTaskTracker(),
-		runtimePlanMode: initPlanMode,
+		deps:          deps,
+		state:         StateIdle,
+		stopCh:        make(chan struct{}),
+		guard:         NewBehaviorGuard(agentCfg),
+		task:          NewTaskTracker(),
+		mode:          initMode,
+		phaseDetector: &PhaseDetector{},
+		dream:         NewDreamTask(30 * time.Second),
 		options: RunOptions{
 			Mode: "chat",
 		},
@@ -186,11 +236,12 @@ func (a *AgentLoop) ReloadConfig(cfg *config.Config) {
 	agentCfg := cfg.Agent
 	a.guard.UpdateConfig(&agentCfg)
 	a.deps.Config = cfg
-	// Refresh plan mode if toggled via config
+	// Refresh execution mode if toggled via config (preserve evo layer)
+	evoWas := a.mode.EvoEnabled
 	if cfg.Agent.PlanningMode {
-		a.runtimePlanMode = "plan"
+		a.mode = ModeFromString("plan", evoWas)
 	} else {
-		a.runtimePlanMode = "auto"
+		a.mode = ModeFromString("auto", evoWas)
 	}
 }
 
@@ -209,7 +260,7 @@ func (a *AgentLoop) SetHistory(msgs []llm.Message) {
 	defer a.mu.Unlock()
 	a.history = msgs
 	a.persistedCount = len(msgs)
-	a.historicyDirty = true // loaded history may need sanitization
+	a.historyDirty = true // loaded history may need sanitization
 }
 
 // AppendMessage adds a message to the history.
@@ -244,7 +295,7 @@ func (a *AgentLoop) StripLastTurn() (string, error) {
 	}
 	// Extract last user message
 	if len(a.history) == 0 {
-		return "", fmt.Errorf("no previous user message to retry")
+		return "", agenterr.NewValidation("retry", "no previous user message to retry")
 	}
 	lastUser := a.history[len(a.history)-1].Content
 	a.history = a.history[:len(a.history)-1]
@@ -296,6 +347,11 @@ func (a *AgentLoop) GetTokenStats() TokenStats {
 	return a.tokenTracker.Stats()
 }
 
+// GetCacheStats returns system prompt cache-break tracking metrics (P2 E2).
+func (a *AgentLoop) GetCacheStats() llm.CacheStats {
+	return a.cacheTracker.Stats()
+}
+
 // Compact triggers context compaction on the current history.
 func (a *AgentLoop) Compact() {
 	a.doCompact(context.Background())
@@ -323,8 +379,8 @@ func (a *AgentLoop) CompactIfNeeded() {
 	mp := a.deps.Config.ResolveModelParams(a.deps.LLMRouter.CurrentModel())
 	budget := int(float64(mp.ContextWindow) * mp.CompactRatio)
 	if tokenEst > budget {
-		log.Printf("[compact] Auto-compacting on resume: %d tokens > %d budget (%d messages)",
-			tokenEst, budget, msgCount)
+		slog.Info(fmt.Sprintf("[compact] Auto-compacting on resume: %d tokens > %d budget (%d messages)",
+			tokenEst, budget, msgCount))
 		a.doCompact(context.Background()) // resume compaction uses background context
 	}
 }
@@ -356,24 +412,28 @@ func (a *AgentLoop) Stop() {
 	}()
 }
 
-// SetPlanMode sets the runtime planning mode ("plan", "auto", or "evo").
+// SetMode sets the execution mode from an API string.
+// Supports: "auto", "plan", "agentic", "evo" (backward compat → auto+evo).
 // This is an in-memory toggle; it does NOT write to config.yaml.
-func (a *AgentLoop) SetPlanMode(mode string) {
+func (a *AgentLoop) SetMode(mode string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if mode == "plan" || mode == "auto" || mode == "evo" {
-		a.runtimePlanMode = mode
-	}
+	a.mode = ModeFromString(mode, false)
 }
 
-// PlanMode returns the current runtime planning mode.
-func (a *AgentLoop) PlanMode() string {
+// SetPlanMode is a backward-compatible alias for SetMode.
+func (a *AgentLoop) SetPlanMode(mode string) { a.SetMode(mode) }
+
+// Mode returns the current execution mode permissions.
+func (a *AgentLoop) Mode() ModePermissions {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.runtimePlanMode == "" {
-		return "auto"
-	}
-	return a.runtimePlanMode
+	return a.mode
+}
+
+// PlanMode returns the mode name string (backward compat).
+func (a *AgentLoop) PlanMode() string {
+	return a.Mode().String()
 }
 
 // protoState creates a LoopState with a shared BoundaryState pointer.
@@ -382,8 +442,9 @@ func (a *AgentLoop) protoState() *dtool.LoopState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return &dtool.LoopState{
-		PlanMode: a.runtimePlanMode,
-		Boundary: &a.task.BoundaryState,
+		AutoApprove: a.mode.AutoApprove,
+		SelfReview:  a.mode.SelfReview,
+		Boundary:    &a.task.BoundaryState,
 	}
 }
 
@@ -402,9 +463,16 @@ func (a *AgentLoop) syncLoopState(ps *dtool.LoopState) {
 		a.task.SkillLoaded = ps.SkillLoaded
 		a.task.SkillPath = ps.SkillPath
 	}
+	// Compression protection: copy active skills from protocol state
+	for name, content := range ps.ActiveSkills {
+		if a.activeSkills == nil {
+			a.activeSkills = make(map[string]string)
+		}
+		a.activeSkills[name] = content
+	}
 	// Deterministic force: plan.md → must call notify_user next
 	// Skip in agentic mode — agent self-reviews, no forced yield
-	if ps.ForceNextTool != "" && ps.PlanMode != "agentic" {
+	if ps.ForceNextTool != "" && !ps.SelfReview {
 		a.guard.SetForceToolName(ps.ForceNextTool)
 	}
 	// Multimodal: transfer pending media from protocol dispatcher
@@ -413,4 +481,3 @@ func (a *AgentLoop) syncLoopState(ps *dtool.LoopState) {
 		ps.PendingMedia = nil
 	}
 }
-

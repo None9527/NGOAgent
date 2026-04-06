@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"mime"
 	"os"
 	"path/filepath"
@@ -14,10 +14,10 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/tool"
 )
 
@@ -31,7 +31,7 @@ type EvalResult struct {
 
 // EvalIssue describes a single problem found during evaluation.
 type EvalIssue struct {
-	Severity    string `json:"severity"`    // critical | warning | info
+	Severity    string `json:"severity"` // critical | warning | info
 	Description string `json:"description"`
 }
 
@@ -53,8 +53,8 @@ func NewEvoEvaluator(provider llm.Provider, cfg config.EvoConfig, store *persist
 
 // EvalContext carries global context for informed evaluation.
 type EvalContext struct {
-	ConversationSummary string     // Prior rounds summary
-	PreviousFailures    string     // Formatted previous eval failures
+	ConversationSummary string      // Prior rounds summary
+	PreviousFailures    string      // Formatted previous eval failures
 	PreviousEval        *EvalResult // Last eval result (nil on first round)
 }
 
@@ -78,7 +78,7 @@ func (e *EvoEvaluator) Evaluate(ctx context.Context, sessionID string, traceID u
 	// Build LLM request: system + user (multimodal when images present)
 	userMsg := llm.Message{Role: "user"}
 	if len(imageParts) > 0 {
-		log.Printf("[evo] injecting %d images for VLM evaluation (user+artifact)", len(imageParts))
+		slog.Info(fmt.Sprintf("[evo] injecting %d images for VLM evaluation (user+artifact)", len(imageParts)))
 		parts := []llm.ContentPart{{Type: "text", Text: input}}
 		parts = append(parts, imageParts...)
 		userMsg.ContentParts = parts
@@ -231,7 +231,7 @@ func (e *EvoEvaluator) loadImagePart(path string) *llm.ContentPart {
 	}
 
 	dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
-	log.Printf("[evo] loaded image: %s (%d bytes)", filepath.Base(path), len(data))
+	slog.Info(fmt.Sprintf("[evo] loaded image: %s (%d bytes)", filepath.Base(path), len(data)))
 
 	return &llm.ContentPart{
 		Type:     "image_url",
@@ -273,11 +273,4 @@ func DetectDissatisfaction(msg string) bool {
 		}
 	}
 	return false
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

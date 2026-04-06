@@ -6,9 +6,9 @@ import (
 	"regexp"
 	"strings"
 
+	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/mcp"
-	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 )
 
 // sanitizeSegment converts a name to a valid identifier segment (alphanum + underscore).
@@ -26,8 +26,8 @@ func mcpToolName(serverName, toolName string) string {
 
 // MCPToolAdapter wraps an MCP-discovered tool as a native agent tool.
 type MCPToolAdapter struct {
-	server  string        // canonical server name
-	tool    mcp.MCPTool   // original MCP tool definition
+	server  string      // canonical server name
+	tool    mcp.MCPTool // original MCP tool definition
 	manager *mcp.Manager
 }
 
@@ -83,6 +83,23 @@ func (a *MCPToolAdapter) IsDestructive() bool {
 // the original MCP tool name from our stored definition.
 func (a *MCPToolAdapter) Execute(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
 	return a.manager.CallTool(ctx, a.tool.Name, args)
+}
+
+// ToolMeta returns dynamic metadata based on MCP tool annotations.
+// Implements dtool.MetaProvider for ToolMeta-driven security decisions.
+func (a *MCPToolAdapter) ToolMeta() dtool.ToolMeta {
+	access := dtool.AccessNetwork // MCP tools are external API calls by default
+	if a.IsReadOnly() {
+		access = dtool.AccessReadOnly
+	} else if a.IsDestructive() {
+		access = dtool.AccessDestructive
+	}
+	return dtool.ToolMeta{
+		Kind:            dtool.KindNetwork,
+		Access:          access,
+		ConcurrencySafe: true, // MCP tools are stateless external calls
+		MaxOutputSize:   64 * 1024,
+	}
 }
 
 // ─── Registry helpers ──────────────────────────────────────────────────────

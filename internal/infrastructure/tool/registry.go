@@ -41,8 +41,6 @@ func NewRegistry() *Registry {
 	}
 }
 
-
-
 // SetWorkspaceDir sets the default workspace directory for path resolution.
 // Relative paths in tool args will be resolved against this directory.
 func (r *Registry) SetWorkspaceDir(dir string) {
@@ -113,7 +111,8 @@ func (r *Registry) resolveToolPaths(name string, args map[string]any) {
 	}
 
 	switch name {
-	case "read_file", "write_file", "edit_file", "glob", "grep_search", "undo_edit":
+	case "read_file", "write_file", "edit_file", "glob", "grep_search", "undo_edit",
+		"tree", "find_files", "count_lines":
 		// Resolve the "path" argument
 		if p, ok := args["path"].(string); ok && p != "" && !filepath.IsAbs(p) {
 			args["path"] = filepath.Join(ws, p)
@@ -121,6 +120,14 @@ func (r *Registry) resolveToolPaths(name string, args map[string]any) {
 		// grep_search also has "directory" field
 		if d, ok := args["directory"].(string); ok && d != "" && !filepath.IsAbs(d) {
 			args["directory"] = filepath.Join(ws, d)
+		}
+	case "diff_files":
+		// Resolve both file paths
+		if p, ok := args["file_a"].(string); ok && p != "" && !filepath.IsAbs(p) {
+			args["file_a"] = filepath.Join(ws, p)
+		}
+		if p, ok := args["file_b"].(string); ok && p != "" && !filepath.IsAbs(p) {
+			args["file_b"] = filepath.Join(ws, p)
 		}
 	case "run_command":
 		// Set default cwd to workspace if not specified
@@ -229,3 +236,21 @@ type ToolError struct {
 }
 
 func (e *ToolError) Error() string { return e.Message }
+
+// GetMeta returns the metadata for a tool by name.
+// Priority: tool implements MetaProvider → domain DefaultMeta table → conservative fallback.
+func (r *Registry) GetMeta(name string) dtool.ToolMeta {
+	r.mu.RLock()
+	t, ok := r.tools[name]
+	r.mu.RUnlock()
+
+	// If the tool implements MetaProvider, use its custom metadata
+	if ok {
+		if mp, isMP := t.(dtool.MetaProvider); isMP {
+			return mp.Meta()
+		}
+	}
+
+	// Fall back to domain-level default table
+	return dtool.DefaultMeta(name)
+}

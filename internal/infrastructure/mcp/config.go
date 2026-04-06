@@ -20,7 +20,8 @@ package mcp
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -79,7 +80,7 @@ func LoadMCPConfigs(globalDir string, inline []ServerConfig) []ServerConfig {
 		f, err := LoadMCPFile(path)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				log.Printf("[mcp] Warning: loading %s: %v", path, err)
+				slog.Info(fmt.Sprintf("[mcp] Warning: loading %s: %v", path, err))
 			}
 			continue
 		}
@@ -90,7 +91,7 @@ func LoadMCPConfigs(globalDir string, inline []ServerConfig) []ServerConfig {
 				Args:    entry.Args,
 				Env:     entry.Env,
 			}
-			log.Printf("[mcp] Loaded server %q from %s", name, path)
+			slog.Info(fmt.Sprintf("[mcp] Loaded server %q from %s", name, path))
 		}
 	}
 

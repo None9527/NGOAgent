@@ -16,8 +16,11 @@ import (
 type skillFrontmatter struct {
 	Name        string   `yaml:"name"`
 	Description string   `yaml:"description"`
-	Weight      string   `yaml:"weight"`
+	Weight      string   `yaml:"weight"` // deprecated: auto-derived, kept for backward compat
 	Rules       []string `yaml:"rules"`
+	WhenToUse   string   `yaml:"when_to_use"` // precise trigger condition for listing
+	Context     string   `yaml:"context"`     // "inline" (default) | "fork" (spawn sub-agent)
+	Args        string   `yaml:"args"`        // parameter hint (e.g. "[topic] [style?]")
 }
 
 // extractFrontmatter parses the YAML frontmatter block between --- delimiters.
@@ -44,9 +47,13 @@ func extractFrontmatter(content string) skillFrontmatter {
 }
 
 // detectSkillType checks skill directory contents to determine type.
-//   - "executable": has run.sh or run.py
-//   - "workflow": SKILL.md only (guide for LLM)
+//   - "pipeline": has workflow.yaml (executed by WorkflowRunner, code-enforced steps)
+//   - "executable": has run.sh or run.py (direct script execution)
+//   - "workflow": SKILL.md only (guide injected into LLM prompt)
 func detectSkillType(skillDir string) string {
+	if HasWorkflow(skillDir) {
+		return "pipeline"
+	}
 	for _, script := range []string{"run.sh", "run.py"} {
 		if _, err := os.Stat(filepath.Join(skillDir, script)); err == nil {
 			return "executable"
@@ -105,11 +112,17 @@ func (m *Manager) Discover() {
 			skillDir := filepath.Join(dir, entry.Name())
 			skillType := detectSkillType(skillDir)
 			triggers := parseTriggers(raw)
+			// Auto-derive weight: explicit frontmatter > trigger heuristic > default
 			weight := fm.Weight
 			if weight == "" {
-				if len(triggers) > 0 {
+				switch {
+				case skillType == "pipeline" || skillType == "executable":
+					weight = "heavy" // code-enforced execution, always prominent
+				case fm.Context == "fork":
+					weight = "heavy" // fork skills are important enough for full listing
+				case len(triggers) > 0:
 					weight = "heavy"
-				} else {
+				default:
 					weight = "light"
 				}
 			}
@@ -127,9 +140,79 @@ func (m *Manager) Discover() {
 				Enabled:     true,
 				EvoStatus:   "draft",
 				InstalledAt: time.Now(),
+				WhenToUse:   fm.WhenToUse,
+				Context:     fm.Context,
+				Args:        fm.Args,
+				Category:    KICategory(fm.Description + " " + fm.Name),
+				KIRef:       scanKIRefs(filepath.Join(dir, entry.Name())),
 			}
 		}
 	}
+}
+
+// ═══════════════════════════════════════════
+// P3 L3: KI Categorization
+// ═══════════════════════════════════════════
+
+// kiCategoryKeywords maps category → keyword signals.
+var kiCategoryKeywords = map[string][]string{
+	"ai":     {"llm", "model", "ai", "gpt", "claude", "embedding", "vector", "rag", "prompt", "agent", "openai", "anthropic"},
+	"web":    {"http", "fetch", "browser", "html", "css", "react", "frontend", "api", "rest", "graphql", "web", "url", "scrape"},
+	"data":   {"csv", "excel", "xlsx", "database", "sql", "pandas", "dataframe", "spreadsheet", "json", "xml", "etl", "postgres"},
+	"devops": {"docker", "k8s", "kubernetes", "deploy", "ci", "pipeline", "terraform", "ansible", "helm", "cloud", "aws", "gcp"},
+	"infra":  {"git", "github", "pr", "commit", "branch", "repo", "build", "test", "make", "compile", "lint", "format"},
+	"media":  {"image", "video", "audio", "pdf", "docx", "pptx", "slide", "photo", "resize", "convert", "ffmpeg"},
+}
+
+// KICategory auto-classifies a skill by keyword matching on its description.
+// Returns the best-matching category, or "util" if nothing matches.
+func KICategory(text string) string {
+	ltext := strings.ToLower(text)
+	bestCat := "util"
+	bestScore := 0
+	for cat, keywords := range kiCategoryKeywords {
+		score := 0
+		for _, kw := range keywords {
+			if strings.Contains(ltext, kw) {
+				score++
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			bestCat = cat
+		}
+	}
+	return bestCat
+}
+
+// scanKIRefs looks for a ki/ or knowledge/ subdirectory inside the skill dir
+// and returns all .md artifact paths found there.
+func scanKIRefs(skillDir string) []string {
+	var refs []string
+	for _, subdir := range []string{"ki", "knowledge", "artifacts"} {
+		kiDir := filepath.Join(skillDir, subdir)
+		entries, err := os.ReadDir(kiDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+				refs = append(refs, filepath.Join(kiDir, e.Name()))
+			}
+		}
+	}
+	return refs
+}
+
+// ListByCategory returns all skills in a given category.
+func (m *Manager) ListByCategory(category string) []*entity.Skill {
+	var result []*entity.Skill
+	for _, s := range m.skills {
+		if s.Category == category {
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 // Get returns a skill by name.
@@ -184,10 +267,10 @@ func (m *Manager) SetEvoStatus(name, status string) error {
 	}
 
 	valid := map[string][]string{
-		"draft":     {"evolving"},
-		"evolving":   {"evolved", "draft"},
-		"evolved":    {"degraded"},
-		"degraded":  {"re-evolving"},
+		"draft":       {"evolving"},
+		"evolving":    {"evolved", "draft"},
+		"evolved":     {"degraded"},
+		"degraded":    {"re-evolving"},
 		"re-evolving": {"evolved", "degraded"},
 	}
 

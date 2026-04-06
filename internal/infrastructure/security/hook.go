@@ -5,12 +5,14 @@ package security
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 	"github.com/ngoclaw/ngoagent/pkg/ctxutil"
@@ -55,7 +57,7 @@ type PendingApproval struct {
 	ToolName string         `json:"tool_name"`
 	Args     map[string]any `json:"args"`
 	Reason   string         `json:"reason"`
-	Result   chan bool       `json:"-"` // Receives approval decision
+	Result   chan bool      `json:"-"` // Receives approval decision
 	Created  time.Time      `json:"created"`
 }
 
@@ -63,20 +65,33 @@ type PendingApproval struct {
 type Hook struct {
 	cfg         *config.SecurityConfig
 	audit       []AuditEntry
-	overrides   map[string]bool            // Session-scoped user overrides
-	approvalFns map[string]ApprovalFunc    // channel → approval func (legacy)
+	overrides   map[string]bool             // Session-scoped user overrides
+	approvalFns map[string]ApprovalFunc     // channel → approval func (legacy)
 	pending     map[string]*PendingApproval // approval_id → pending
 	mu          sync.RWMutex
+	classifier  Classifier // P3 K1: pluggable security classifier
 }
 
 // NewHook creates a security hook.
 func NewHook(cfg *config.SecurityConfig) *Hook {
-	return &Hook{
+	h := &Hook{
 		cfg:         cfg,
 		overrides:   make(map[string]bool),
 		approvalFns: make(map[string]ApprovalFunc),
 		pending:     make(map[string]*PendingApproval),
 	}
+	// Default to PatternClassifier (always available, zero cost)
+	h.classifier = NewPatternClassifier(h)
+	return h
+}
+
+// SetClassifier swaps the security classifier strategy at runtime.
+// Thread-safe; can be called after creation to upgrade from pattern → hybrid/llm.
+func (h *Hook) SetClassifier(c Classifier) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.classifier = c
+	slog.Info(fmt.Sprintf("[security] classifier strategy: %s", c.Name()))
 }
 
 // ═══════════════════════════════════════════
@@ -269,10 +284,13 @@ func (h *Hook) ReloadChain(cfg *config.SecurityConfig) {
 var shellInjectionRe = regexp.MustCompile(`[;&|` + "`" + `$()]`)
 
 // normalDecide handles chat mode security.
-// Two modes only:
-//   - allow: auto-approve everything; blocklist commands get Ask (user decides)
+// P0-C: Enhanced with ToolMeta-driven decisions and pattern-based BlockList.
+// P3 K1: run_command calls are routed through the pluggable Classifier strategy.
+//
+// Two modes:
+//   - allow: auto-approve everything; blocklist patterns get Ask (user decides)
 //   - ask:   everything gets Ask (full manual approval)
-func (h *Hook) normalDecide(_ context.Context, toolName string, args map[string]any) (Decision, string, DecisionLevel) {
+func (h *Hook) normalDecide(ctx context.Context, toolName string, args map[string]any) (Decision, string, DecisionLevel) {
 	// User session overrides always win
 	h.mu.RLock()
 	override := h.overrides[toolName]
@@ -283,26 +301,172 @@ func (h *Hook) normalDecide(_ context.Context, toolName string, args map[string]
 
 	switch h.cfg.Mode {
 	case "allow":
-		// In allow mode, only blocklist commands need user confirmation
+		// P3 K1: run_command routed through classifier strategy
 		if toolName == "run_command" {
 			cmd, _ := args["command"].(string)
-			cmdParts := strings.Fields(cmd)
-			for _, blocked := range h.cfg.BlockList {
-				if len(cmdParts) > 0 && cmdParts[0] == blocked {
-					// Safe zone: /tmp/ or workspace → auto-allow
+			h.mu.RLock()
+			cls := h.classifier
+			h.mu.RUnlock()
+			if cls != nil {
+				r := cls.Classify(ctx, cmd, args)
+				switch r.Decision {
+				case ClassifierDeny:
+					return Deny, "[" + cls.Name() + "] " + r.Reason, LevelBlock
+				case ClassifierAsk:
+					// Safe zone check before escalating to user
 					if isInSafeZone(cmd, h.cfg.Workspace) {
-						return Allow, fmt.Sprintf("%s in safe zone", blocked), LevelPolicy
+						return Allow, r.Reason + " (safe zone)", LevelPolicy
 					}
-					// Outside safe zone: Ask (NOT Deny) — no fatal rejections
-					return Ask, fmt.Sprintf("命令 %s 目标在安全区域外 (需要确认)", blocked), LevelBlock
+					return Ask, "[" + cls.Name() + "] " + r.Reason, LevelBlock
+				default:
+					return Allow, "[" + cls.Name() + "] " + r.Reason, LevelPolicy
 				}
 			}
+		}
+		// P0-C #13: Pattern-based blocklist matching (non-run_command tools)
+		if reason, blocked := h.matchBlockList(toolName, args); blocked {
+			return Ask, reason, LevelBlock
 		}
 		return Allow, "mode=allow", LevelPolicy
 
 	default: // "ask" or any other value
+		// P0-C #12: ToolMeta-driven — read-only tools auto-allow even in ask mode
+		meta := dtool.DefaultMeta(toolName)
+		if meta.Access == dtool.AccessReadOnly {
+			return Allow, "mode=ask, read-only tool auto-approved", LevelPolicy
+		}
 		return Ask, "mode=ask", LevelPolicy
 	}
+}
+
+// matchBlockList checks if a tool call matches any blocklist pattern.
+// P0-C #13: Supports two syntax forms:
+//   - Legacy:  "rm"                → matches run_command where command starts with "rm"
+//   - Pattern: "write_file(/etc/*)" → matches write_file where path starts with "/etc/"
+//   - Pattern: "run_command(curl *)" → matches run_command where command starts with "curl"
+func (h *Hook) matchBlockList(toolName string, args map[string]any) (string, bool) {
+	for _, pattern := range h.cfg.BlockList {
+		// Pattern syntax: ToolName(argPattern)
+		if idx := strings.Index(pattern, "("); idx > 0 && strings.HasSuffix(pattern, ")") {
+			patTool := pattern[:idx]
+			patArg := pattern[idx+1 : len(pattern)-1] // extract inner pattern
+
+			if toolName != patTool {
+				continue
+			}
+
+			// Match arg pattern against tool-specific argument
+			argVal := extractToolArg(toolName, args)
+			if matchGlobPrefix(argVal, patArg) {
+				return fmt.Sprintf("%s 匹配阻止规则 %s (需要确认)", toolName, pattern), true
+			}
+			continue
+		}
+
+		// Legacy syntax: bare command name → matches run_command prefix
+		// P1 #33: Check ALL sub-commands, not just the first word
+		if toolName == "run_command" {
+			cmd, _ := args["command"].(string)
+			for _, sub := range extractSubCommands(cmd) {
+				subParts := strings.Fields(sub)
+				if len(subParts) > 0 && subParts[0] == pattern {
+					return fmt.Sprintf("命令 %s 目标在安全区域外 (需要确认)", pattern), true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// extractToolArg extracts the primary argument value from a tool call for pattern matching.
+func extractToolArg(toolName string, args map[string]any) string {
+	switch toolName {
+	case "run_command":
+		v, _ := args["command"].(string)
+		return v
+	case "write_file", "edit_file", "read_file":
+		v, _ := args["path"].(string)
+		return v
+	default:
+		// Try common arg names
+		for _, key := range []string{"path", "command", "url", "file_path"} {
+			if v, ok := args[key].(string); ok && v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+}
+
+// matchGlobPrefix matches a value against a simple glob pattern.
+// Supports: "prefix*" (startsWith), "*suffix" (endsWith), exact match.
+func matchGlobPrefix(value, pattern string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if strings.HasSuffix(pattern, "*") {
+		return strings.HasPrefix(value, strings.TrimSuffix(pattern, "*"))
+	}
+	if strings.HasPrefix(pattern, "*") {
+		return strings.HasSuffix(value, strings.TrimPrefix(pattern, "*"))
+	}
+	return value == pattern
+}
+
+// ─── P1 #33: Sub-command extraction for shell injection detection ───
+
+// shellSplitRe splits a command string on shell operators that chain sub-commands.
+// Covers: semicolons (;), logical AND (&&), logical OR (||), pipes (|),
+// command substitution ($(...)), backticks (`...`), newlines.
+var shellSplitRe = regexp.MustCompile(`[;\n]|\|\||&&|\|`)
+
+// extractSubCommands splits a bash command string into individual sub-commands.
+// Each sub-command is trimmed. This catches injection attempts like:
+//   - "echo ok; rm -rf /"       → ["echo ok", "rm -rf /"]
+//   - "cat file && curl evil"   → ["cat file", "curl evil"]
+//   - "ls | xargs rm"          → ["ls", "xargs rm"]
+//
+// Also strips common shell wrappers: bash -c "...", sh -c "..."
+func extractSubCommands(cmd string) []string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return nil
+	}
+
+	// Unwrap: bash -c "command" / sh -c 'command'
+	for _, shell := range []string{"bash -c ", "sh -c "} {
+		if strings.HasPrefix(cmd, shell) {
+			inner := cmd[len(shell):]
+			inner = strings.Trim(inner, "\"'")
+			cmd = inner
+		}
+	}
+
+	// Split on shell operators
+	parts := shellSplitRe.Split(cmd, -1)
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+
+	// Also check for $(...) command substitution
+	if idx := strings.Index(cmd, "$("); idx >= 0 {
+		end := strings.Index(cmd[idx:], ")")
+		if end > 2 {
+			inner := strings.TrimSpace(cmd[idx+2 : idx+end])
+			if inner != "" {
+				result = append(result, inner)
+			}
+		}
+	}
+
+	if len(result) == 0 {
+		result = []string{cmd}
+	}
+	return result
 }
 
 // evoDecide allows operations within the forge sandbox.

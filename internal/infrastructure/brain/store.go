@@ -50,9 +50,9 @@ func BrainDirFromContext(ctx context.Context) string {
 	return ""
 }
 
-// ContextWithBrainStore injects the fully-configured ArtifactStore into context.
-// This is the preferred method — carries sessionID, workspaceDir, etc. in one key.
-func ContextWithBrainStore(ctx context.Context, store *ArtifactStore) context.Context {
+// ContextWithBrainStore injects the brain store into context.
+// Accepts any to allow domain-side interface injection; BrainStoreFromContext performs type assertion.
+func ContextWithBrainStore(ctx context.Context, store any) context.Context {
 	return context.WithValue(ctx, brainStoreKey, store)
 }
 
@@ -192,7 +192,9 @@ func (s *ArtifactStore) loadMetadata(path string) ArtifactMetadata {
 		return ArtifactMetadata{}
 	}
 	var meta ArtifactMetadata
-	json.Unmarshal(data, &meta)
+	if err := json.Unmarshal(data, &meta); err != nil {
+		fmt.Printf("[brain] WARN: corrupt metadata %s: %v\n", metaPath, err)
+	}
 	return meta
 }
 

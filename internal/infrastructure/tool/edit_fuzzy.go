@@ -109,8 +109,8 @@ func lineBasedMatch(content, oldStr string) string {
 	oldLines := strings.Split(oldStr, "\n")
 
 	passes := []lineTransform{
-		func(s string) string { return s },                                    // exact
-		func(s string) string { return strings.TrimRight(s, " \t\r") },       // trimEnd
+		func(s string) string { return s },                                               // exact
+		func(s string) string { return strings.TrimRight(s, " \t\r") },                   // trimEnd
 		func(s string) string { return strings.TrimRight(normalizeUnicode(s), " \t\r") }, // normalize+trimEnd
 	}
 

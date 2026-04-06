@@ -3,10 +3,11 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 )
 
 // doPrepare detects ephemeral injection needs.
@@ -56,30 +57,36 @@ func (a *AgentLoop) doPrepare(_ context.Context) {
 	// Collect candidates instead of direct injection
 	var candidates []EphemeralCandidate
 
-	// === Layer 1: Planning mode base template (skip in agentic — agent self-manages) ===
-	if isPlanning && a.PlanMode() != "agentic" {
+	// === Layer 1: Planning mode base template (inject when forced or user-triggered) ===
+	mode := a.Mode()
+	slog.Info(fmt.Sprintf("[prepare] mode=%s ForcePlan=%v isPlanning=%v", mode.String(), mode.ForcePlan, isPlanning))
+	if isPlanning || mode.ForcePlan {
 		candidates = append(candidates, EphemeralCandidate{
 			Content: prompttext.EphPlanningMode, Priority: 0, Dimension: "planning",
 		})
+		slog.Info(fmt.Sprintf("[prepare] ✅ Planning mode ephemeral INJECTED (len=%d)", len(prompttext.EphPlanningMode)))
 	}
 
-	// === Layer 1b: Agentic mode — autonomous decision-making ===
-	if a.PlanMode() == "agentic" {
+	// === Layer 1b: Self-review mode — autonomous decision-making (agentic/agentic+evo) ===
+	// NOTE: Dimension "agentic" is separate from "planning" so both survive SelectWithBudget.
+	// EphAgenticMode overrides per-turn behavior: no user approval needed for plans.
+	if a.Mode().SelfReview {
 		candidates = append(candidates, EphemeralCandidate{
-			Content: "🤖 [AGENTIC MODE] You are operating in fully autonomous mode.\n" +
-				"You have complete decision-making authority:\n" +
-				"- For complex, multi-step, or risky tasks: CREATE a plan first (use task_boundary + implementation_plan), then self-review and execute.\n" +
-				"- For simple, single-step tasks: proceed directly without planning.\n" +
-				"- You do NOT need user approval for plans — review them yourself and proceed.\n" +
-				"- Prioritize thoroughness and correctness over speed.\n" +
-				"- For tasks with 3+ independent components, use spawn_agent to parallelize.\n" +
-				"Make your own judgment call on whether planning is needed.",
-			Priority: 0, Dimension: "planning",
+			Content:  prompttext.EphAgenticMode,
+			Priority: 0, Dimension: "agentic",
 		})
 		// Team coordination protocol for sub-agent management
 		candidates = append(candidates, EphemeralCandidate{
 			Content: prompttext.TeamLeadPrompt, Priority: 1, Dimension: "team",
 		})
+		// P3 I1: 4-Phase execution hint (starts after first tool call, avoids noise on step 0)
+		if a.task.CurrentStep > 1 {
+			if phaseHint := a.phaseDetector.PhaseEphemeral(); phaseHint != "" {
+				candidates = append(candidates, EphemeralCandidate{
+					Content: phaseHint, Priority: 2, Dimension: "phase",
+				})
+			}
+		}
 	}
 
 	a.mu.Lock()
@@ -162,12 +169,16 @@ func (a *AgentLoop) doPrepare(_ context.Context) {
 	a.mu.Unlock()
 	if boundaryMode != "" && prevMode != "" && boundaryMode != prevMode {
 		if boundaryMode == "planning" {
+			// Entering planning: use "transition" dimension so it doesn't conflict with EphPlanningMode.
+			// EphPlanningMode (Dimension "planning") already covers the full protocol.
+			// This is just a lightweight transition signal.
 			candidates = append(candidates, EphemeralCandidate{
-				Content: prompttext.EphEnteringPlanningMode, Priority: 1, Dimension: "planning",
+				Content:  "Mode transition: you are now entering planning mode. Follow the planning workflow detailed in the system prompt.",
+				Priority: 2, Dimension: "transition",
 			})
 		} else if prevMode == "planning" {
 			candidates = append(candidates, EphemeralCandidate{
-				Content: prompttext.EphExitingPlanningMode, Priority: 1, Dimension: "planning",
+				Content: prompttext.EphExitingPlanningMode, Priority: 1, Dimension: "transition",
 			})
 		}
 		// Mode switch artifact existence check
@@ -181,7 +192,19 @@ func (a *AgentLoop) doPrepare(_ context.Context) {
 		}
 	}
 
-	// Context usage warning
+	// === Layer 3e: Token usage self-awareness (Sprint 2-3) ===
+	// Inject at 60% to let agent proactively manage output length
+	if pct > 60 && pct <= 75 {
+		candidates = append(candidates, EphemeralCandidate{
+			Content: fmt.Sprintf(
+				"<context_usage>Context: %d/%d tokens (%.0f%%). "+
+					"Getting full — keep responses concise, avoid unnecessary tool output.</context_usage>",
+				tokenEst, policy.ContextWindow, float64(pct)),
+			Priority: 2, Dimension: "meta",
+		})
+	}
+
+	// Context usage warning (existing — fires at 75%+)
 	if pct > 75 {
 		msg := prompttext.Render(prompttext.EphContextStatus, map[string]any{
 			"Percent": pct,
@@ -193,47 +216,24 @@ func (a *AgentLoop) doPrepare(_ context.Context) {
 		})
 	}
 
-	// === Layer 4: Skill trigger auto-injection (heavy skills, skip when context tight) ===
-	if !contextTight && a.deps.SkillMgr != nil && lastMsg != "" && a.task.CurrentStep < 2 {
-		matches := a.deps.SkillMgr.MatchTriggers(lastMsg)
-		for _, m := range matches {
-			usage := m.Skill.Command
-			if usage == "" {
-				usage = "<subcommand> [args]"
-			}
-			hint := fmt.Sprintf(
-				"\tSkill available: %s\n"+
-					"Entry: %s/run.sh\n"+
-					"Quick usage via run_command: cd %s && ./run.sh %s\n"+
-					"For full guide: read_file(path='%s/SKILL.md')",
-				m.Skill.Name, m.Skill.Path,
-				m.Skill.Path, usage,
-				m.Skill.Path,
-			)
-			if len(m.Skill.Rules) > 0 {
-				hint += "\nRULES (MUST follow):"
-				for _, r := range m.Skill.Rules {
-					hint += "\n- " + r
-				}
-			}
+	// === Layer 3f: Scratchpad directory (Sprint 3-1) ===
+	// Inject scratchpad path so agent knows where to write shared artifacts
+	if a.deps.Brain != nil {
+		scratchDir := a.deps.Brain.BaseDir() + "/scratchpad"
+		// Only inject once (first 2 steps) or when scratchpad has content
+		if a.task.CurrentStep < 2 {
 			candidates = append(candidates, EphemeralCandidate{
-				Content: hint, Priority: 2, Dimension: "skill",
+				Content: fmt.Sprintf(
+					"<scratchpad>Shared workspace: %s\n"+
+						"Workers in this session can read/write here for intermediate results, "+
+						"research notes, and cross-worker knowledge sharing.</scratchpad>",
+					scratchDir),
+				Priority: 3, Dimension: "scratchpad",
 			})
 		}
 	}
 
-	// L2 Progressive Disclosure: inject skill instruction after SKILL.md read
-	a.mu.Lock()
-	skillName, _ := a.task.ConsumeSkill()
-	a.mu.Unlock()
-	if skillName != "" {
-		msg := prompttext.Render(prompttext.EphSkillInstruction, map[string]any{
-			"SkillName": skillName,
-		})
-		candidates = append(candidates, EphemeralCandidate{
-			Content: msg, Priority: 1, Dimension: "skill",
-		})
-	}
+	// === Layer 4: Skill injection removed — skills now invoked via dedicated skill() tool ===
 
 	// === Layer 4: KI index re-injection (every 8 steps, skip when context tight) ===
 	if !contextTight && a.deps.KIStore != nil && steps > 0 && steps%8 == 0 {
@@ -259,8 +259,7 @@ func (a *AgentLoop) doPrepare(_ context.Context) {
 
 // shouldInjectPlanning checks if planning mode should be triggered.
 func (a *AgentLoop) shouldInjectPlanning(userMessage string) bool {
-	planMode := a.PlanMode()
-	if planMode == "plan" {
+	if a.Mode().ForcePlan {
 		return true
 	}
 	// Exact command match: avoid false positives from "explain", "floorplan", etc.

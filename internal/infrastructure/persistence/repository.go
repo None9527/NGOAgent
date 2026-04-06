@@ -8,7 +8,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// Repository provides CRUD operations for conversations, messages, and tasks.
+// Repository provides CRUD operations for conversations.
+// All session-scoped tables cascade-delete through DeleteConversation.
 type Repository struct {
 	db *gorm.DB
 }
@@ -66,74 +67,33 @@ func (r *Repository) TouchConversation(id string) error {
 		Update("updated_at", time.Now()).Error
 }
 
+// DeleteConversation removes a conversation and ALL associated data.
+// Cascade: history_messages, worker_transcripts, session_token_usages, evo_*.
 func (r *Repository) DeleteConversation(id string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("conversation_id = ?", id).Delete(&Message{}).Error; err != nil {
+		// 1. Conversation history
+		if err := tx.Where("session_id = ?", id).Delete(&HistoryMessage{}).Error; err != nil {
 			return err
 		}
-		if err := tx.Where("conversation_id = ?", id).Delete(&Task{}).Error; err != nil {
+		// 2. Subagent transcripts
+		if err := tx.Where("session_id = ?", id).Delete(&WorkerTranscript{}).Error; err != nil {
 			return err
 		}
+		// 3. Token usage
+		if err := tx.Where("session_id = ?", id).Delete(&SessionTokenUsage{}).Error; err != nil {
+			return err
+		}
+		// 4. Evo chain (order: repairs → evaluations → traces)
+		if err := tx.Where("session_id = ?", id).Delete(&EvoRepair{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("session_id = ?", id).Delete(&EvoEvaluation{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("session_id = ?", id).Delete(&EvoTrace{}).Error; err != nil {
+			return err
+		}
+		// 5. Conversation metadata
 		return tx.Where("id = ?", id).Delete(&Conversation{}).Error
 	})
-}
-
-// --- Messages ---
-
-func (r *Repository) AppendMessage(conversationID, role, content string) (*Message, error) {
-	msg := &Message{
-		ID:             uuid.New().String(),
-		ConversationID: conversationID,
-		Role:           role,
-		Content:        content,
-	}
-	if err := r.db.Create(msg).Error; err != nil {
-		return nil, fmt.Errorf("append message: %w", err)
-	}
-	// Touch conversation
-	r.db.Model(&Conversation{}).Where("id = ?", conversationID).
-		Update("updated_at", time.Now())
-	return msg, nil
-}
-
-func (r *Repository) GetMessages(conversationID string, limit int) ([]Message, error) {
-	var msgs []Message
-	q := r.db.Where("conversation_id = ?", conversationID).Order("created_at ASC")
-	if limit > 0 {
-		q = q.Limit(limit)
-	}
-	if err := q.Find(&msgs).Error; err != nil {
-		return nil, fmt.Errorf("get messages: %w", err)
-	}
-	return msgs, nil
-}
-
-// --- Tasks ---
-
-func (r *Repository) CreateTask(conversationID, title string, sortOrder int) (*Task, error) {
-	task := &Task{
-		ID:             uuid.New().String(),
-		ConversationID: conversationID,
-		Title:          title,
-		Status:         "pending",
-		SortOrder:      sortOrder,
-	}
-	if err := r.db.Create(task).Error; err != nil {
-		return nil, fmt.Errorf("create task: %w", err)
-	}
-	return task, nil
-}
-
-func (r *Repository) UpdateTaskStatus(id, status string) error {
-	return r.db.Model(&Task{}).Where("id = ?", id).
-		Updates(map[string]any{"status": status, "updated_at": time.Now()}).Error
-}
-
-func (r *Repository) GetTasks(conversationID string) ([]Task, error) {
-	var tasks []Task
-	if err := r.db.Where("conversation_id = ?", conversationID).
-		Order("sort_order ASC").Find(&tasks).Error; err != nil {
-		return nil, fmt.Errorf("get tasks: %w", err)
-	}
-	return tasks, nil
 }

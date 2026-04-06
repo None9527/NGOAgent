@@ -224,3 +224,59 @@ func TestNgramJaccardSimilarity(t *testing.T) {
 
 	t.Log("✅ Guard: ngramJaccardSimilarity edge cases")
 }
+
+func TestGuardToolCycleDetection(t *testing.T) {
+	g := NewBehaviorGuard(nil)
+	// Create a length-2 cycle: read_file → edit_file → read_file → edit_file
+	g.PostToolRecord("read_file")
+	g.PostToolRecord("edit_file")
+	g.PostToolRecord("read_file")
+	g.PostToolRecord("edit_file")
+	// The cycle warning is set as pending, Check() will consume it
+	v := g.Check("working on it", 0, 5)
+	if v.Action != "warn" || v.Rule != "tool_cycle" {
+		t.Fatalf("expected warn/tool_cycle, got %s/%s", v.Action, v.Rule)
+	}
+	t.Log("✅ Guard: tool cycle detection")
+}
+
+func TestGuardForceToolName(t *testing.T) {
+	g := NewBehaviorGuard(nil)
+	g.SetForceToolName("notify_user")
+	name := g.ConsumeForceToolName()
+	if name != "notify_user" {
+		t.Fatalf("expected notify_user, got %s", name)
+	}
+	// Consumed, should be empty now
+	name2 := g.ConsumeForceToolName()
+	if name2 != "" {
+		t.Fatalf("expected empty after consume, got %s", name2)
+	}
+	t.Log("✅ Guard: ForceToolName set/consume cycle")
+}
+
+func TestGuardEmptyResponseResetOnGoodResponse(t *testing.T) {
+	g := NewBehaviorGuard(nil)
+	g.Check("", 0, 1)              // warn (highCount=1)
+	g.Check("", 0, 2)              // warn (highCount=2)
+	g.Check("Good response", 0, 3) // resets highCount
+	v := g.Check("", 0, 4)         // warn (highCount=1 not 3)
+	if v.Action != "warn" {
+		t.Fatalf("expected warn after reset, got %s (should not escalate to terminate)", v.Action)
+	}
+	t.Log("✅ Guard: empty response counter resets on good response")
+}
+
+func TestGuardStepsSinceBoundary(t *testing.T) {
+	g := NewBehaviorGuard(nil)
+	g.PostToolRecord("read_file")
+	g.PostToolRecord("edit_file")
+	if g.StepsSinceBoundary() != 2 {
+		t.Fatalf("expected 2 steps since boundary, got %d", g.StepsSinceBoundary())
+	}
+	g.PostToolRecord("task_boundary")
+	if g.StepsSinceBoundary() != 0 {
+		t.Fatalf("expected 0 steps after boundary, got %d", g.StepsSinceBoundary())
+	}
+	t.Log("✅ Guard: StepsSinceBoundary tracking")
+}

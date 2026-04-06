@@ -3,7 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
+	"regexp"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
@@ -52,16 +53,6 @@ func NewHookManager() *HookManager {
 // AddToolHook registers a tool lifecycle hook.
 func (m *HookManager) AddToolHook(h ToolHook) { m.tool = append(m.tool, h) }
 
-// GetTraceCollector returns the TraceCollectorHook from the tool hook chain, if one exists.
-func (m *HookManager) GetTraceCollector() (*TraceCollectorHook, bool) {
-	for _, h := range m.tool {
-		if tc, ok := h.(*TraceCollectorHook); ok {
-			return tc, true
-		}
-	}
-	return nil, false
-}
-
 // AddCompactHook registers a compaction lifecycle hook.
 func (m *HookManager) AddCompactHook(h CompactHook) { m.compact = append(m.compact, h) }
 
@@ -76,7 +67,7 @@ func (m *HookManager) FireBeforeTool(ctx context.Context, name string, args map[
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[hook] panic in ToolHook.BeforeTool: %v", r)
+					slog.Info(fmt.Sprintf("[hook] panic in ToolHook.BeforeTool: %v", r))
 				}
 			}()
 			newArgs, skip := h.BeforeTool(ctx, name, args)
@@ -98,7 +89,7 @@ func (m *HookManager) FireAfterTool(ctx context.Context, name string, output str
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[hook] panic in ToolHook.AfterTool: %v", r)
+					slog.Info(fmt.Sprintf("[hook] panic in ToolHook.AfterTool: %v", r))
 				}
 			}()
 			h.AfterTool(ctx, name, output, err)
@@ -112,7 +103,7 @@ func (m *HookManager) FireBeforeCompact(ctx context.Context, history []llm.Messa
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[hook] panic in CompactHook.BeforeCompact: %v", r)
+					slog.Info(fmt.Sprintf("[hook] panic in CompactHook.BeforeCompact: %v", r))
 				}
 			}()
 			h.BeforeCompact(ctx, history)
@@ -126,7 +117,7 @@ func (m *HookManager) FireAfterCompact(ctx context.Context, compacted []llm.Mess
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[hook] panic in CompactHook.AfterCompact: %v", r)
+					slog.Info(fmt.Sprintf("[hook] panic in CompactHook.AfterCompact: %v", r))
 				}
 			}()
 			h.AfterCompact(ctx, compacted)
@@ -142,7 +133,7 @@ func (m *HookManager) FireMessageSending(ctx context.Context, text string) (stri
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[hook] panic in MessageHook.OnMessageSending: %v", r)
+					slog.Info(fmt.Sprintf("[hook] panic in MessageHook.OnMessageSending: %v", r))
 				}
 			}()
 			text, cancel = h.OnMessageSending(ctx, text)
@@ -212,7 +203,7 @@ func (c *PostRunHookChain) OnRunComplete(ctx context.Context, info RunInfo) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[hook] panic in PostRunHook: %v", r)
+					slog.Info(fmt.Sprintf("[hook] panic in PostRunHook: %v", r))
 				}
 			}()
 			h.OnRunComplete(ctx, info)
@@ -269,7 +260,7 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[hook] panic in KI distill: %v", r)
+				slog.Info(fmt.Sprintf("[hook] panic in KI distill: %v", r))
 			}
 		}()
 		// Gate: only distill conversations with actual tool usage
@@ -280,25 +271,25 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 			if info.EvoRepairSuccess && info.EvoRepairPlan != nil {
 				h.distillEvoRepair(store, info)
 			}
-			log.Printf("[hook] KI distill: skipped (steps=%d, history=%d) for session=%s",
-				info.Steps, len(info.History), info.SessionID)
+			slog.Info(fmt.Sprintf("[hook] KI distill: skipped (steps=%d, history=%d) for session=%s",
+				info.Steps, len(info.History), info.SessionID))
 			return
 		}
-		log.Printf("[hook] KI distill: calling LLM for session=%s steps=%d", info.SessionID, info.Steps)
+		slog.Info(fmt.Sprintf("[hook] KI distill: calling LLM for session=%s steps=%d", info.SessionID, info.Steps))
 
 		result, err := h.llm.DistillKnowledge(info.History)
 		if err != nil {
-			log.Printf("[hook] KI distill LLM failed: %v", err)
+			slog.Info(fmt.Sprintf("[hook] KI distill LLM failed: %v", err))
 			return
 		}
 
 		if !result.ShouldSave {
-			log.Printf("[hook] KI distill: LLM decided not worth saving for session=%s", info.SessionID)
+			slog.Info(fmt.Sprintf("[hook] KI distill: LLM decided not worth saving for session=%s", info.SessionID))
 			return
 		}
 
 		if result.Title == "" {
-			log.Printf("[hook] KI distill: empty title, skipping")
+			slog.Info(fmt.Sprintf("[hook] KI distill: empty title, skipping"))
 			return
 		}
 
@@ -306,17 +297,20 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		content := fmt.Sprintf("# %s\n\n%s\n\n---\n\n%s",
 			result.Title, result.Summary, result.Content)
 
+		// P0-E #2: Scrub sensitive content before saving
+		content = scrubSensitiveContent(content)
+
 		// Dedup check: if a similar KI exists, merge via LLM instead of concatenation
 		if h.dedup != nil {
 			queryText := result.Title + "\n" + result.Summary
 			dupID, score := h.dedup.FindDuplicate(queryText, h.dedupThreshold)
 			if dupID != "" {
-				log.Printf("[hook] KI dedup: merging into %q (score=%.3f)", dupID, score)
+				slog.Info(fmt.Sprintf("[hook] KI dedup: merging into %q (score=%.3f)", dupID, score))
 
 				// Read existing KI content for LLM merge
 				existingContent, err := store.GetContent(dupID)
 				if err != nil {
-					log.Printf("[hook] KI dedup: read existing failed: %v, falling back to append", err)
+					slog.Info(fmt.Sprintf("[hook] KI dedup: read existing failed: %v, falling back to append", err))
 					_ = store.UpdateMerge(dupID, "\n\n---\n\n"+result.Content, result.Summary)
 					_ = h.dedup.EmbedAndIndexByID(dupID)
 					return
@@ -325,7 +319,7 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 				// LLM merge: consolidate old + new into one concise document
 				merged, err := h.llm.MergeKnowledge(existingContent, result.Content)
 				if err != nil {
-					log.Printf("[hook] KI LLM merge failed: %v, falling back to append", err)
+					slog.Info(fmt.Sprintf("[hook] KI LLM merge failed: %v, falling back to append", err))
 					_ = store.UpdateMerge(dupID, "\n\n---\n\n"+result.Content, result.Summary)
 					_ = h.dedup.EmbedAndIndexByID(dupID)
 					return
@@ -334,10 +328,10 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 				// Replace (not append) with merged content
 				mergedContent := fmt.Sprintf("# %s\n\n%s\n\n---\n\n%s", merged.Title, merged.Summary, merged.Content)
 				if err := store.ReplaceMerge(dupID, mergedContent, merged.Summary); err != nil {
-					log.Printf("[hook] KI replace merge failed: %v", err)
+					slog.Info(fmt.Sprintf("[hook] KI replace merge failed: %v", err))
 				} else {
 					_ = h.dedup.EmbedAndIndexByID(dupID)
-					log.Printf("[hook] KI LLM merged into %q: %q", dupID, merged.Title)
+					slog.Info(fmt.Sprintf("[hook] KI LLM merged into %q: %q", dupID, merged.Title))
 				}
 				return
 			}
@@ -348,9 +342,9 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 			result.Tags,
 			[]string{info.SessionID},
 		); err != nil {
-			log.Printf("[hook] KI distill save failed: %v", err)
+			slog.Info(fmt.Sprintf("[hook] KI distill save failed: %v", err))
 		} else {
-			log.Printf("[hook] KI distilled: session=%s title=%q tags=%v", info.SessionID, result.Title, result.Tags)
+			slog.Info(fmt.Sprintf("[hook] KI distilled: session=%s title=%q tags=%v", info.SessionID, result.Title, result.Tags))
 		}
 	}()
 }
@@ -377,10 +371,32 @@ func (h *KIDistillHook) distillEvoRepair(store KIStore, info RunInfo) {
 
 	tags := []string{"evo-repair", string(info.EvoRepairPlan.Strategy), info.EvoEval.ErrorType}
 	if err := store.SaveDistilled(title, summary, content, tags, []string{info.SessionID}); err != nil {
-		log.Printf("[hook] evo repair KI save failed: %v", err)
+		slog.Info(fmt.Sprintf("[hook] evo repair KI save failed: %v", err))
 	} else {
-		log.Printf("[hook] evo repair KI distilled: strategy=%s error=%s", info.EvoRepairPlan.Strategy, info.EvoEval.ErrorType)
+		slog.Info(fmt.Sprintf("[hook] evo repair KI distilled: strategy=%s error=%s", info.EvoRepairPlan.Strategy, info.EvoEval.ErrorType))
 	}
+}
+
+// ─── P0-E #2: Negative content filter ───────────────────────────────────
+
+// Patterns that match sensitive content to scrub from knowledge items.
+var sensitivePatterns = []*regexp.Regexp{
+	// API keys, tokens, secrets (key=value, key: value, key="value")
+	regexp.MustCompile(`(?i)(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|private[_-]?key)\s*[:=]\s*["']?[A-Za-z0-9+/=_\-]{8,}["']?`),
+	// Bearer tokens
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9+/=_\-\.]{20,}`),
+	// AWS-style keys
+	regexp.MustCompile(`(?i)(AKIA|ASIA)[A-Z0-9]{16}`),
+	// Generic long hex/base64 secrets (standalone, 32+ chars)
+	regexp.MustCompile(`(?m)^\s*(sk|pk|rk|pat|ghp|gho|ghs|ghr|glpat)-[A-Za-z0-9_\-]{20,}\s*$`),
+}
+
+// scrubSensitiveContent removes sensitive patterns from KI content.
+func scrubSensitiveContent(content string) string {
+	for _, re := range sensitivePatterns {
+		content = re.ReplaceAllString(content, "[REDACTED]")
+	}
+	return content
 }
 
 // ═══════════════════════════════════════════
@@ -427,19 +443,18 @@ func (h *TitleDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[hook] panic in TitleDistillHook: %v", r)
+				slog.Info(fmt.Sprintf("[hook] panic in TitleDistillHook: %v", r))
 			}
 		}()
 		title, err := h.llm.DistillTitle(info.UserMessage)
 		if err != nil {
-			log.Printf("[hook] title distill failed: %v", err)
+			slog.Info(fmt.Sprintf("[hook] title distill failed: %v", err))
 			return
 		}
 		h.titler.SetTitle(info.SessionID, title)
 		if info.Delta != nil {
 			info.Delta.OnTitleUpdate(info.SessionID, title)
 		}
-		log.Printf("[hook] title distilled: session=%s title=%q", info.SessionID, title)
+		slog.Info(fmt.Sprintf("[hook] title distilled: session=%s title=%q", info.SessionID, title))
 	}()
 }
-

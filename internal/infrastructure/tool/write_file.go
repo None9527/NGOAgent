@@ -6,9 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
 )
 
 // WriteFileTool writes content to a file, creating parent directories as needed.
@@ -16,16 +15,18 @@ type WriteFileTool struct {
 	FileHistory *workspace.FileHistory // If set, backs up files before write
 }
 
-func (t *WriteFileTool) Name() string        { return "write_file" }
-func (t *WriteFileTool) Description() string { return prompttext.ToolWriteFile }
+func (t *WriteFileTool) Name() string { return "write_file" }
+func (t *WriteFileTool) Description() string {
+	return `Write content to a file. Absolute path required. Creates parents automatically. overwrite=true replaces existing.`
+}
 
 func (t *WriteFileTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":      map[string]any{"type": "string", "description": "Absolute file path"},
-			"content":   map[string]any{"type": "string", "description": "File content to write"},
-			"overwrite": map[string]any{"type": "boolean", "description": "Overwrite if exists (default: false)"},
+			"path":      map[string]any{"type": "string", "description": "Absolute file path (must start with /)", "minLength": 2},
+			"content":   map[string]any{"type": "string", "description": "Complete file content to write. Must be the full file, not a diff."},
+			"overwrite": map[string]any{"type": "boolean", "description": "Set to true to overwrite existing file. Default false.", "default": false},
 		},
 		"required": []string{"path", "content"},
 	}
@@ -40,6 +41,13 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) (dtool
 		return dtool.ToolResult{Output: "Error: 'path' is required"}, nil
 	}
 	path = filepath.Clean(path)
+
+	// P2: Validate path — resolve symlinks, block sensitive paths
+	if resolved, err := ValidatePath(path, ""); err != nil {
+		return dtool.ToolResult{Output: fmt.Sprintf("Error: path validation failed: %v", err)}, nil
+	} else {
+		path = resolved
+	}
 
 	// Check if file exists
 	if !overwrite {
@@ -65,6 +73,9 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) (dtool
 
 	// Sync FileState so subsequent edit_file calls don't get E6/E7 errors
 	globalFileState.MarkRead(path, []byte(content))
+
+	// P2 G1: Track inode+mtime for external modification detection
+	globalFileWatcher.RecordWrite(path)
 
 	return dtool.ToolResult{Output: fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), path)}, nil
 }

@@ -5,13 +5,12 @@
  * Uses ScrollProvider refs to avoid unnecessary re-renders.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useScrollContext } from '../providers/ScrollProvider'
 
 export function ScrollToBottomFab() {
   const { scrollContainerRef, scrollToEnd, autoScrollRef } = useScrollContext()
   const [visible, setVisible] = useState(false)
-  const rafRef = useRef(0)
 
   // Poll scroll position via scroll event to toggle visibility
   useEffect(() => {

@@ -7,7 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 
 	"google.golang.org/grpc"
@@ -89,7 +89,7 @@ type API interface {
 
 	// KI management
 	ListKI() (any, error)
-	GetKI(id string) (interface{}, error)
+	GetKI(id string) (any, error)
 	DeleteKI(id string) error
 	ListKIArtifacts(id string) ([]apitype.BrainArtifactInfo, error)
 	ReadKIArtifact(id, name string) (string, error)
@@ -116,7 +116,7 @@ func (s *Server) Start() error {
 	}
 	s.gs = grpc.NewServer()
 	pb.RegisterAgentServiceServer(s.gs, s)
-	log.Printf("[gRPC] listening on %s", s.addr)
+	slog.Info(fmt.Sprintf("[gRPC] listening on %s", s.addr))
 	return s.gs.Serve(lis)
 }
 
@@ -187,7 +187,7 @@ func (s *Server) Chat(req *pb.AgentChatRequest, stream pb.AgentService_ChatServe
 		if err.Error() == "agent is busy" {
 			return status.Error(codes.ResourceExhausted, "agent is busy")
 		}
-		log.Printf("[gRPC-Chat] run error: %v", err)
+		slog.Info(fmt.Sprintf("[gRPC-Chat] run error: %v", err))
 	}
 
 	// Final done event
@@ -340,7 +340,7 @@ func (s *Server) ListSkills(_ context.Context, _ *pb.EmptyRequest) (*pb.ListSkil
 	var skills []struct {
 		Name string `json:"name"`
 	}
-	json.Unmarshal(data, &skills)
+	json.Unmarshal(data, &skills) //nolint:errcheck — self-marshalled data
 	items := make([]*pb.SkillItem, len(skills))
 	for i, sk := range skills {
 		items[i] = &pb.SkillItem{Name: sk.Name, Enabled: true}
@@ -412,7 +412,7 @@ func (s *Server) ListMCPServers(_ context.Context, _ *pb.EmptyRequest) (*pb.List
 		Status string `json:"status"`
 		Tools  int    `json:"tool_count"`
 	}
-	json.Unmarshal(data, &servers)
+	json.Unmarshal(data, &servers) //nolint:errcheck — self-marshalled data
 	items := make([]*pb.MCPServerItem, len(servers))
 	for i, srv := range servers {
 		items[i] = &pb.MCPServerItem{Name: srv.Name, Status: srv.Status, ToolCount: int32(srv.Tools)}
@@ -445,7 +445,7 @@ func (s *Server) GetMCPServerTools(_ context.Context, _ *pb.StringValueRequest) 
 		Name    string `json:"name"`
 		Enabled bool   `json:"enabled"`
 	}
-	json.Unmarshal(data, &tools)
+	json.Unmarshal(data, &tools) //nolint:errcheck — self-marshalled data
 	items := make([]*pb.ToolInfoItem, len(tools))
 	for i, t := range tools {
 		items[i] = &pb.ToolInfoItem{Name: t.Name, Enabled: t.Enabled, Source: "mcp"}
@@ -471,7 +471,7 @@ func (s *Server) ListCronJobs(_ context.Context, _ *pb.EmptyRequest) (*pb.CronJo
 		RunCount  int    `json:"run_count"`
 		FailCount int    `json:"fail_count"`
 	}
-	json.Unmarshal(data, &jobs)
+	json.Unmarshal(data, &jobs) //nolint:errcheck — self-marshalled data
 	items := make([]*pb.CronJobItem, len(jobs))
 	for i, j := range jobs {
 		items[i] = &pb.CronJobItem{
@@ -532,7 +532,7 @@ func (s *Server) ListCronLogs(_ context.Context, req *pb.StringValueRequest) (*p
 		Time string `json:"time"`
 		Size int64  `json:"size"`
 	}
-	json.Unmarshal(data, &logs)
+	json.Unmarshal(data, &logs) //nolint:errcheck — self-marshalled data
 	items := make([]*pb.CronLogItem, len(logs))
 	for i, l := range logs {
 		items[i] = &pb.CronLogItem{Name: l.Name, Time: l.Time, Size: l.Size}
@@ -589,7 +589,7 @@ func (s *Server) ListKI(_ context.Context, _ *pb.EmptyRequest) (*pb.KIListRespon
 		UpdatedAt string   `json:"updated_at"`
 		Artifacts []string `json:"artifact_names"`
 	}
-	json.Unmarshal(data, &items)
+	json.Unmarshal(data, &items) //nolint:errcheck — self-marshalled data
 	pbItems := make([]*pb.KIItem, len(items))
 	for i, ki := range items {
 		pbItems[i] = &pb.KIItem{
@@ -696,16 +696,16 @@ func (s *Server) RemoveProvider(_ context.Context, req *pb.StringValueRequest) (
 func (s *Server) SendMessage(_ context.Context, req *pb.SendMessageRequest) (*pb.CommandResponse, error) {
 	// SendMessage delegates to ChatStream in non-streaming mode for external channels
 	delta := &service.Delta{
-		OnTextFunc:      func(string) {},
-		OnReasoningFunc: func(string) {},
-		OnToolStartFunc: func(string, string, map[string]any) {},
-		OnToolResultFunc: func(string, string, string, error) {},
-		OnCompleteFunc:  func() {},
-		OnErrorFunc:     func(error) {},
-		OnProgressFunc:  func(string, string, string, string) {},
-		OnPlanReviewFunc: func(string, []string) {},
+		OnTextFunc:            func(string) {},
+		OnReasoningFunc:       func(string) {},
+		OnToolStartFunc:       func(string, string, map[string]any) {},
+		OnToolResultFunc:      func(string, string, string, error) {},
+		OnCompleteFunc:        func() {},
+		OnErrorFunc:           func(error) {},
+		OnProgressFunc:        func(string, string, string, string) {},
+		OnPlanReviewFunc:      func(string, []string) {},
 		OnApprovalRequestFunc: func(string, string, map[string]any, string) {},
-		OnTitleUpdateFunc: func(string, string) {},
+		OnTitleUpdateFunc:     func(string, string) {},
 	}
 	if err := s.api.ChatStream(context.Background(), req.GetSessionId(), req.GetMessage(), "", delta); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil

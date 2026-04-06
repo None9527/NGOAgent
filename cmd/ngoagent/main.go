@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,7 +17,8 @@ func main() {
 
 	app, err := application.Build()
 	if err != nil {
-		log.Fatalf("Build failed: %v", err)
+		slog.Error(fmt.Sprintf("Build failed: %v", err))
+		os.Exit(1)
 	}
 	defer func() {
 		if sqlDB, err := app.DB.DB(); err == nil {
@@ -35,7 +38,7 @@ func main() {
 
 	// Start config hot-reload watcher
 	if err := app.Config.StartWatching(); err != nil {
-		log.Printf("Warning: config watcher: %v", err)
+		slog.Info(fmt.Sprintf("Warning: config watcher: %v", err))
 	}
 
 	// Graceful shutdown
@@ -46,24 +49,24 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("Shutting down...")
+		slog.Info(fmt.Sprint("Shutting down..."))
 		cancel()
 	}()
 
-	log.Println("NGOAgent starting...")
+	slog.Info(fmt.Sprint("NGOAgent starting..."))
 
 	// Start gRPC server in background
 	if app.GRPCServer != nil {
 		go func() {
 			if err := app.GRPCServer.Start(); err != nil {
-				log.Printf("gRPC server: %v", err)
+				slog.Info(fmt.Sprintf("gRPC server: %v", err))
 			}
 		}()
 	}
 
 	// Start HTTP server (blocking)
 	if err := app.Server.Start(ctx); err != nil {
-		log.Printf("HTTP server: %v", err)
+		slog.Info(fmt.Sprintf("HTTP server: %v", err))
 	}
 
 	// Graceful shutdown

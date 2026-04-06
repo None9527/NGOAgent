@@ -6,9 +6,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -68,6 +70,19 @@ func (m *Manager) Run(ctx context.Context, command, cwd string, timeout time.Dur
 	wrapped := m.State.WrapCommand(command)
 	cmd := exec.CommandContext(execCtx, "bash", "-c", wrapped)
 
+	// L1 process group isolation: all child processes in a new pgid.
+	// On context cancel, Kill entire group so forked children don't
+	// hold stdout pipe fds open (which hangs cmd.Wait/awaitGoroutines).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			slog.Info(fmt.Sprintf("[sandbox] killing process group pgid=%d", cmd.Process.Pid))
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 3 * time.Second // force-close pipes if children linger
+
 	// Inject persistent env and cwd
 	m.State.InjectEnv(cmd, cwd)
 
@@ -106,6 +121,16 @@ func (m *Manager) RunBackground(ctx context.Context, id, command, cwd string) er
 	bgCtx, cancel := context.WithCancel(ctx)
 
 	cmd := exec.CommandContext(bgCtx, "bash", "-c", command)
+
+	// L1 process group isolation (same as Run)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 3 * time.Second
 
 	// Inject persistent env and cwd
 	m.State.InjectEnv(cmd, cwd)
@@ -156,6 +181,39 @@ func (m *Manager) RunBackground(ctx context.Context, id, command, cwd string) er
 	}()
 
 	return nil
+}
+
+// RunDetached launches a command fully detached from the agent process tree.
+// The command runs in a new session (setsid), does not inherit pipes, and
+// is NOT tracked by the Manager. It survives agent restart/shutdown.
+// Use this for persistent services (web servers, daemons) that should outlive the agent.
+func (m *Manager) RunDetached(command, cwd string) (int, error) {
+	if cwd == "" {
+		cwd = m.State.Cwd()
+	}
+
+	// setsid creates a new session + process group, fully detaching from agent
+	cmd := exec.Command("setsid", "bash", "-c", command)
+	cmd.Dir = cwd
+	cmd.Env = m.State.BuildEnv()
+
+	// No pipes — /dev/null prevents pipe inheritance hang
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("start detached command: %w", err)
+	}
+
+	pid := cmd.Process.Pid
+
+	// Release immediately — don't Wait(), don't track
+	go cmd.Wait() // reap zombie, but don't block anything
+
+	slog.Info(fmt.Sprintf("[sandbox] detached: pid=%d cmd=%q", pid, command))
+	return pid, nil
 }
 
 // GetStatus returns the status and output of a background process.
@@ -223,7 +281,7 @@ func (m *Manager) GetStatusWithLimit(id string, waitSeconds int, maxChars int) (
 	}
 }
 
-// Kill terminates a background process with SIGTERM → 2s → SIGKILL.
+// Kill terminates a background process group: SIGTERM → 2s → SIGKILL.
 func (m *Manager) Kill(id string) error {
 	m.mu.RLock()
 	proc, ok := m.processes[id]
@@ -233,17 +291,20 @@ func (m *Manager) Kill(id string) error {
 		return fmt.Errorf("process %s not found", id)
 	}
 
-	// Try graceful SIGTERM first via cancel
-	proc.cancel()
+	// Try graceful SIGTERM to entire process group first
+	if proc.Cmd.Process != nil {
+		_ = syscall.Kill(-proc.Cmd.Process.Pid, syscall.SIGTERM)
+	}
 
 	// Wait 2s for exit
 	select {
 	case <-proc.Done:
 		return nil
 	case <-time.After(2 * time.Second):
-		// Force SIGKILL
+		// Force SIGKILL entire process group
 		if proc.Cmd.Process != nil {
-			return proc.Cmd.Process.Kill()
+			slog.Info(fmt.Sprintf("[sandbox] force killing process group pgid=%d", proc.Cmd.Process.Pid))
+			return syscall.Kill(-proc.Cmd.Process.Pid, syscall.SIGKILL)
 		}
 		return nil
 	}

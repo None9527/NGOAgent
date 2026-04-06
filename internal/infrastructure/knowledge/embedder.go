@@ -121,10 +121,3 @@ func (e *DashScopeEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 
 	return result, nil
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

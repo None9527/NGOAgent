@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
+	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 )
 
 // SpawnFunc creates an independent agent loop and runs a task, returning the result.
@@ -19,8 +19,10 @@ type SpawnFunc func(ctx context.Context, task, taskName string) (string, error)
 
 // SpawnAgentTool creates a sub-agent for independent task execution.
 type SpawnAgentTool struct {
-	spawnFn      SpawnFunc
-	EventPusher  func(sessionID, eventType string, data any) // wire by server for SSE progress push
+	spawnFn     SpawnFunc
+	EventPusher func(sessionID, eventType string, data any) // wire by server for SSE progress push
+	ToolCtx     prompttext.ToolContext                      // Runtime environment context for dynamic description
+	ScratchDir  string                                      // Session-scoped scratchpad directory (Sprint 3-1)
 }
 
 // NewSpawnAgentTool creates a spawn tool with a factory function.
@@ -33,13 +35,18 @@ func (t *SpawnAgentTool) SetSpawnFunc(fn SpawnFunc) {
 	t.spawnFn = fn
 }
 
+// GetSpawnFunc returns the factory function for sharing with other tools (e.g. SkillTool).
+func (t *SpawnAgentTool) GetSpawnFunc() SpawnFunc {
+	return t.spawnFn
+}
+
 // SetEventPusher wires the event-push function so progress events reach the parent SSE stream.
 func (t *SpawnAgentTool) SetEventPusher(fn func(sessionID, eventType string, data any)) {
 	t.EventPusher = fn
 }
 
 func (t *SpawnAgentTool) Name() string        { return "spawn_agent" }
-func (t *SpawnAgentTool) Description() string { return prompttext.ToolSpawnAgent }
+func (t *SpawnAgentTool) Description() string { return prompttext.ToolSpawnAgentDynamic(t.ToolCtx) }
 
 func (t *SpawnAgentTool) Schema() map[string]any {
 	return map[string]any{
@@ -48,6 +55,12 @@ func (t *SpawnAgentTool) Schema() map[string]any {
 			"task":      map[string]any{"type": "string", "description": "Detailed task description for the sub-agent"},
 			"task_name": map[string]any{"type": "string", "description": "Short human-readable name (e.g. 'Fix Auth Tests')"},
 			"context":   map[string]any{"type": "string", "description": "Additional context to pass"},
+			"context_mode": map[string]any{
+				"type":        "string",
+				"enum":        []string{"fresh", "fork"},
+				"description": "fresh=empty context (default), fork=inherit parent conversation context for cache sharing",
+				"default":     "fresh",
+			},
 		},
 		"required": []string{"task"},
 	}
@@ -72,6 +85,13 @@ func (t *SpawnAgentTool) Execute(ctx context.Context, args map[string]any) (dtoo
 	// Auto-inject workspace directory
 	if cwd, err := os.Getwd(); err == nil {
 		task = fmt.Sprintf("Working directory: %s\n\n", cwd) + task
+	}
+
+	// Sprint 3-1: Auto-inject scratchpad path for cross-worker knowledge sharing
+	if t.ScratchDir != "" {
+		task = fmt.Sprintf("Scratchpad directory: %s (read/write intermediate results here for other workers)\n\n", t.ScratchDir) + task
+		// Ensure scratchpad directory exists
+		_ = os.MkdirAll(t.ScratchDir, 0755)
 	}
 
 	if t.spawnFn == nil {
@@ -99,10 +119,11 @@ func (t *SpawnAgentTool) Execute(ctx context.Context, args map[string]any) (dtoo
 // EvoTool constructs, executes, and validates structured task environments.
 type EvoTool struct {
 	sandboxRoot string
+	sandbox     *sandbox.Manager // P0-6: route commands through security pipeline
 }
 
-func NewEvoTool(sandboxRoot string) *EvoTool {
-	return &EvoTool{sandboxRoot: sandboxRoot}
+func NewEvoTool(sandboxRoot string, sb *sandbox.Manager) *EvoTool {
+	return &EvoTool{sandboxRoot: sandboxRoot, sandbox: sb}
 }
 
 func (t *EvoTool) Name() string        { return "evo" }
@@ -185,17 +206,23 @@ func (t *EvoTool) doSetup(ctx context.Context, args map[string]any) (dtool.ToolR
 		}
 	}
 
-	// Run setup commands
+	// Run setup commands via sandbox (P0-6: security pipeline)
 	if cmds, ok := args["commands"].([]any); ok {
 		for _, cmd := range cmds {
 			cmdStr, _ := cmd.(string)
 			if cmdStr == "" {
 				continue
 			}
-			execCmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
-			execCmd.Dir = sandboxPath
-			if output, err := execCmd.CombinedOutput(); err != nil {
-				return dtool.ToolResult{Output: fmt.Sprintf("Setup command failed: %s\nOutput: %s\nError: %v", cmdStr, string(output), err)}, nil
+			result, err := t.sandbox.Run(ctx, cmdStr, sandboxPath, 60*time.Second)
+			if err != nil {
+				return dtool.ToolResult{Output: fmt.Sprintf("Setup command failed: %s\nError: %v", cmdStr, err)}, nil
+			}
+			if result.ExitCode != 0 {
+				output := result.Stdout
+				if result.Stderr != "" {
+					output += "\n" + result.Stderr
+				}
+				return dtool.ToolResult{Output: fmt.Sprintf("Setup command failed: %s\nOutput: %s\nExit code: %d", cmdStr, output, result.ExitCode)}, nil
 			}
 		}
 	}
@@ -246,22 +273,21 @@ func (t *EvoTool) doAssert(ctx context.Context, args map[string]any) (dtool.Tool
 		}
 	}
 
-	// Shell command checks
+	// Shell command checks (P0-6: via sandbox)
 	if cmds, ok := args["shell_check"].([]any); ok {
 		for _, cmd := range cmds {
 			cmdStr, _ := cmd.(string)
 			total++
-			execCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			execCmd := exec.CommandContext(execCtx, "bash", "-lc", cmdStr)
-			execCmd.Dir = sandboxPath
-			if err := execCmd.Run(); err == nil {
+			checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			result, err := t.sandbox.Run(checkCtx, cmdStr, sandboxPath, 30*time.Second)
+			cancel()
+			if err == nil && result.ExitCode == 0 {
 				passed++
 				details = append(details, fmt.Sprintf("✅ cmd ok: %s", cmdStr))
 			} else {
 				failed++
 				details = append(details, fmt.Sprintf("❌ cmd failed: %s", cmdStr))
 			}
-			cancel()
 		}
 	}
 

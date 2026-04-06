@@ -6,13 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
@@ -20,6 +21,7 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/mcp"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
@@ -42,23 +44,24 @@ type HistoryQuerier interface {
 // AgentAPI is the protocol-agnostic API layer.
 // All HTTP/gRPC/CLI adapters call these methods.
 type AgentAPI struct {
-	loop       *service.AgentLoop
-	loopPool   *service.LoopPool
-	chatEngine *service.ChatEngine
-	sessMgr    *service.SessionManager
-	modelMgr   *service.ModelManager
-	toolAdmin  *service.ToolAdmin
-	secHook    *security.Hook
-	skillMgr   *skill.Manager
-	cronMgr    *cron.Manager
-	mcpMgr     *mcp.Manager
-	cfg        *config.Manager
-	router     *llm.Router
-	histQuery  HistoryQuerier
-	brainDir   string // base brain directory for session-scoped artifact access
-	kiStore    *knowledge.Store
-	sandboxMgr *sandbox.Manager // for process cleanup on stop
-	startedAt  time.Time
+	loop            *service.AgentLoop
+	loopPool        *service.LoopPool
+	chatEngine      *service.ChatEngine
+	sessMgr         *service.SessionManager
+	modelMgr        *service.ModelManager
+	toolAdmin       *service.ToolAdmin
+	secHook         *security.Hook
+	skillMgr        *skill.Manager
+	cronMgr         *cron.Manager
+	mcpMgr          *mcp.Manager
+	cfg             *config.Manager
+	router          *llm.Router
+	histQuery       HistoryQuerier
+	brainDir        string // base brain directory for session-scoped artifact access
+	kiStore         *knowledge.Store
+	sandboxMgr      *sandbox.Manager // for process cleanup on stop
+	startedAt       time.Time
+	tokenUsageStore *persistence.TokenUsageStore // P2 H2: session token usage persistence (nil = disabled)
 }
 
 // NewAgentAPI creates a unified API facade.
@@ -102,7 +105,7 @@ func NewAgentAPI(
 }
 
 // ErrBusy is returned when the agent loop is already running.
-var ErrBusy = fmt.Errorf("agent is busy")
+var ErrBusy = agenterr.ErrBusy
 
 // ─── Chat ───
 
@@ -131,22 +134,11 @@ func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message, mode stri
 	if sessionID != "" && a.histQuery != nil && len(loop.GetHistory()) == 0 {
 		exports, err := a.histQuery.LoadAll(sessionID)
 		if err == nil && len(exports) > 0 {
-			msgs := make([]llm.Message, len(exports))
-			for i, e := range exports {
-				msgs[i] = llm.Message{
-					Role:       e.Role,
-					Content:    e.Content,
-					ToolCallID: e.ToolCallID,
-					Reasoning:  e.Reasoning,
-				}
-				if e.ToolCalls != "" {
-					json.Unmarshal([]byte(e.ToolCalls), &msgs[i].ToolCalls)
-				}
-			}
+			msgs := service.RestoreHistory(exports)
 			loop.SetHistory(msgs)
 			// Auto-compact on resume: prevent full-history overload
 			loop.CompactIfNeeded()
-			log.Printf("[session] Resumed %d messages for session %s (stream)", len(msgs), sessionID)
+			slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s (stream)", len(msgs), sessionID))
 		}
 	}
 
@@ -163,14 +155,26 @@ func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message, mode stri
 	ctx = ctxutil.WithSessionID(ctx, sessionID)
 
 	// Execute agent loop — title distillation is handled by TitleDistillHook post-run
-	return loop.RunWithoutAcquire(ctx, message)
+	err := loop.RunWithoutAcquire(ctx, message)
+
+	// P2 H2: Auto-persist token usage after each run
+	if sessionID != "" && a.tokenUsageStore != nil {
+		go func() {
+			if saveErr := a.SaveSessionCost(sessionID); saveErr != nil {
+				slog.Info(fmt.Sprintf("[token] Auto-save cost failed for session %s: %v", sessionID, saveErr))
+			}
+		}()
+	}
+
+	return err
 }
 
 // SessionID returns the current session ID for a given session loop.
 func (a *AgentAPI) SessionID(sessionID string) string {
 	if sessionID != "" && a.loopPool != nil {
-		loop := a.loopPool.Get(sessionID)
-		return loop.SessionID()
+		if loop := a.loopPool.GetIfExists(sessionID); loop != nil {
+			return loop.SessionID()
+		}
 	}
 	return a.loop.SessionID()
 }
@@ -202,20 +206,9 @@ func (a *AgentAPI) RetryRun(_ context.Context, sessionID string) (string, error)
 	if sessionID != "" && a.histQuery != nil && len(loop.GetHistory()) == 0 {
 		exports, err := a.histQuery.LoadAll(sessionID)
 		if err == nil && len(exports) > 0 {
-			msgs := make([]llm.Message, len(exports))
-			for i, e := range exports {
-				msgs[i] = llm.Message{
-					Role:       e.Role,
-					Content:    e.Content,
-					ToolCallID: e.ToolCallID,
-					Reasoning:  e.Reasoning,
-				}
-				if e.ToolCalls != "" {
-					json.Unmarshal([]byte(e.ToolCalls), &msgs[i].ToolCalls)
-				}
-			}
+			msgs := service.RestoreHistory(exports)
 			loop.SetHistory(msgs)
-			log.Printf("[retry] Resumed %d messages for session %s", len(msgs), sessionID)
+			slog.Info(fmt.Sprintf("[retry] Resumed %d messages for session %s", len(msgs), sessionID))
 		}
 	}
 	return loop.StripLastTurn()
@@ -237,7 +230,7 @@ func (a *AgentAPI) NewSession(title string) apitype.SessionResponse {
 	dbID, err := a.sessMgr.CreatePersisted("web", title)
 	if err != nil {
 		// Fallback to in-memory if DB unavailable
-		log.Printf("[NewSession] DB create failed, falling back to memory: %v", err)
+		slog.Info(fmt.Sprintf("[NewSession] DB create failed, falling back to memory: %v", err))
 		sess := a.sessMgr.New(title)
 		return apitype.SessionResponse{SessionID: sess.ID, Title: sess.Title}
 	}
@@ -522,14 +515,17 @@ func (a *AgentAPI) GetSecurity() apitype.SecurityResponse {
 func (a *AgentAPI) GetContextStats() apitype.ContextStats {
 	var history []llm.Message
 	var tokenStats service.TokenStats = service.TokenStats{}
+	var cacheStats llm.CacheStats
 	sid := a.sessMgr.Active()
 	if sid != "" && a.loopPool != nil {
 		loop := a.loopPool.Get(sid)
 		history = loop.GetHistory()
 		tokenStats = loop.GetTokenStats()
+		cacheStats = loop.GetCacheStats()
 	} else {
 		history = a.loop.GetHistory()
 		tokenStats = a.loop.GetTokenStats()
+		cacheStats = a.loop.GetCacheStats()
 	}
 	tokenEst := 0
 	for _, m := range history {
@@ -549,6 +545,8 @@ func (a *AgentAPI) GetContextStats() apitype.ContextStats {
 		TotalCostUSD:  tokenStats.TotalCostUSD,
 		TotalCalls:    tokenStats.TotalCalls,
 		ByModel:       byModel,
+		CacheHitRate:  cacheStats.HitRate,
+		CacheBreaks:   cacheStats.CacheBreaks,
 	}
 }
 
@@ -665,7 +663,7 @@ func (a *AgentAPI) ListSkills() (any, error) {
 		Path        string `json:"path"`
 		Type        string `json:"type"`
 		Enabled     bool   `json:"enabled"`
-		EvoStatus string `json:"forge_status"`
+		EvoStatus   string `json:"forge_status"`
 	}
 	var result []skillInfo
 	for _, s := range skills {
@@ -675,7 +673,7 @@ func (a *AgentAPI) ListSkills() (any, error) {
 			Path:        s.Path,
 			Type:        s.Type,
 			Enabled:     s.Enabled,
-			EvoStatus: s.EvoStatus,
+			EvoStatus:   s.EvoStatus,
 		})
 	}
 	return result, nil
@@ -839,7 +837,7 @@ func (a *AgentAPI) ListKI() (any, error) {
 }
 
 // GetKI returns a single Knowledge Item with full content.
-func (a *AgentAPI) GetKI(id string) (interface{}, error) {
+func (a *AgentAPI) GetKI(id string) (any, error) {
 	if a.kiStore == nil {
 		return nil, fmt.Errorf("KI store not configured")
 	}
@@ -887,4 +885,58 @@ func (a *AgentAPI) ReadKIArtifact(id, name string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// ═══════════════════════════════════════════
+// P2 H2: Token usage persistence
+// ═══════════════════════════════════════════
+
+// SetTokenUsageStore injects the token usage persistence store.
+func (a *AgentAPI) SetTokenUsageStore(store *persistence.TokenUsageStore) {
+	a.tokenUsageStore = store
+}
+
+// SaveSessionCost persists the current session's token usage to the database.
+func (a *AgentAPI) SaveSessionCost(sessionID string) error {
+	if a.tokenUsageStore == nil {
+		return fmt.Errorf("token usage store not configured")
+	}
+	stats := a.GetContextStats()
+	var promptTok, completeTok int
+	for _, usage := range stats.ByModel {
+		if u, ok := usage.(map[string]any); ok {
+			if pt, ok := u["prompt_tokens"].(float64); ok {
+				promptTok += int(pt)
+			}
+			if ct, ok := u["completion_tokens"].(float64); ok {
+				completeTok += int(ct)
+			}
+		}
+	}
+	return a.tokenUsageStore.SaveSessionUsage(
+		sessionID, stats.Model,
+		promptTok, completeTok,
+		stats.TotalCalls, stats.TotalCostUSD,
+		stats.ByModel,
+	)
+}
+
+// GetSessionCost retrieves stored token usage for a given session.
+func (a *AgentAPI) GetSessionCost(sessionID string) (map[string]any, error) {
+	if a.tokenUsageStore == nil {
+		return nil, fmt.Errorf("token usage store not configured")
+	}
+	usage, err := a.tokenUsageStore.GetSessionUsage(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"session_id":   usage.SessionID,
+		"model":        usage.Model,
+		"prompt_tok":   usage.TotalPromptTok,
+		"complete_tok": usage.TotalCompleteTok,
+		"total_calls":  usage.TotalCalls,
+		"total_cost":   usage.TotalCostUSD,
+		"updated_at":   usage.UpdatedAt.Format("2006-01-02 15:04:05"),
+	}, nil
 }

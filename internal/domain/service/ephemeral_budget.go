@@ -10,8 +10,9 @@ import (
 // ═══════════════════════════════════════════
 
 // maxEphemeralBudget limits total ephemeral injection to prevent
-// attention dilution. 400 tokens ≈ 10% of a typical system prompt.
-const maxEphemeralBudget = 400
+// attention dilution. 800 tokens ≈ EphPlanningMode (~500t) + active task reminder (~150t) + context warn (~50t).
+// Raised from 400: EphPlanningMode alone is ~508 tokens and was being truncated.
+const maxEphemeralBudget = 800
 
 // EphemeralCandidate represents a candidate ephemeral message for injection.
 // Priority 0 = critical (always included), 3 = low (dropped first).

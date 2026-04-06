@@ -191,10 +191,3 @@ func (d *KnowledgeDistiller) MergeKnowledge(existingContent, newContent string) 
 	result.ShouldSave = true
 	return &result, nil
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

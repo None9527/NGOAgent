@@ -14,13 +14,14 @@
  */
 
 import { getApiBase, getAuthToken } from './api'
+import type { WSContentPart } from './types'
 
 // ─── Types ───
 
 export type WSState = 'connecting' | 'connected' | 'reconnecting' | 'closed'
 
 export type WSUpstreamMsg =
-  | { type: 'chat'; message: string; session_id: string; mode: string }
+  | { type: 'chat'; message: string; session_id: string; mode: string; content_parts?: WSContentPart[] }
   | { type: 'stop'; session_id: string }
   | { type: 'approve'; approval_id: string; approved: boolean }
   | { type: 'ping' }

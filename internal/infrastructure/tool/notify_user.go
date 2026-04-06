@@ -9,7 +9,6 @@ import (
 
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 )
 
 // NotifyUserTool presents a message to the user and optionally yields control.
@@ -22,8 +21,13 @@ func NewNotifyUserTool() *NotifyUserTool {
 	return &NotifyUserTool{}
 }
 
-func (t *NotifyUserTool) Name() string        { return "notify_user" }
-func (t *NotifyUserTool) Description() string { return prompttext.ToolNotifyUser }
+func (t *NotifyUserTool) Name() string { return "notify_user" }
+func (t *NotifyUserTool) Description() string {
+	return `Present a message to the user.
+- message: Concise notice or question.
+- blocked_on_user: If true, agent PAUSES for response.
+- paths_to_review: Optional paths for review.`
+}
 
 func (t *NotifyUserTool) Schema() map[string]any {
 	return map[string]any{

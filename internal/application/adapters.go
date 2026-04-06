@@ -4,13 +4,15 @@ package application
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/memory"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
+	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/tool"
 )
 
@@ -24,11 +26,12 @@ func (a *historyAdapter) SaveAll(sessionID string, msgs []service.HistoryExport)
 	rows := make([]persistence.HistoryMessage, len(msgs))
 	for i, m := range msgs {
 		rows[i] = persistence.HistoryMessage{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolCalls:  m.ToolCalls,
-			ToolCallID: m.ToolCallID,
-			Reasoning:  m.Reasoning,
+			Role:        m.Role,
+			Content:     m.Content,
+			ToolCalls:   m.ToolCalls,
+			ToolCallID:  m.ToolCallID,
+			Reasoning:   m.Reasoning,
+			Attachments: m.Attachments,
 		}
 	}
 	return a.store.SaveAll(sessionID, rows)
@@ -42,11 +45,12 @@ func (a *historyAdapter) LoadAll(sessionID string) ([]service.HistoryExport, err
 	exports := make([]service.HistoryExport, len(rows))
 	for i, r := range rows {
 		exports[i] = service.HistoryExport{
-			Role:       r.Role,
-			Content:    r.Content,
-			ToolCalls:  r.ToolCalls,
-			ToolCallID: r.ToolCallID,
-			Reasoning:  r.Reasoning,
+			Role:        r.Role,
+			Content:     r.Content,
+			ToolCalls:   r.ToolCalls,
+			ToolCallID:  r.ToolCallID,
+			Reasoning:   r.Reasoning,
+			Attachments: r.Attachments,
 		}
 	}
 	return exports, nil
@@ -60,11 +64,12 @@ func (a *historyAdapter) AppendAll(sessionID string, msgs []service.HistoryExpor
 	rows := make([]persistence.HistoryMessage, len(msgs))
 	for i, m := range msgs {
 		rows[i] = persistence.HistoryMessage{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolCalls:  m.ToolCalls,
-			ToolCallID: m.ToolCallID,
-			Reasoning:  m.Reasoning,
+			Role:        m.Role,
+			Content:     m.Content,
+			ToolCalls:   m.ToolCalls,
+			ToolCallID:  m.ToolCallID,
+			Reasoning:   m.Reasoning,
+			Attachments: m.Attachments,
 		}
 	}
 	return a.store.AppendBatch(sessionID, rows)
@@ -137,9 +142,9 @@ type bootstrapReadyHook struct{}
 func (h *bootstrapReadyHook) OnRunComplete(_ context.Context, info service.RunInfo) {
 	if info.Steps > 0 {
 		if err := config.MarkReady(); err != nil {
-			log.Printf("[bootstrap] MarkReady failed: %v", err)
+			slog.Info(fmt.Sprintf("[bootstrap] MarkReady failed: %v", err))
 		} else {
-			log.Printf("[bootstrap] System marked as ready after first conversation (session=%s)", info.SessionID)
+			slog.Info(fmt.Sprintf("[bootstrap] System marked as ready after first conversation (session=%s)", info.SessionID))
 		}
 	}
 }
@@ -159,4 +164,31 @@ func (a *diaryAdapter) Append(entry service.DiaryEntry) error {
 		Steps:     entry.Steps,
 		Result:    entry.Result,
 	})
+}
+
+// securityAdapter bridges domain.SecurityChecker → *security.Hook.
+// Converts infrastructure types (Decision, PendingApproval) to domain equivalents.
+type securityAdapter struct {
+	hook *security.Hook
+}
+
+func (a *securityAdapter) BeforeToolCall(ctx context.Context, toolName string, args map[string]any) (service.SecurityDecision, string) {
+	decision, reason := a.hook.BeforeToolCall(ctx, toolName, args)
+	return service.SecurityDecision(decision), reason // same underlying int
+}
+
+func (a *securityAdapter) AfterToolCall(ctx context.Context, toolName string, result string, err error) {
+	a.hook.AfterToolCall(ctx, toolName, result, err)
+}
+
+func (a *securityAdapter) RequestApproval(toolName string, args map[string]any, reason string) *service.ApprovalTicket {
+	pending := a.hook.RequestApproval(toolName, args, reason)
+	return &service.ApprovalTicket{
+		ID:     pending.ID,
+		Result: pending.Result,
+	}
+}
+
+func (a *securityAdapter) CleanupPending(approvalID string) {
+	a.hook.CleanupPending(approvalID)
 }

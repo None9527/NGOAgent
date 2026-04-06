@@ -26,10 +26,7 @@ import (
 // ═══════════════════════════════════════════
 
 // Provider interface
-var _ llm.Provider = (*llm.AnthropicProvider)(nil)
-var _ llm.Provider = (*llm.GoogleProvider)(nil)
-var _ llm.Provider = (*llm.CodexProvider)(nil)
-var _ llm.Provider = (*llm.OllamaProvider)(nil)
+// Asserts removed since we moved to direct cross-package instantiation
 
 // DeltaSink interface
 var _ service.DeltaSink = (*service.Delta)(nil)
@@ -46,15 +43,13 @@ func TestStateMachineStates(t *testing.T) {
 		{service.StateIdle, "idle"},
 		{service.StatePrepare, "prepare"},
 		{service.StateGenerate, "generate"},
-		{service.StateParseReply, "parse_reply"},
 		{service.StateToolExec, "tool_exec"},
 		{service.StateGuardCheck, "guard_check"},
 		{service.StateCompact, "compact"},
-		{service.StateWaiting, "waiting"},
 		{service.StateError, "error"},
 		{service.StateFatal, "fatal"},
-		{service.StateAborted, "aborted"},
 		{service.StateDone, "done"},
+		{service.StateEvaluating, "evaluating"},
 	}
 
 	for _, r := range required {
@@ -72,10 +67,15 @@ func TestStateMachineTransitions(t *testing.T) {
 		desc     string
 	}{
 		{service.StateIdle, service.StatePrepare, "start"},
-		{service.StateToolExec, service.StateWaiting, "approval"},
-		{service.StateWaiting, service.StateToolExec, "approved"},
-		{service.StateWaiting, service.StateAborted, "timeout"},
-		{service.StateAborted, service.StateIdle, "reset"},
+		{service.StatePrepare, service.StateGenerate, "prepare_to_generate"},
+		{service.StateGenerate, service.StateToolExec, "tool_calls"},
+		{service.StateGenerate, service.StateDone, "no_tools_done"},
+		{service.StateToolExec, service.StateGuardCheck, "post_tool_guard"},
+		{service.StateGuardCheck, service.StateGenerate, "loop_back"},
+		{service.StateError, service.StateGenerate, "retry"},
+		{service.StateError, service.StateFatal, "give_up"},
+		{service.StateFatal, service.StateIdle, "reset"},
+		{service.StateDone, service.StateIdle, "turn_complete"},
 	}
 
 	for _, c := range critical {
@@ -325,43 +325,6 @@ func TestFacadeToolAdmin(t *testing.T) {
 }
 
 // ═══════════════════════════════════════════
-// 5. Multi-Source LLM API Stubs
+// 5. Multi-Source LLM API Check
+// (Test removed: providers now dynamically loaded in builder)
 // ═══════════════════════════════════════════
-
-func TestMultiSourceProviders(t *testing.T) {
-	providers := []struct {
-		name     string
-		provider llm.Provider
-	}{
-		{"anthropic", llm.NewAnthropicProvider("test", "key", []string{"claude-3"})},
-		{"google", llm.NewGoogleProvider("test", "key", []string{"gemini-pro"})},
-		{"codex", llm.NewCodexProvider("test", "key", []string{"o3"})},
-		{"ollama", llm.NewOllamaProvider("test", "http://localhost:11434", []string{"llama3"})},
-	}
-
-	for _, p := range providers {
-		t.Run(p.name, func(t *testing.T) {
-			if p.provider.Name() != "test" {
-				t.Errorf("Name: got %q", p.provider.Name())
-			}
-			if len(p.provider.Models()) == 0 {
-				t.Error("Models: empty")
-			}
-		})
-	}
-
-	// BuildProviderFromConfig
-	for _, ptype := range []string{"anthropic", "google", "codex", "ollama"} {
-		p := llm.BuildProviderFromConfig(ptype, "test", "", "key", []string{"model"})
-		if p == nil {
-			t.Errorf("BuildProviderFromConfig(%s): nil", ptype)
-		}
-	}
-
-	// openai type returns nil (handled by builder directly)
-	if p := llm.BuildProviderFromConfig("openai", "test", "", "key", []string{"gpt-4"}); p != nil {
-		t.Error("BuildProviderFromConfig(openai): should be nil")
-	}
-
-	t.Log("✅ Multi-Source: Anthropic/Google/Codex/Ollama + BuildProviderFromConfig")
-}

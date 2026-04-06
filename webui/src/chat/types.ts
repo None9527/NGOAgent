@@ -149,6 +149,15 @@ export interface ApprovalRequest {
   reason: string
 }
 
+/** B2: Native multimodal content part for WS protocol */
+export interface WSContentPart {
+  type: 'image' | 'audio' | 'video' | 'file'
+  path?: string      // server path (from prior upload)
+  mime_type?: string
+  name?: string
+  data?: string      // base64 (inline, for small files)
+}
+
 export interface StreamCallbacks {
   onMessage: (msg: ChatMessageData) => void
   onUpdate: (uuid: string, patch: Partial<ChatMessageData>) => void

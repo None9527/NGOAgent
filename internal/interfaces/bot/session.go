@@ -55,4 +55,3 @@ func (s *SessionStore) create(userID int64) (string, error) {
 	s.mu.Unlock()
 	return sid, nil
 }
-

@@ -2,10 +2,11 @@ package service
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 	"sync/atomic"
 
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
+	"github.com/ngoclaw/ngoagent/internal/domain/model"
 )
 
 // AuditHook logs tool usage and tracks basic execution stats.
@@ -21,7 +22,7 @@ func NewAuditHook() *AuditHook {
 }
 
 func (h *AuditHook) BeforeTool(ctx context.Context, name string, args map[string]any) (map[string]any, bool) {
-	log.Printf("[audit] tool_start: %s", name)
+	slog.Info(fmt.Sprintf("[audit] tool_start: %s", name))
 	return args, false
 }
 
@@ -29,8 +30,8 @@ func (h *AuditHook) AfterTool(ctx context.Context, name string, output string, e
 	h.totalCalls.Add(1)
 	if err != nil {
 		h.totalErrors.Add(1)
-		log.Printf("[audit] tool_error: %s err=%v (total=%d errors=%d)",
-			name, err, h.totalCalls.Load(), h.totalErrors.Load())
+		slog.Info(fmt.Sprintf("[audit] tool_error: %s err=%v (total=%d errors=%d)",
+			name, err, h.totalCalls.Load(), h.totalErrors.Load()))
 		return
 	}
 	outLen := len(output)
@@ -38,8 +39,8 @@ func (h *AuditHook) AfterTool(ctx context.Context, name string, output string, e
 		outLen = 200
 	}
 	_ = outLen
-	log.Printf("[audit] tool_done: %s output=%d bytes (total=%d)",
-		name, len(output), h.totalCalls.Load())
+	slog.Info(fmt.Sprintf("[audit] tool_done: %s output=%d bytes (total=%d)",
+		name, len(output), h.totalCalls.Load()))
 }
 
 // Stats returns current audit counters.
@@ -53,11 +54,10 @@ type CompactAuditHook struct{}
 
 func NewCompactAuditHook() *CompactAuditHook { return &CompactAuditHook{} }
 
-func (h *CompactAuditHook) BeforeCompact(ctx context.Context, history []llm.Message) {
-	log.Printf("[audit] compact_start: %d messages", len(history))
+func (h *CompactAuditHook) BeforeCompact(ctx context.Context, history []model.Message) {
+	slog.Info(fmt.Sprintf("[audit] compact_start: %d messages", len(history)))
 }
 
-func (h *CompactAuditHook) AfterCompact(ctx context.Context, compacted []llm.Message) {
-	log.Printf("[audit] compact_done: %d messages remaining", len(compacted))
+func (h *CompactAuditHook) AfterCompact(ctx context.Context, compacted []model.Message) {
+	slog.Info(fmt.Sprintf("[audit] compact_done: %d messages remaining", len(compacted)))
 }
-

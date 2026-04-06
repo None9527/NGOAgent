@@ -65,6 +65,15 @@ func (s *Store) Save(item *Item) error {
 	return nil
 }
 
+// Delete removes a KI directory entirely.
+func (s *Store) Delete(id string) error {
+	path := filepath.Join(s.baseDir, id)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("KI %q not found", id)
+	}
+	return os.RemoveAll(path)
+}
+
 // Get retrieves a KI by ID (metadata only, Content from metadata.json snapshot).
 func (s *Store) Get(id string) (*Item, error) {
 	path := filepath.Join(s.baseDir, id, "metadata.json")

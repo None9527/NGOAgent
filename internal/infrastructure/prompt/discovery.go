@@ -24,11 +24,17 @@ func NewDiscovery(homeDir, workspaceDir string) *Discovery {
 }
 
 // LoadUserRules discovers and concatenates user_rules.md from all layers.
-// Project rules override global rules.
+// P1 #28: Project rules use upward traversal — walks from workspaceDir up to find .ngoagent/.
 func (d *Discovery) LoadUserRules() string {
 	files := []string{
 		filepath.Join(d.homeDir, "user_rules.md"),
-		filepath.Join(d.workspaceDir, ".ngoagent", "user_rules.md"),
+	}
+
+	// P1 #28: Walk upward from workspaceDir to find nearest .ngoagent/
+	if d.workspaceDir != "" {
+		if projectRoot := discoverUpward(d.workspaceDir, ".ngoagent"); projectRoot != "" {
+			files = append(files, filepath.Join(projectRoot, ".ngoagent", "user_rules.md"))
+		}
 	}
 
 	var parts []string
@@ -76,4 +82,22 @@ func (d *Discovery) LoadVariants() string {
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// discoverUpward walks up from startDir looking for a directory named marker.
+// Returns the directory containing the marker, or "" if not found.
+// P1 #28: Enables sub-directory starts to find project root config.
+func discoverUpward(startDir, marker string) string {
+	dir := startDir
+	for {
+		candidate := filepath.Join(dir, marker)
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }

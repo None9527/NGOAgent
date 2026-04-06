@@ -113,18 +113,52 @@ func ClassifyByBody(status int, body string) ErrorLevel {
 	base := ClassifyHTTPError(status)
 	lower := strings.ToLower(body)
 
-	// 429 + quota keywords → billing (not retryable via backoff)
+	// Transport-level Fake Errors / HTML Intercepts (e.g., Cloudflare 502/403 or TCP drops)
+	// Prevents parsing HTML as JSON which leads to fatal panics. Force retry.
+	if strings.Contains(lower, "<html") ||
+		strings.Contains(lower, "cloudflare") ||
+		strings.Contains(lower, "socket hang up") ||
+		strings.Contains(lower, "502 bad gateway") {
+		return ErrorTransient
+	}
+
+	// DashScope (1305, userQPSLimit) & Volcengine Ark (RequestBurstTooFast, TPM/RPM)
+	if status == 429 || status == 400 || status == 500 {
+		if strings.Contains(lower, "throttling.userqpslimit") ||
+			strings.Contains(lower, "requestbursttoofast") ||
+			strings.Contains(lower, "tokens per minute") ||
+			strings.Contains(lower, "requests per minute") ||
+			strings.Contains(lower, "\"code\":\"1305\"") ||
+			strings.Contains(lower, "\"code\": 1305") {
+			return ErrorOverload // Trigger short jitter backoff for rapid recovery
+		}
+	}
+
+	// 429 + EXPLICIT quota exhaustion keywords → billing (not retryable via backoff).
+	// CRITICAL: do NOT use broad terms like "billing" — DashScope rate-limit
+	// responses may contain "check your billing" hints, which would falsely
+	// classify retryable 429s as fatal billing errors.
 	if status == 429 && (strings.Contains(lower, "insufficient_quota") ||
 		strings.Contains(lower, "quota_exceeded") ||
-		strings.Contains(lower, "billing")) {
+		strings.Contains(lower, "account_quota_exceeded") ||
+		strings.Contains(lower, "billing_hard_limit") ||
+		strings.Contains(lower, "free_quota_exhausted")) {
 		return ErrorBilling
 	}
 
-	// 400 + context overflow → trigger compact
+	// Volcengine Ark Endpoint missing/invalid model id -> fatal misconfiguration
+	if status == 404 && (strings.Contains(lower, "model_not_found") || strings.Contains(lower, "ep-")) {
+		return ErrorFatal
+	}
+
+	// 400 + context overflow or provider specific overflow errors
+	// Absorbed from OpenClaw: Mistral/Bedrock typically throw specific context exceptions.
 	if status == 400 && (strings.Contains(lower, "context_length") ||
 		strings.Contains(lower, "maximum context") ||
 		strings.Contains(lower, "too many tokens") ||
-		strings.Contains(lower, "max_tokens")) {
+		strings.Contains(lower, "max_tokens") ||
+		strings.Contains(lower, "prompt is too long") ||
+		strings.Contains(lower, "context window is too small")) {
 		return ErrorContextOverflow
 	}
 
@@ -138,15 +172,16 @@ func ClassifyByBody(status int, body string) ErrorLevel {
 }
 
 // BackoffConfig returns retry parameters for each error level.
+// P1 #46: Persistent retry — increased limits for unattended long-running sessions.
 // Returns (baseDelay, maxRetries). Use BackoffWithJitter for actual delay.
 func BackoffConfig(level ErrorLevel) (base time.Duration, maxRetries int) {
 	switch level {
 	case ErrorTransient:
-		return 60 * time.Second, 3
+		return 30 * time.Second, 5 // 429 rate limit: 30s base, 5 retries
 	case ErrorOverload:
-		return 10 * time.Second, 5
+		return 15 * time.Second, 8 // 503/529 overload: 15s base, 8 retries
 	case ErrorContextOverflow:
-		return 0, 1 // no backoff, just compact and retry once
+		return 0, 2 // compact → forceTruncate → give up
 	default:
 		return 0, 0 // no retry
 	}
@@ -188,21 +223,77 @@ type ModelPolicy struct {
 	SupportsTools    bool
 	SupportsThinking bool
 	SupportsVision   bool
+	SupportsCache    bool    // Provider supports explicit prompt caching (DashScope/Anthropic)
 	PriceInput1K     float64 // cost per 1K input tokens (USD)
 	PriceOutput1K    float64 // cost per 1K output tokens (USD)
 }
 
-// DefaultPolicies provides known model configurations.
-var DefaultPolicies = map[string]ModelPolicy{
-	"qwen3.5-plus": {ContextWindow: 1048576, MaxOutputTokens: 16384, SupportsTools: true, SupportsThinking: true, SupportsVision: true},
-	"qwen-max":     {ContextWindow: 32768, MaxOutputTokens: 8192, SupportsTools: true, SupportsThinking: true},
-	"gpt-4":        {ContextWindow: 128000, MaxOutputTokens: 16384, SupportsTools: true, SupportsThinking: false},
-	"gpt-4o":       {ContextWindow: 128000, MaxOutputTokens: 16384, SupportsTools: true, SupportsThinking: false, SupportsVision: true},
+// policyOverlay stores config-driven model capabilities.
+// Populated by RegisterModelOverrides at startup and on hot-reload.
+// GetPolicy checks overlay first, then conservative fallback.
+var policyOverlay = map[string]ModelPolicy{}
+
+// RegisterModelOverrides merges provider-level model_config into the policy overlay.
+// Call this at startup and whenever config is hot-reloaded.
+// This enables pure config-driven model registration — no kernel code changes needed.
+func RegisterModelOverrides(providers []OverrideProvider) {
+	overlay := make(map[string]ModelPolicy)
+	for _, p := range providers {
+		for model, mc := range p.ModelConfig {
+			// Conservative default base — config overrides take priority
+			base := ModelPolicy{
+				ContextWindow:   32768,
+				MaxOutputTokens: 8192,
+				SupportsTools:   true,
+			}
+			// Apply numeric overrides
+			if mc.ContextWindow > 0 {
+				base.ContextWindow = mc.ContextWindow
+			}
+			if mc.MaxOutputTokens > 0 {
+				base.MaxOutputTokens = mc.MaxOutputTokens
+			}
+			// Apply capability flags (nil=inherit conservative default, non-nil=explicit)
+			if mc.SupportsTools != nil {
+				base.SupportsTools = *mc.SupportsTools
+			}
+			if mc.SupportsThinking != nil {
+				base.SupportsThinking = *mc.SupportsThinking
+			}
+			if mc.SupportsVision != nil {
+				base.SupportsVision = *mc.SupportsVision
+			}
+			if mc.SupportsCache != nil {
+				base.SupportsCache = *mc.SupportsCache
+			}
+			overlay[model] = base
+		}
+	}
+	policyOverlay = overlay
 }
 
-// GetPolicy returns the policy for a model, falling back to a conservative default.
+// OverrideProvider is the minimal config view needed for policy registration.
+// Avoids import cycle with config package.
+type OverrideProvider struct {
+	ModelConfig map[string]ModelOverrideConfig
+}
+
+// ModelOverrideConfig mirrors config.ModelOverride without importing config.
+// Pointer types for capability flags distinguish unset (nil=inherit) from explicit false.
+type ModelOverrideConfig struct {
+	ContextWindow    int
+	MaxOutputTokens  int
+	SupportsTools    *bool
+	SupportsThinking *bool
+	SupportsVision   *bool
+	SupportsCache    *bool
+}
+
+// GetPolicy returns the policy for a model.
+// Resolution: policyOverlay (config-driven) → conservative fallback.
+// All model capabilities are registered via config.yaml model_config at startup.
 func GetPolicy(model string) ModelPolicy {
-	if p, ok := DefaultPolicies[model]; ok {
+	if p, ok := policyOverlay[model]; ok {
 		return p
 	}
 	return ModelPolicy{
@@ -211,36 +302,4 @@ func GetPolicy(model string) ModelPolicy {
 		SupportsTools:    true,
 		SupportsThinking: false,
 	}
-}
-
-// GetPolicyWithOverrides returns the model policy, applying config-based overrides
-// from ProviderDef.ModelConfig if present. Config values take priority.
-func GetPolicyWithOverrides(model string, providers []ProviderConfig) ModelPolicy {
-	policy := GetPolicy(model)
-
-	// Check provider-level overrides
-	for _, p := range providers {
-		if override, ok := p.ModelConfig[model]; ok {
-			if override.ContextWindow > 0 {
-				policy.ContextWindow = override.ContextWindow
-			}
-			if override.MaxOutputTokens > 0 {
-				policy.MaxOutputTokens = override.MaxOutputTokens
-			}
-			break
-		}
-	}
-	return policy
-}
-
-// ProviderConfig is a minimal view of config.ProviderDef for policy lookups.
-// Avoids import cycle with config package.
-type ProviderConfig struct {
-	ModelConfig map[string]ModelOverrideConfig
-}
-
-// ModelOverrideConfig mirrors config.ModelOverride without importing config.
-type ModelOverrideConfig struct {
-	ContextWindow   int
-	MaxOutputTokens int
 }

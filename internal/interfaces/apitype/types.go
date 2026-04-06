@@ -41,9 +41,9 @@ type SessionInfo struct {
 type HistoryMessage struct {
 	Role      string `json:"role"`
 	Content   string `json:"content"`
-	ToolName  string `json:"tool_name,omitempty"`  // tool name for role=tool messages
-	ToolArgs  string `json:"tool_args,omitempty"`  // JSON arguments for role=tool messages
-	Reasoning string `json:"reasoning,omitempty"`  // thinking/reasoning content (assistant only)
+	ToolName  string `json:"tool_name,omitempty"` // tool name for role=tool messages
+	ToolArgs  string `json:"tool_args,omitempty"` // JSON arguments for role=tool messages
+	Reasoning string `json:"reasoning,omitempty"` // thinking/reasoning content (assistant only)
 }
 
 // SecurityResponse holds security policy info.
@@ -70,6 +70,8 @@ type ContextStats struct {
 	TotalCostUSD  float64        `json:"total_cost_usd"`
 	TotalCalls    int            `json:"total_calls"`
 	ByModel       map[string]any `json:"by_model,omitempty"`
+	CacheHitRate  float64        `json:"cache_hit_rate"` // P2 E2: prompt cache hit rate 0.0-1.0
+	CacheBreaks   int            `json:"cache_breaks"`   // P2 E2: prompt hash changes
 }
 
 // SystemInfoResponse holds runtime system information.

@@ -2,7 +2,8 @@ package bot
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -29,7 +30,7 @@ func New(cfg *Config) (*Bot, error) {
 	sessions := NewSessionStore(stream)
 	handler := NewHandler(tg, stream, sessions, cfg)
 
-	log.Printf("[TGBot] Authorized as @%s (HTTP: %s)", tg.Self.UserName, cfg.EffectiveHTTPAddr())
+	slog.Info(fmt.Sprintf("[TGBot] Authorized as @%s (HTTP: %s)", tg.Self.UserName, cfg.EffectiveHTTPAddr()))
 	return &Bot{tg: tg, handler: handler, cfg: cfg}, nil
 }
 
@@ -39,13 +40,13 @@ func (b *Bot) Run(ctx context.Context) error {
 	u.Timeout = 60
 
 	updates := b.tg.GetUpdatesChan(u)
-	log.Println("[TGBot] Listening for updates...")
+	slog.Info(fmt.Sprint("[TGBot] Listening for updates..."))
 
 	for {
 		select {
 		case <-ctx.Done():
 			b.tg.StopReceivingUpdates()
-			log.Println("[TGBot] Stopped.")
+			slog.Info(fmt.Sprint("[TGBot] Stopped."))
 			return nil
 		case update, ok := <-updates:
 			if !ok {

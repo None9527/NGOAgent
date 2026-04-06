@@ -11,7 +11,6 @@ import (
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt/prompttext"
 )
 
 // TaskPlanTool manages structured task plans, checklists, and walkthroughs.
@@ -23,8 +22,12 @@ func NewTaskPlanTool(brainDir string) *TaskPlanTool {
 	return &TaskPlanTool{brainDir: brainDir}
 }
 
-func (t *TaskPlanTool) Name() string        { return "task_plan" }
-func (t *TaskPlanTool) Description() string { return prompttext.ToolTaskPlan }
+func (t *TaskPlanTool) Name() string { return "task_plan" }
+func (t *TaskPlanTool) Description() string {
+	return `Manage artifacts: plan (design), task (checklist), walkthrough (summary).
+- action: create/update/get/complete.
+- type: plan/task/walkthrough.`
+}
 
 func (t *TaskPlanTool) Schema() map[string]any {
 	return map[string]any{
@@ -126,8 +129,13 @@ func (t *TaskPlanTool) Execute(ctx context.Context, args map[string]any) (dtool.
 // UpdateProjectContextTool updates the project's persistent knowledge.
 type UpdateProjectContextTool struct{}
 
-func (t *UpdateProjectContextTool) Name() string        { return "update_project_context" }
-func (t *UpdateProjectContextTool) Description() string { return prompttext.ToolUpdateProjectContext }
+func (t *UpdateProjectContextTool) Name() string { return "update_project_context" }
+func (t *UpdateProjectContextTool) Description() string {
+	return `Update the project's persistent knowledge store.
+- action: append / replace_section / read
+- Information saved here is injected into future sessions for this project
+- Use for: tech stack, build commands, architecture conventions, gotchas`
+}
 
 func (t *UpdateProjectContextTool) Schema() map[string]any {
 	return map[string]any{
@@ -216,22 +224,31 @@ type SaveKnowledgeTool struct {
 }
 
 func NewSaveKnowledgeTool(store *knowledge.Store, retriever *knowledge.Retriever, threshold float64) *SaveKnowledgeTool {
-	if threshold <= 0 {
-		threshold = 0.60
+	// Write-time dedup must be aggressive — catch "media_studio CLI usage" vs
+	// "media-studio CLI correct invocation" as duplicates to avoid KI sprawl.
+	// Config threshold is for retrieval quality; dedup uses a fixed low bar.
+	const dedupCeiling = 0.60
+	if threshold <= 0 || threshold > dedupCeiling {
+		threshold = dedupCeiling
 	}
 	return &SaveKnowledgeTool{store: store, retriever: retriever, threshold: threshold}
 }
 
-func (t *SaveKnowledgeTool) Name() string        { return "save_knowledge" }
-func (t *SaveKnowledgeTool) Description() string { return prompttext.ToolSaveMemory }
+func (t *SaveKnowledgeTool) Name() string { return "save_knowledge" }
+func (t *SaveKnowledgeTool) Description() string {
+	return `Save knowledge to persistent cross-session store. Available across ALL future sessions.
+- tags: use "preference" for enforced user preferences
+- Similar KIs auto-merged (>0.85 similarity)
+- For project-specific info, use update_project_context instead`
+}
 
 func (t *SaveKnowledgeTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"key":     map[string]any{"type": "string", "description": "Descriptive key for this knowledge"},
-			"content": map[string]any{"type": "string", "description": "Knowledge content to store"},
-			"tags":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional categorization tags (use 'preference' for user preferences)"},
+			"key":     map[string]any{"type": "string", "description": "Descriptive key (title) for this knowledge item. Keep concise and unique."},
+			"content": map[string]any{"type": "string", "description": "Knowledge content. Focus on: user preferences, architecture decisions, external system access info (URLs/APIs), root causes of solved problems. Do NOT save: code implementation details (readable from source), git history, temporary task state, installation steps (in docs), or generic how-to knowledge."},
+			"tags":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Categorization: 'preference' (user habits/style), 'project' (architecture/decisions), 'reference' (external system pointers), 'feedback' (corrections to agent behavior)"},
 		},
 		"required": []string{"key", "content"},
 	}
@@ -253,20 +270,20 @@ func (t *SaveKnowledgeTool) Execute(ctx context.Context, args map[string]any) (d
 		}
 	}
 
-	// Dedup check: if a similar KI exists, merge instead of create
+	// M3b: Dedup check using content for semantic matching (not just key/title).
+	// If a similar KI exists, merge new content into it rather than creating a duplicate.
 	if t.retriever != nil {
-		dupID, score := t.retriever.FindDuplicate(key, t.threshold)
+		// Use content as the query for more accurate semantic matching
+		dupID, score := t.retriever.FindDuplicate(content, t.threshold)
 		if dupID != "" {
-			appendContent := fmt.Sprintf("\n\n---\n\n## Manual Update\n\n%s", content)
-			mergeSummary := content
-			if len(mergeSummary) > 200 {
-				mergeSummary = mergeSummary[:200] + "..."
-			}
+			// Append new findings to existing KI under a dated section
+			appendContent := fmt.Sprintf("\n\n---\n\n## Update\n\n%s", content)
+			mergeSummary := key // Use the new key as updated summary hint
 			if err := t.store.UpdateMerge(dupID, appendContent, mergeSummary); err != nil {
 				return dtool.ToolResult{Output: fmt.Sprintf("Error merging into existing KI: %v", err)}, nil
 			}
 			_ = t.retriever.EmbedAndIndexByID(dupID)
-			return dtool.ToolResult{Output: fmt.Sprintf("Merged into existing knowledge %q (similarity=%.2f)", dupID, score)}, nil
+			return dtool.ToolResult{Output: fmt.Sprintf("✓ Merged into existing KI %q (similarity=%.2f, threshold=%.2f). Updated in place.", dupID, score, t.threshold)}, nil
 		}
 	}
 

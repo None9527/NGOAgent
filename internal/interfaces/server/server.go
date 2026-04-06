@@ -4,9 +4,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
@@ -90,10 +92,14 @@ type API interface {
 
 	// KI management
 	ListKI() (any, error)
-	GetKI(id string) (interface{}, error)
+	GetKI(id string) (any, error)
 	DeleteKI(id string) error
 	ListKIArtifacts(id string) ([]apitype.BrainArtifactInfo, error)
 	ReadKIArtifact(id, name string) (string, error)
+
+	// P2 H2: Token usage persistence
+	GetSessionCost(sessionID string) (map[string]any, error)
+	SaveSessionCost(sessionID string) error
 }
 
 // Server is the HTTP/SSE server for NGOAgent.
@@ -121,14 +127,14 @@ func NewServer(api API, addr string, authToken string) *Server {
 func (s *Server) PushEvent(sessionID, eventType string, data any) {
 	// Try WS path first
 	if ws, ok := s.wsTracker.Load(sessionID); ok {
-		log.Printf("[push] %s → WS for session %s", eventType, sessionID)
+		slog.Info(fmt.Sprintf("[push] %s → WS for session %s", eventType, sessionID))
 		ws.(*wsConn).pushEvent(eventType, data)
 		return
 	}
 	// Fallback to SSE RunTracker
 	run, ok := s.runTracker.Get(sessionID)
 	if !ok {
-		log.Printf("[push] %s → NO target for session %s (no WS, no SSE)", eventType, sessionID)
+		slog.Info(fmt.Sprintf("[push] %s → NO target for session %s (no WS, no SSE)", eventType, sessionID))
 		return
 	}
 	run.Buffer.EmitDirect(eventType, data)
@@ -202,7 +208,9 @@ func (s *Server) Start(ctx context.Context) error {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Model string `json:"model"` }
+		var req struct {
+			Model string `json:"model"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
@@ -225,7 +233,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Auth middleware — always enforced (token auto-generated on first run)
 	handler := s.authMiddleware(mux)
-	log.Printf("Auth token enforced — all API requests require Bearer token")
+	slog.Info("Auth token enforced — all API requests require Bearer token")
 
 	srv := &http.Server{
 		Addr:              s.addr,
@@ -234,7 +242,7 @@ func (s *Server) Start(ctx context.Context) error {
 		BaseContext:       func(l net.Listener) context.Context { return ctx },
 	}
 
-	log.Printf("Server listening on %s", s.addr)
+	slog.Info(fmt.Sprintf("Server listening on %s", s.addr))
 
 	go func() {
 		<-ctx.Done()
@@ -275,6 +283,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			"/model": true, "/models": true, "/set": true, "/evo": true,
 			"/plan": true, "/status": true, "/help": true, "/skill": true,
 			"/clear": true, "/compact": true, "/cron": true,
+			"/doctor": true, "/cost": true,
+			// P2 H1: new slash commands
+			"/memory": true, "/ki": true, "/tools": true,
+			"/context": true, "/sessions": true,
+			// P3 J3: telemetry
+			"/telemetry": true,
 		}
 		if knownCmds[firstWord] {
 			result := s.execSlash(req.Message)
@@ -348,9 +362,37 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				data, _ := json.Marshal(map[string]string{"type": "error", "message": "agent is busy"})
 				buf.MakeDelta().OnError(fmt.Errorf("%s", string(data)))
 			} else {
-				log.Printf("[handleChat] run error: %v", err)
+				slog.Info(fmt.Sprintf("[handleChat] run error: %v", err))
 			}
 			buf.MarkDone()
+		}
+	}()
+
+	// SSE keep-alive (every 15s) to bypass proxy idle timeouts (e.g. Cloudflare)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				sseMu.Lock()
+				if !disconnected {
+					fmt.Fprintf(w, ": heartbeat\n\n")
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								disconnected = true
+							}
+						}()
+						flusher.Flush()
+					}()
+				}
+				sseMu.Unlock()
+			}
 		}
 	}()
 
@@ -365,7 +407,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	case <-r.Context().Done():
 		// Client disconnected — BufferedDelta auto-detects write failure
 		// and switches to buffer mode. Run continues in background.
-		log.Printf("[handleChat] SSE client disconnected, run continues in background (session=%s)", req.SessionID)
+		slog.Info(fmt.Sprintf("[handleChat] SSE client disconnected, run continues in background (session=%s)", req.SessionID))
 		buf.Detach()
 	}
 }
@@ -425,7 +467,7 @@ func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
 
 	// Attach — replays buffered events and then streams live
 	replayed := run.Buffer.Attach(writer, lastSeq)
-	log.Printf("[reconnect] Replayed %d events for session %s (from seq %d)", replayed, sessionID, lastSeq)
+	slog.Info(fmt.Sprintf("[reconnect] Replayed %d events for session %s (from seq %d)", replayed, sessionID, lastSeq))
 
 	// If run already done (or completed during replay), send [DONE] immediately
 	if run.Buffer.IsDone() {
@@ -437,6 +479,34 @@ func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SSE keep-alive (every 15s) to bypass proxy idle timeouts
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-run.Buffer.Done():
+				return
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				mu.Lock()
+				if !disconnected {
+					fmt.Fprintf(w, ": heartbeat\n\n")
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								disconnected = true
+							}
+						}()
+						flusher.Flush()
+					}()
+				}
+				mu.Unlock()
+			}
+		}
+	}()
+
 	// Block until run completes OR client disconnects
 	select {
 	case <-run.Buffer.Done():
@@ -446,11 +516,11 @@ func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
 		mu.Unlock()
-		log.Printf("[reconnect] Run completed, sent [DONE] for session %s", sessionID)
+		slog.Info(fmt.Sprintf("[reconnect] Run completed, sent [DONE] for session %s", sessionID))
 	case <-r.Context().Done():
 		// Client disconnected before run finished
 		run.Buffer.Detach()
-		log.Printf("[reconnect] Client disconnected for session %s", sessionID)
+		slog.Info(fmt.Sprintf("[reconnect] Client disconnected for session %s", sessionID))
 	}
 }
 
@@ -535,7 +605,8 @@ func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	lastMsg, err := s.api.RetryRun(context.Background(), req.SessionID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		errJSON, _ := json.Marshal(map[string]string{"error": err.Error()})
+		http.Error(w, string(errJSON), http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -550,17 +621,13 @@ func (s *Server) handleSlash(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"result": result})
 }
 
-// execSlash routes slash commands.
-func (s *Server) execSlash(input string) string {
-	parts := strings.Fields(input)
-	if len(parts) == 0 {
-		return "unknown command"
-	}
-	cmd := parts[0]
-	args := parts[1:]
+// slashHandler is a slash command handler function.
+type slashHandler func(s *Server, args []string) string
 
-	switch cmd {
-	case "/model":
+// slashRoutes is the dispatch table for all slash commands.
+// Adding a new command = adding one map entry.
+var slashRoutes = map[string]slashHandler{
+	"/model": func(s *Server, args []string) string {
 		if len(args) == 0 {
 			return "Current model: " + s.api.CurrentModel()
 		}
@@ -568,11 +635,11 @@ func (s *Server) execSlash(input string) string {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return "Switched to: " + args[0]
-
-	case "/models":
+	},
+	"/models": func(s *Server, _ []string) string {
 		return strings.Join(s.api.ListModels().Models, ", ")
-
-	case "/set":
+	},
+	"/set": func(s *Server, args []string) string {
 		if len(args) < 2 {
 			return "Usage: /set <key> <value>"
 		}
@@ -580,23 +647,21 @@ func (s *Server) execSlash(input string) string {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return fmt.Sprintf("Set %s = %s", args[0], strings.Join(args[1:], " "))
-
-	case "/evo":
-		return s.execEvo(args)
-
-	case "/plan":
+	},
+	"/evo": func(s *Server, args []string) string { return s.execEvo(args) },
+	"/plan": func(_ *Server, _ []string) string {
 		return "请使用输入框旁的模式切换 pill（⭐ Auto / 📋 Plan / 🤖 Agentic）"
-
-	case "/status":
+	},
+	"/status": func(s *Server, _ []string) string {
 		stats := s.api.GetContextStats()
 		sec := s.api.GetSecurity()
 		return fmt.Sprintf("Model: %s | Security: %s | History: %d msgs",
 			stats.Model, sec.Mode, stats.HistoryCount)
-
-	case "/help":
-		return "Commands: /model /models /set /evo /plan /skill /status /clear /compact /help"
-
-	case "/skill":
+	},
+	"/help": func(_ *Server, _ []string) string {
+		return "Commands: /model /models /set /evo /plan /skill /status /clear /compact /doctor /cost /memory /ki /tools /context /sessions /telemetry /help"
+	},
+	"/skill": func(s *Server, _ []string) string {
 		skillsRaw, err := s.api.ListSkills()
 		if err != nil {
 			return "Error: " + err.Error()
@@ -606,9 +671,9 @@ func (s *Server) execSlash(input string) string {
 			Name        string `json:"name"`
 			Type        string `json:"type"`
 			Description string `json:"description"`
-			EvoStatus string `json:"forge_status"`
+			EvoStatus   string `json:"forge_status"`
 		}
-		json.Unmarshal(data, &skills)
+		json.Unmarshal(data, &skills) // best-effort: data comes from our own marshal above
 		if len(skills) == 0 {
 			return "No skills discovered."
 		}
@@ -617,18 +682,32 @@ func (s *Server) execSlash(input string) string {
 			lines = append(lines, fmt.Sprintf("  %s [%s] (%s) — %s", sk.Name, sk.EvoStatus, sk.Type, sk.Description))
 		}
 		return "Skills:\n" + strings.Join(lines, "\n")
+	},
+	"/clear":     func(s *Server, _ []string) string { s.api.ClearHistory(); return "History cleared." },
+	"/compact":   func(s *Server, _ []string) string { s.api.CompactContext(); return "Context compacted." },
+	"/doctor":    func(s *Server, _ []string) string { return s.execDoctor() },
+	"/cost":      func(s *Server, _ []string) string { return s.execCost() },
+	"/memory":    func(s *Server, _ []string) string { return s.execMemory() },
+	"/ki":        func(s *Server, _ []string) string { return s.execKI() },
+	"/tools":     func(s *Server, _ []string) string { return s.execTools() },
+	"/context":   func(s *Server, _ []string) string { return s.execContext() },
+	"/sessions":  func(s *Server, _ []string) string { return s.execSessions() },
+	"/telemetry": func(s *Server, _ []string) string { return s.execTelemetry() },
+}
 
-	case "/clear":
-		s.api.ClearHistory()
-		return "History cleared."
-
-	case "/compact":
-		s.api.CompactContext()
-		return "Context compacted."
-
-	default:
-		return "Unknown command: " + cmd
+// execSlash routes slash commands via table dispatch.
+func (s *Server) execSlash(input string) string {
+	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return "unknown command"
 	}
+	cmd := parts[0]
+	args := parts[1:]
+
+	if handler, ok := slashRoutes[cmd]; ok {
+		return handler(s, args)
+	}
+	return "Unknown command: " + cmd
 }
 
 // execEvo handles the /evo command family.
@@ -668,6 +747,7 @@ func (s *Server) execEvo(args []string) string {
 
 // handleFile serves a local file over HTTP for browser rendering (images, media, etc.).
 // Usage: GET /v1/file?path=/absolute/path/to/file.png
+// P0-5: Restricted to workspace, /tmp, and agent data directories.
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
@@ -687,6 +767,12 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// P0-5: Path whitelist — only serve files from allowed directories
+	if !s.isAllowedFilePath(absPath) {
+		http.Error(w, `{"error":"path not allowed: must be within workspace, /tmp, or agent data directory"}`, http.StatusForbidden)
+		return
+	}
+
 	// Verify file exists and is not a directory
 	info, err := os.Stat(absPath)
 	if err != nil {
@@ -700,6 +786,43 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 
 	// Serve the file (Go auto-detects Content-Type from extension)
 	http.ServeFile(w, r, absPath)
+}
+
+// isAllowedFilePath checks if a path is within the allowed serving directories.
+// Allowed: workspace dir, /tmp/, user home agent data dir.
+func (s *Server) isAllowedFilePath(absPath string) bool {
+	// Always allow /tmp/
+	if strings.HasPrefix(absPath, "/tmp/") {
+		return true
+	}
+
+	// Get workspace from config
+	c := s.api.GetConfig()
+	if agent, ok := c["agent"].(map[string]any); ok {
+		if ws, ok := agent["workspace"].(string); ok && ws != "" {
+			wsClean := filepath.Clean(ws)
+			if strings.HasPrefix(absPath, wsClean+"/") || absPath == wsClean {
+				return true
+			}
+		}
+		// Allow agent home/data directory
+		if home, ok := agent["home"].(string); ok && home != "" {
+			homeClean := filepath.Clean(home)
+			if strings.HasPrefix(absPath, homeClean+"/") || absPath == homeClean {
+				return true
+			}
+		}
+	}
+
+	// Allow user home .ngoagent directory (brain artifacts, uploads, etc.)
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		agentDir := filepath.Join(homeDir, ".ngoagent")
+		if strings.HasPrefix(absPath, agentDir+"/") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // handleUpload receives multipart file uploads from the web UI.
@@ -756,5 +879,38 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		"path":     dstPath,
 		"filename": header.Filename,
 		"size":     fmt.Sprintf("%d", header.Size),
+	})
+}
+
+// ──────────────────────────────────────────────
+// Error → HTTP Status Mapping
+// ──────────────────────────────────────────────
+
+// errorToHTTPStatus maps domain errors to HTTP status codes.
+func errorToHTTPStatus(err error) int {
+	switch {
+	case errors.Is(err, agenterr.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, agenterr.ErrBusy):
+		return http.StatusTooManyRequests
+	case errors.Is(err, agenterr.ErrDenied):
+		return http.StatusForbidden
+	case errors.Is(err, agenterr.ErrValidation):
+		return http.StatusBadRequest
+	case errors.Is(err, agenterr.ErrTimeout):
+		return http.StatusGatewayTimeout
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// writeJSONError writes a structured JSON error response using the domain error type mapping.
+func writeJSONError(w http.ResponseWriter, err error) {
+	status := errorToHTTPStatus(err)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error":  err.Error(),
+		"status": status,
 	})
 }

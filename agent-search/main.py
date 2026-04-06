@@ -1,21 +1,20 @@
 """
 Agent Search Service — FastAPI application.
 
-Exposes three endpoints:
-  POST /api/search          — search only (SearXNG + prefilter + LLM rerank)
-  POST /api/fetch           — deep-crawl a single URL
-  POST /api/search_and_fetch — search + auto deep-crawl top N results
+Two endpoints:
+  POST /api/search   — unified search with depth control (quick/standard/deep)
+  POST /api/extract  — extract content from known URLs
 
 Pipeline:
   SearXNG (30 results)
     → Stage 1: algorithmic prefilter (→ 10)
-    → Stage 2: LLM listwise reranker (→ ranked by relevance)
-    → agent-browser concurrent fetch (top N → markdown)
-    → structured JSON response
+    → Stage 2: LLM reranker (→ ranked, only for standard/deep)
+    → Stage 3: concurrent stealth fetch (top N, only for deep)
+    → Stage 4: algorithmic de-noising (only for deep)
 """
 
 import logging
-import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,12 +22,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from search.models import (
     SearchRequest,
     SearchResponse,
-    FetchRequest,
-    FetchResponse,
-    SearchAndFetchRequest,
-    SearchAndFetchResponse,
+    ExtractRequest,
+    ExtractResponse,
 )
-from search import searxng, prefilter, reranker, fetcher
+from search.pipeline import search_pipeline, extract_pipeline
+from search.searxng import close_client
+from search.cache import search_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,10 +35,20 @@ logging.basicConfig(
 )
 log = logging.getLogger("agent-search")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info("agent-search starting up")
+    yield
+    log.info("agent-search shutting down, closing connections...")
+    await close_client()
+
+
 app = FastAPI(
     title="Agent Search Service",
-    description="SearXNG + LLM Reranker + agent-browser deep-fetch",
-    version="1.0.0",
+    description="SearXNG + LLM Reranker + Stealth Fetch + De-noising",
+    version="2.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -52,109 +61,28 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "cache": search_cache.stats}
 
 
 @app.post("/api/search", response_model=SearchResponse)
 async def api_search(req: SearchRequest):
     """
-    Search pipeline: SearXNG → prefilter → LLM rerank.
-    Returns scored and ranked results without deep content.
+    Unified search endpoint.
+
+    depth controls pipeline depth:
+      quick:    SearXNG → prefilter                        (~200ms)
+      standard: SearXNG → prefilter → LLM rerank           (~2s)
+      deep:     SearXNG → prefilter → LLM rerank → fetch → clean (~5-15s)
     """
-    t0 = time.monotonic()
-
-    # ① SearXNG
-    raw = await searxng.search(
-        req.query,
-        categories=req.categories,
-        time_range=req.time_range,
-        limit=30,
-    )
-
-    # ② Algorithmic pre-filter (30 → 10)
-    filtered = prefilter.prefilter(req.query, raw)
-
-    # ③ LLM rerank (10 → ranked)
-    ranked, intent = await reranker.rerank(req.query, filtered)
-
-    # Trim to requested limit
-    results = ranked[:req.limit]
-    elapsed = int((time.monotonic() - t0) * 1000)
-
-    return SearchResponse(
-        results=results,
-        total=len(results),
-        intent=intent,
-        query_time_ms=elapsed,
-    )
+    return await search_pipeline(req)
 
 
-@app.post("/api/fetch", response_model=FetchResponse)
-async def api_fetch(req: FetchRequest):
+@app.post("/api/extract", response_model=ExtractResponse)
+async def api_extract(req: ExtractRequest):
     """
-    Deep-fetch a single URL via agent-browser.
-    Returns clean text content.
+    Extract content from known URLs.
+
+    Automatically bypasses anti-bot protections via L1 (curl_cffi)
+    and L2 (Camoufox stealth browser). Binary assets are cached locally.
     """
-    result = await fetcher.fetch_page(
-        req.url,
-        max_length=req.max_length,
-    )
-    return result
-
-
-@app.post("/api/search_and_fetch", response_model=SearchAndFetchResponse)
-async def api_search_and_fetch(req: SearchAndFetchRequest):
-    """
-    Combined pipeline: search + rerank + deep-fetch top N.
-
-    This is the primary endpoint for NGOAgent's web_search tool.
-    One call does everything — no need for the agent to orchestrate
-    multiple search/fetch steps.
-    """
-    t0 = time.monotonic()
-
-    # ① SearXNG
-    raw = await searxng.search(
-        req.query,
-        categories=req.categories,
-        time_range=req.time_range,
-        limit=30,
-    )
-
-    # ② Algorithmic pre-filter (30 → 10)
-    filtered = prefilter.prefilter(req.query, raw)
-
-    # ③ LLM rerank (10 → ranked)
-    ranked, intent = await reranker.rerank(req.query, filtered)
-
-    # ④ Concurrent deep-fetch top N
-    fetch_count = min(req.fetch_top, len(ranked))
-    top_urls = [r.url for r in ranked[:fetch_count]]
-    fetched = await fetcher.fetch_pages(
-        top_urls,
-        max_length=req.max_content_length,
-    )
-
-    # ⑤ Merge fetched content into results
-    fetched_ok = 0
-    for i, fr in enumerate(fetched):
-        if fr.content_type != "error":
-            ranked[i].content = fr.content
-            fetched_ok += 1
-
-    # Trim to requested limit
-    results = ranked[:req.limit]
-    elapsed = int((time.monotonic() - t0) * 1000)
-
-    log.info(
-        "search_and_fetch: query=%r intent=%s results=%d fetched=%d/%d time=%dms",
-        req.query, intent, len(results), fetched_ok, fetch_count, elapsed,
-    )
-
-    return SearchAndFetchResponse(
-        results=results,
-        total=len(results),
-        fetched=fetched_ok,
-        intent=intent,
-        query_time_ms=elapsed,
-    )
+    return await extract_pipeline(req)

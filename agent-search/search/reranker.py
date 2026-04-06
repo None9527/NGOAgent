@@ -1,15 +1,16 @@
 """
 Stage 2 — LLM Listwise Reranker.
 
-Replaces the TEI bge-reranker-v2-m3 container with a single LLM call.
+Single LLM call scores ~10 pre-filtered results and classifies query intent.
+This is the ONLY LLM call in the entire pipeline.
 
-Advantages over the cross-encoder:
-- 4-dimension scoring (relevance / density / authority / freshness)
-- Query intent classification → dynamic weight adjustment
-- Explainable: each result gets a reason string
-- Graceful degradation: timeout/error falls back to Stage 1 ordering
+Output per result:
+  - score: 0.0-1.0 normalized relevance
+  - reason: why this result matters for the query
+  - result_type: article|code|docs|news|forum|media|academic
 
-The LLM scores 10 pre-filtered results in one call (~500ms, ~1k tokens).
+Output per query:
+  - intent: factual|tutorial|comparison|news|research|troubleshoot
 """
 
 import asyncio
@@ -20,42 +21,37 @@ from typing import Any
 import httpx
 
 from config import LLM_URL, LLM_API_KEY, LLM_MODEL
-from search.models import SearchResult
+from search.models import InternalResult
 
 log = logging.getLogger("agent-search.reranker")
 
-# ---------------------------------------------------------------------------
-# Intent-aware weight profiles
-# ---------------------------------------------------------------------------
-
-INTENT_WEIGHTS: dict[str, dict[str, float]] = {
-    "factual":      {"relevance": 0.5, "density": 0.2, "authority": 0.2, "freshness": 0.1},
-    "tutorial":     {"relevance": 0.4, "density": 0.3, "authority": 0.2, "freshness": 0.1},
-    "comparison":   {"relevance": 0.4, "density": 0.3, "authority": 0.1, "freshness": 0.2},
-    "news":         {"relevance": 0.3, "density": 0.1, "authority": 0.2, "freshness": 0.4},
-    "research":     {"relevance": 0.3, "density": 0.3, "authority": 0.3, "freshness": 0.1},
-    "troubleshoot": {"relevance": 0.5, "density": 0.2, "authority": 0.1, "freshness": 0.2},
-}
 
 # ---------------------------------------------------------------------------
-# Prompts
+# Prompt
 # ---------------------------------------------------------------------------
 
 _SYSTEM = """\
 You are a search result relevance evaluator.
-Given a query and numbered search results, score each on 4 dimensions (0-10):
-1. relevance — how directly does this answer the query?
-2. density   — does the snippet suggest rich, detailed content?
-3. authority — is this an authoritative source for the topic?
-4. freshness — is the information current?
+Given a query and numbered search results, evaluate each one.
 
-Also classify the query intent as ONE of:
+For each result, provide:
+1. score — a relevance score from 0.0 to 1.0 (normalized, not integers)
+2. reason — a brief explanation of why this result is relevant (or not)
+3. result_type — classify the content: article|code|docs|news|forum|media|academic
+
+Also classify the overall query intent as ONE of:
 factual, tutorial, comparison, news, research, troubleshoot
+
+CRITICAL LANGUAGE RULE:
+- If the query is in Chinese, results in English or other non-Chinese languages
+  MUST be scored ≤0.3, unless they are the ONLY available results.
+- Chinese query → Chinese results should get the highest scores.
+- If no Chinese results exist, score the best available results fairly but cap at 0.6.
 
 Respond with ONLY valid JSON. No markdown fences, no explanation."""
 
 
-def _build_user_prompt(query: str, results: list[SearchResult]) -> str:
+def _build_user_prompt(query: str, results: list[InternalResult]) -> str:
     items: list[str] = []
     for i, r in enumerate(results):
         engines_str = ", ".join(r.engines) if r.engines else "unknown"
@@ -63,6 +59,7 @@ def _build_user_prompt(query: str, results: list[SearchResult]) -> str:
         items.append(
             f"[{i}] {r.title}\n"
             f"    URL: {r.url}\n"
+            f"    Domain: {r.domain}\n"
             f"    Snippet: {r.snippet[:200]}\n"
             f"    Engines: {engines_str} | Date: {date_str}"
         )
@@ -72,8 +69,9 @@ def _build_user_prompt(query: str, results: list[SearchResult]) -> str:
         f"Results:\n" + "\n".join(items) + "\n\n"
         f"Respond in this exact JSON format:\n"
         f'{{"intent":"<intent>",'
-        f'"rankings":[{{"index":0,"relevance":8,"density":7,'
-        f'"authority":9,"freshness":6,"reason":"brief"}},...]}}'
+        f'"rankings":[{{"index":0,"score":0.85,'
+        f'"reason":"brief explanation",'
+        f'"result_type":"docs"}},...]}}' 
     )
 
 
@@ -81,7 +79,7 @@ def _build_user_prompt(query: str, results: list[SearchResult]) -> str:
 # Core reranking logic
 # ---------------------------------------------------------------------------
 
-async def _call_llm(query: str, results: list[SearchResult]) -> dict[str, Any]:
+async def _call_llm(query: str, results: list[InternalResult]) -> dict[str, Any]:
     """Single LLM call to rerank results."""
     messages = [
         {"role": "system", "content": _SYSTEM},
@@ -104,7 +102,6 @@ async def _call_llm(query: str, results: list[SearchResult]) -> dict[str, Any]:
 
     content = data["choices"][0]["message"]["content"].strip()
 
-    # Strip markdown code fences if the model wraps its response
     if content.startswith("```"):
         lines = content.split("\n")
         lines = [l for l in lines if not l.startswith("```")]
@@ -114,13 +111,10 @@ async def _call_llm(query: str, results: list[SearchResult]) -> dict[str, Any]:
 
 
 def _apply_scores(
-    results: list[SearchResult],
+    results: list[InternalResult],
     rankings: list[dict],
-    intent: str,
-) -> list[SearchResult]:
-    """Apply LLM scores to results using intent-aware weights."""
-    weights = INTENT_WEIGHTS.get(intent, INTENT_WEIGHTS["factual"])
-
+) -> list[InternalResult]:
+    """Apply LLM scores to results. Simple: direct score, no weight profiles."""
     score_map: dict[int, dict] = {}
     for rank in rankings:
         idx = rank.get("index", -1)
@@ -130,20 +124,16 @@ def _apply_scores(
     for i, r in enumerate(results):
         if i in score_map:
             s = score_map[i]
-            r.relevance = float(s.get("relevance", 0))
-            r.density = float(s.get("density", 0))
-            r.authority = float(s.get("authority", 0))
-            r.freshness_score = float(s.get("freshness", 0))
-            r.rerank_reason = s.get("reason", "")
-            r.rerank_score = (
-                r.relevance * weights["relevance"]
-                + r.density * weights["density"]
-                + r.authority * weights["authority"]
-                + r.freshness_score * weights["freshness"]
-            )
+            raw_score = float(s.get("score", 0))
+            # Clamp to 0-1 range (handle models that output 0-10)
+            if raw_score > 1.0:
+                raw_score = raw_score / 10.0
+            r.rerank_score = max(0.0, min(1.0, raw_score))
+            r.reason = s.get("reason", "")
+            r.result_type = s.get("result_type", "article")
         else:
-            # Result not scored by LLM — use composite as fallback
-            r.rerank_score = r.composite_score
+            # Not scored by LLM — normalize composite as fallback
+            r.rerank_score = min(r.composite_score / 3.0, 1.0)
 
     results.sort(key=lambda r: r.rerank_score, reverse=True)
     return results
@@ -155,9 +145,9 @@ def _apply_scores(
 
 async def rerank(
     query: str,
-    results: list[SearchResult],
+    results: list[InternalResult],
     timeout_s: float = 120.0,
-) -> tuple[list[SearchResult], str]:
+) -> tuple[list[InternalResult], str]:
     """
     LLM listwise reranking with graceful degradation.
 
@@ -169,7 +159,7 @@ async def rerank(
 
     def _fallback():
         for r in results:
-            r.rerank_score = r.composite_score
+            r.rerank_score = min(r.composite_score / 3.0, 1.0)
         return results, "general"
 
     try:
@@ -184,7 +174,7 @@ async def rerank(
             log.warning("LLM returned empty rankings, using fallback")
             return _fallback()
 
-        reranked = _apply_scores(results, rankings, intent)
+        reranked = _apply_scores(results, rankings)
         log.info(
             "LLM reranked %d results, intent=%s, top=%s (score=%.2f)",
             len(reranked), intent,
@@ -194,7 +184,7 @@ async def rerank(
         return reranked, intent
 
     except asyncio.TimeoutError:
-        log.warning("LLM rerank timed out after %.1fs, using algorithmic order", timeout_s)
+        log.warning("LLM rerank timed out after %.1fs, using fallback", timeout_s)
         return _fallback()
 
     except json.JSONDecodeError as e:

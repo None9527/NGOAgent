@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -209,9 +209,9 @@ func (h *StreamHandler) StreamToTelegram(
 			}
 			textBuf.WriteString(fmt.Sprintf("\n\n❌ %s", msg))
 		case "tool_start":
-			log.Printf("[bot-stream] tool_start: %s", event.Name)
+			slog.Info(fmt.Sprintf("[bot-stream] tool_start: %s", event.Name))
 		case "approval_request":
-			log.Printf("[bot-stream] approval: %s", event.ApprovalID)
+			slog.Info(fmt.Sprintf("[bot-stream] approval: %s", event.ApprovalID))
 		}
 	}
 
