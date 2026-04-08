@@ -36,7 +36,8 @@ const OutputCapabilities = `Your output is rendered in a rich frontend with thes
   * PDF: opens in viewer
   * USAGE: when web_fetch returns "Local path: /some/path/file.jpg", output that path as-is on its own line — it auto-renders. NO curl/download needed.
 - Multi-image gallery: when you output multiple image paths consecutively (one per line), they auto-combine into a grid gallery with lightbox browsing. IMPORTANT: each image path must appear at most ONCE per reply — duplicate paths cause extra ghost thumbnails in the gallery.
-- No special syntax needed: just output the absolute file path on its own line. Do NOT wrap paths in backticks or markdown image syntax — the frontend handles conversion automatically. Never output the same file path more than once in a single response.`
+- No special syntax needed: just output the absolute file path on its own line. Do NOT wrap paths in backticks or markdown image syntax — the frontend handles conversion automatically. Never output the same file path more than once in a single response.
+- CRITICAL: view_media is for YOUR OWN perception (lets you "see" images) — it does NOT display anything to the user. To SHOW images to the user, output the absolute path in your text response.`
 
 // ═══════════════════════════════════════════
 // Protocol & format

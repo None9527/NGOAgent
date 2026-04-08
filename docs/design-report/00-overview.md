@@ -1,6 +1,6 @@
 # NGOAgent 架构设计文档
 
-> **版本**: v0.5.0 | **代码规模**: 153 Go 文件 / 33,991 行 (不含测试) | **审计日期**: 2026-04-03
+> **版本**: v0.6.0 | **代码规模**: 160+ Go 文件 / 35,000+ 行 | **审计日期**: Phase 7-A/B/C 加固完成
 
 ---
 
@@ -18,18 +18,21 @@ NGOAgent/
 │   │   └── adapters.go          # 跨层适配器桥接 (166L)
 │   ├── domain/                  # 领域层 — 零外部技术依赖
 │   │   ├── entity/entity.go     # 核心实体: Conversation, Message, Skill, EvoRun
-│   │   ├── port/interfaces.go   # 接口契约: LLMProvider, HistoryStore, BrainStore 等
+│   │   ├── errors/errors.go     # 🚨 统一错误域系统 (6 类 Domain Errors)
+│   │   ├── model/               # 跨层抽象领域模型
 │   │   ├── profile/             # 行为叠加层: Omni + Coding + Research 覆盖
 │   │   ├── prompttext/          # 提示词片段库 (8 files): core, behavior, ephemeral, subagent, evo, conditional
 │   │   ├── service/             # 核心引擎 (38 files, ~6800 lines) — 本文档重点
+│   │   │   └── ports.go         # 🎯 端口防腐层契约
 │   │   └── tool/                # 工具协议: Signal/Dispatch/ToolResult/ToolMeta
-│   ├── infrastructure/          # 基础设施层 (17 subdirs)
+│   ├── infrastructure/          # 基础设施层 (18 subdirs)
 │   │   ├── brain/               # Artifact 存储 (plan.md, task.md)
 │   │   ├── config/              # YAML 配置热重载
 │   │   ├── cron/                # 定时任务管理器
 │   │   ├── evolution/           # Skill 自进化持久层
 │   │   ├── heartbeat/           # 心跳探测
 │   │   ├── knowledge/           # KI 三层检索 (L0/L1/L2)
+│   │   ├── logger/              # 🚨 基于 log/slog 的结构化日志核心
 │   │   ├── llm/                 # LLM 适配器 + Router + 多级错误分类
 │   │   ├── mcp/                 # Model Context Protocol 管理器
 │   │   ├── memory/              # 向量语义记忆 + 日记本
@@ -88,10 +91,12 @@ graph TD
         Proto["Tool Protocol — Signal/Dispatch"]
         Prompt["PromptText — 提示词片段"]
         Profile["Profile — 行为叠加"]
+        Errors["Domain Errors — 全局错误体系"]
     end
 
     subgraph Infra ["基础设施层 (Infrastructure)"]
         LLM["LLM Router + 16 Provider"]
+        Logger["Global SLOG Logger"]
         PE["PromptEngine — 18 Section"]
         Tools["37 Tools + Registry"]
         Brain["ArtifactStore"]
@@ -186,22 +191,23 @@ sequenceDiagram
 | **Skill** | Name, Weight(`light`/`heavy`), Triggers[], Rules[], EvoStatus, Category, KIRef[] | 技能能力封装 |
 | **EvoRun** | SkillID, Success, Strategy(`param_fix`/`tool_swap`/`re_route`/`iterate`/`escalate`), FailureReason | 自进化执行轨迹 |
 
-### 2.2 Port 接口契约
+### 2.2 Port 接口契约 (依赖反转网关)
 
-**文件**: `internal/domain/port/interfaces.go` (85L)
+**文件**: `internal/domain/service/ports.go` 
 
-> ⚠️ **重要发现**: `port/interfaces.go` 定义了 **简化版** 的领域接口（如 `LLMProvider.Generate` 返回 `string`），但实际领域层 `service/loop.go` **直接依赖** `infrastructure/llm.Provider`（返回 `*llm.Response` + streaming）。这是历史遗留的架构不一致 — port 文件存在但未被核心引擎使用。
+> ✅ **Phase 7 架构优化解决**: 清除了原存在于 Domain 的物理基础包 import 反向依赖。当前遵循 Go "Consumer-side interface" 防腐层原则，引擎侧定义完全轻量的防腐接口协议。
 
-**实际使用的接口** (在 `service/loop.go` 中定义):
+**物理依赖阻断**:
 
-| 接口 | 位置 | 方法 |
+| 接口 | 位置 | 防腐隔离目标 (Infrastructure) |
 |---|---|---|
-| `ToolExecutor` | loop.go:27 | `Execute(ctx, name, args)`, `ListDefinitions()` |
-| `DeltaSink` | loop.go:33 | `OnText`, `OnReasoning`, `OnToolStart/Result`, `OnProgress`, `OnPlanReview`, `OnApprovalRequest`, `OnTitleUpdate`, `OnAutoWakeStart`, `OnComplete`, `OnError`, `Emit` |
-| `HistoryPersister` | loop.go:49 | `SaveAll`, `AppendAll`, `LoadAll`, `DeleteSession` |
-| `KISemanticRetriever` | loop.go:112 | `RetrieveForPrompt(query, topK, budgetChars)` |
-| `WebhookNotifyHook` | loop.go:103 | `OnComplete`, `OnError`, `OnToolResult`, `OnProgress` |
-| `MemoryStorer` | memory_hook.go | `Save(entry)`, `Search(query, topK)` |
+| `ArtifactReader` | ports.go:24 | `brain.ArtifactStore` |
+| `KIIndexer`      | ports.go:36 | `knowledge.Store` |
+| `WorkspaceReader`| ports.go:46 | `workspace.Store` |
+| `SkillLister`    | ports.go:58 | `skill.Manager` |
+| `SecurityChecker`| ports.go:96 | `security.Hook` |
+| `ModelRouter`    | ports.go:109| `llm.Router` & `llm.Provider` |
+| `DeltaSink`      | loop.go:33  | 事件总线及 Server 层 Websocket Hook |
 
 ### 2.3 Service 核心服务
 
@@ -432,7 +438,7 @@ splitToolCalls(calls) → ReadOnly[], Write[]
 | SignalNone | 0 | 大多数工具 | 无 |
 | SignalProgress | 1 | task_boundary | 更新 BoundaryState |
 | SignalYield | 2 | notify_user | **终止循环** (TerminalSignal) |
-| SignalSkillLoaded | 3 | read_file (SKILL.md) | 标记 L2 渐进揭示 |
+| SignalSkillLoaded | 3 | skill(name="X") | 标记 L2 渐进揭示 |
 | SignalMediaLoaded | 4 | view_media | 注入多模态内容 |
 | SignalSpawnYield | 5 | spawn_agent | 终止循环等子代理 |
 
@@ -768,15 +774,14 @@ graph LR
 
 ---
 
-## 8. 已知的架构不一致
+## 8. 架构整改成果汇总 (Phase 7 归档)
 
-> [!WARNING]
-> 以下是审计中发现的需要关注的架构问题。
+> [!TIP]
+> 经过 Phase 7 系列加固工程，过往审计(v0.5.0)中标记的三大高危架构问题已被全数修复：
 
-1. **Port 层虚设**: `domain/port/interfaces.go` 定义了简化接口但未被 `service/` 使用。核心引擎直接导入 `infrastructure/llm`、`infrastructure/brain` 等。违反 DDD 原则。
-2. **HistoryExport 重复**: `service/loop.go` 定义了 `HistoryExport` 结构体, `port/interfaces.go` 定义了 `HistoryEntry` — 两者职责重叠。
-3. **DeltaSink 双重定义**: `port/interfaces.go` 和 `service/loop.go` 各定义了一个 `DeltaSink`，方法签名不同。
-4. **Domain 层反向依赖**: `loop.go` 直接 import 了 `infrastructure/brain`, `infrastructure/config`, `infrastructure/knowledge`, `infrastructure/llm`, `infrastructure/persistence`, `infrastructure/prompt`, `infrastructure/security`, `infrastructure/skill`, `infrastructure/workspace` — 9 个基础设施包。
+1. ✅ **DDD 反向环形依赖彻底剪除**: Domain 层 `loop.go` 引用 9 个基建包的噩梦切断，已由 `ports.go` 纯抽象接口与 API `adapters` 承担数据双向输送。
+2. ✅ **错误域(Domain Errors)标准化**: 取代硬编码的 `fmt.Errorf` 字符串，统一引入包含 `ErrBusy`, `ErrValidation` 等在内的结构化 Sentinel Errors 型。
+3. ✅ **全局日志零隐患化**: 跨全域 51 个服务文件的无休止散装 `log.Printf`，无缝重塑为 `log/slog` 标准组件驱动，对长程调试赋予强时间轴可溯源性。
 
 ---
 

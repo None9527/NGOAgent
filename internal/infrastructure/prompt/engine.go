@@ -1,4 +1,4 @@
-// Package prompt assembles the 15-section system prompt with budget-based pruning.
+// Package prompt assembles the 18-section system prompt with budget-based pruning.
 package prompt
 
 import (
@@ -20,22 +20,37 @@ type Section struct {
 	CacheTier int  // 0=dynamic, 1=core(immutable), 2=session(stable)
 }
 
+// PrunePolicy controls dynamic priority adjustment thresholds.
+// These are tunable per model/context-window size.
+type PrunePolicy struct {
+	KIDeprioritizeAfterStep     int // KnowledgeIndex drops priority after this step (default: 5)
+	FocusPrioritizeAfterStep    int // Focus gains priority after this step (default: 10)
+	MemoryDeprioritizeAfterStep int // SemanticMemory drops priority after this step (default: 15)
+}
+
+// DefaultPrunePolicy provides sensible defaults for 128K context models.
+var DefaultPrunePolicy = PrunePolicy{
+	KIDeprioritizeAfterStep:     5,
+	FocusPrioritizeAfterStep:    10,
+	MemoryDeprioritizeAfterStep: 15,
+}
+
 // EffectivePriority returns the runtime-adjusted priority based on current step.
 // KnowledgeIndex becomes less critical after early turns (agent already read KIs).
 // Focus becomes more critical in later steps (task narrowing).
-func (s *Section) EffectivePriority(step int) int {
+func (s *Section) EffectivePriority(step int, policy PrunePolicy) int {
 	base := s.Priority
 	switch s.Name {
 	case "KnowledgeIndex":
-		if step > 5 {
+		if step > policy.KIDeprioritizeAfterStep {
 			base++ // Deprioritize after agent should have read KIs
 		}
 	case "Focus":
-		if step > 10 {
+		if step > policy.FocusPrioritizeAfterStep {
 			base-- // Prioritize as task narrows
 		}
 	case "SemanticMemory":
-		if step > 15 {
+		if step > policy.MemoryDeprioritizeAfterStep {
 			base++ // Less relevant in deep sessions
 		}
 	}
@@ -64,18 +79,20 @@ type SkillInfo struct {
 
 // Deps contains all data needed to assemble the system prompt.
 type Deps struct {
-	UserRules      string
-	ProjectContext string
-	SkillInfos     []SkillInfo
-	ConvSummary    string // KI index for prompt injection
-	MemoryContent  string // Vector memory retrieval for prompt injection
-	ToolDescs      []ToolDesc
-	Ephemeral      []string
-	FocusFile      string
-	TokenBudget    int
-	Mode           string // chat
-	Runtime        string // Pre-built runtime info (OS/time/model/workspace)
-	CurrentStep    int    // Current agent step for dynamic section priority
+	UserRules         string
+	ProjectContext    string
+	SkillInfos        []SkillInfo
+	ConvSummary       string // KI index for prompt injection
+	MemoryContent     string // Vector memory retrieval for prompt injection
+	ToolDescs         []ToolDesc
+	Ephemeral         []string
+	FocusFile         string
+	TokenBudget       int
+	Mode              string // chat
+	Runtime           string // Pre-built runtime info (OS/time/model/workspace)
+	CurrentStep       int    // Current agent step for dynamic section priority
+	AgentType         string // SubAgent v2: agent type identifier
+	AgentSystemPrompt string // SubAgent v2: custom system prompt from AgentDefinition
 }
 
 // ToolDesc is a tool name + description pair for the tooling section.
@@ -90,6 +107,7 @@ type Engine struct {
 	registry    *Registry                 // Section factory registry
 	allOverlays []profile.BehaviorOverlay // All registered overlays
 	active      []profile.BehaviorOverlay // Currently active overlays
+	Policy      PrunePolicy               // Configurable pruning thresholds
 }
 
 // defaultOverlays returns the standard set of behavior overlays.
@@ -104,7 +122,7 @@ func defaultOverlays() []profile.BehaviorOverlay {
 // Default active overlays: CodingOverlay (backward compatible).
 func NewEngine() *Engine {
 	all := defaultOverlays()
-	e := &Engine{registry: NewRegistry(), allOverlays: all, active: all[:1]}
+	e := &Engine{registry: NewRegistry(), allOverlays: all, active: all[:1], Policy: DefaultPrunePolicy}
 	e.RegisterDefaults()
 	return e
 }
@@ -112,7 +130,7 @@ func NewEngine() *Engine {
 // NewEngineWithHome creates a prompt engine with a home directory for file discovery.
 func NewEngineWithHome(homeDir string) *Engine {
 	all := defaultOverlays()
-	e := &Engine{homeDir: homeDir, registry: NewRegistry(), allOverlays: all, active: all[:1]}
+	e := &Engine{homeDir: homeDir, registry: NewRegistry(), allOverlays: all, active: all[:1], Policy: DefaultPrunePolicy}
 	e.RegisterDefaults()
 	return e
 }
@@ -232,16 +250,28 @@ func (e *Engine) AssembleSplit(deps Deps) AssembleResult {
 // AssembleSubagent builds a streamlined prompt for sub-agent workers.
 // Keeps full execution capability but removes planning ceremony, user interaction,
 // skills, KI, memory, and user rules. ~25% of parent prompt size.
+// When deps.AgentSystemPrompt is set, an AgentRole section is injected
+// with the custom prompt from the AgentDefinition.
 func (e *Engine) AssembleSubagent(deps Deps) (string, int) {
 	sections := []Section{
 		{Order: 1, Name: "Identity", Content: prompttext.SubAgentIdentity, Priority: 0},
 		{Order: 2, Name: "CoreBehavior", Content: prompttext.SubAgentBehavior, Priority: 0},
-		{Order: 3, Name: "Safety", Content: prompttext.Safety, Priority: 0},
-		{Order: 4, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
-		{Order: 5, Name: "ToolCalling", Content: prompttext.ToolCalling, Priority: 0},
-		{Order: 6, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
-		{Order: 7, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
 	}
+
+	// SubAgent v2: Inject agent-specific role/instructions from definition
+	if deps.AgentSystemPrompt != "" {
+		roleContent := fmt.Sprintf("<agent_role type=%q>\n%s\n</agent_role>", deps.AgentType, deps.AgentSystemPrompt)
+		sections = append(sections, Section{Order: 3, Name: "AgentRole", Content: roleContent, Priority: 0})
+	}
+
+	sections = append(sections,
+		Section{Order: 4, Name: "OutputCaps", Content: prompttext.OutputCapabilities, Priority: 1},
+		Section{Order: 5, Name: "Safety", Content: prompttext.Safety, Priority: 0},
+		Section{Order: 6, Name: "Tooling", Content: e.buildTooling(deps.ToolDescs), Priority: 0},
+		Section{Order: 7, Name: "ToolCalling", Content: prompttext.ToolCalling, Priority: 0},
+		Section{Order: 8, Name: "Runtime", Content: e.buildRuntime(deps), Priority: 1},
+		Section{Order: 9, Name: "Ephemeral", Content: e.buildEphemeral(deps.Ephemeral), Priority: 0},
+	)
 	return e.prune(sections, deps.TokenBudget, deps.CurrentStep)
 }
 
@@ -303,27 +333,24 @@ func (e *Engine) RegisterDefaults() {
 	r.Register(SectionMeta{Name: "ProjectContext", Order: 12, Priority: 2, CacheTier: CacheTierSession,
 		Factory: func(d Deps) Section { return Section{Content: e.buildProjectContext(d.ProjectContext)} },
 	})
-	r.Register(SectionMeta{Name: "Variants", Order: 13, Priority: 3, CacheTier: CacheTierSession,
-		Factory: func(d Deps) Section { return Section{Content: ""} },
-	})
-	r.Register(SectionMeta{Name: "ResponseFormat", Order: 14, Priority: 0, CacheTier: CacheTierCore,
+	r.Register(SectionMeta{Name: "ResponseFormat", Order: 13, Priority: 0, CacheTier: CacheTierCore,
 		Factory: func(d Deps) Section { return Section{Content: prompttext.ResponseFormat} },
 	})
 
 	// ═══ Tail: Per-request dynamic content ═══ (DYNAMIC)
-	r.Register(SectionMeta{Name: "KnowledgeIndex", Order: 15, Priority: 1, CacheTier: CacheTierDynamic,
+	r.Register(SectionMeta{Name: "KnowledgeIndex", Order: 14, Priority: 1, CacheTier: CacheTierDynamic,
 		Factory: func(d Deps) Section { return Section{Content: e.buildKnowledgeIndex(d.ConvSummary)} },
 	})
-	r.Register(SectionMeta{Name: "SemanticMemory", Order: 16, Priority: 2, CacheTier: CacheTierDynamic,
+	r.Register(SectionMeta{Name: "SemanticMemory", Order: 15, Priority: 2, CacheTier: CacheTierDynamic,
 		Factory: func(d Deps) Section { return Section{Content: e.buildSemanticMemory(d.MemoryContent)} },
 	})
-	r.Register(SectionMeta{Name: "Runtime", Order: 17, Priority: 1, CacheTier: CacheTierDynamic,
+	r.Register(SectionMeta{Name: "Runtime", Order: 16, Priority: 1, CacheTier: CacheTierDynamic,
 		Factory: func(d Deps) Section { return Section{Content: e.buildRuntime(d)} },
 	})
-	r.Register(SectionMeta{Name: "Focus", Order: 18, Priority: 2, CacheTier: CacheTierDynamic,
+	r.Register(SectionMeta{Name: "Focus", Order: 17, Priority: 2, CacheTier: CacheTierDynamic,
 		Factory: func(d Deps) Section { return Section{Content: e.buildFocus(d.FocusFile)} },
 	})
-	r.Register(SectionMeta{Name: "Ephemeral", Order: 19, Priority: 0, CacheTier: CacheTierDynamic,
+	r.Register(SectionMeta{Name: "Ephemeral", Order: 18, Priority: 0, CacheTier: CacheTierDynamic,
 		Factory: func(d Deps) Section { return Section{Content: e.buildEphemeral(d.Ephemeral)} },
 	})
 }
@@ -483,22 +510,17 @@ func (e *Engine) prune(sections []Section, budget int, step int) (string, int) {
 		if s.Content == "" {
 			continue
 		}
-		effPriority := s.EffectivePriority(step)
+		effPriority := s.EffectivePriority(step, e.Policy)
 		// UserRules never dropped — contains user's highest-priority constraints
 		if effPriority > 3-pruneLevel && effPriority > 0 && s.Name != "UserRules" {
 			continue // Drop low-priority sections
 		}
 		content := s.Content
-		// Progressive truncation instead of all-or-nothing
+		// Progressive truncation at semantic boundaries (never mid-instruction)
 		if pruneLevel >= 2 && effPriority >= 1 && len(content) > 1000 {
-			content = content[:1000] + "\n... (truncated)"
+			content = truncateAtBoundary(content, 1000)
 		} else if pruneLevel >= 1 && effPriority >= 2 && len(content) > 2000 {
-			// Level 1: truncate medium-priority sections to 50%
-			half := len(content) / 2
-			if half > 2000 {
-				half = 2000
-			}
-			content = content[:half] + "\n... (truncated)"
+			content = truncateAtBoundary(content, 2000)
 		}
 		b.WriteString(content)
 		b.WriteString("\n\n")
@@ -508,6 +530,30 @@ func (e *Engine) prune(sections []Section, budget int, step int) (string, int) {
 	// CJK-aware token estimate for the kept content
 	tokens := estimateTokensFromChars(b.String())
 	return b.String(), tokens
+}
+
+// truncateAtBoundary truncates content at the nearest paragraph or rule boundary
+// before maxChars, preserving complete semantic units (paragraphs, bullet points).
+// Falls back to any newline, then raw char cut if no boundary is found.
+func truncateAtBoundary(content string, maxChars int) string {
+	if len(content) <= maxChars {
+		return content
+	}
+	// Search backward from maxChars for paragraph break (\n\n)
+	cut := strings.LastIndex(content[:maxChars], "\n\n")
+	if cut < maxChars/2 {
+		// No good paragraph break — try rule boundary (\n-)
+		cut = strings.LastIndex(content[:maxChars], "\n-")
+	}
+	if cut < maxChars/3 {
+		// Fallback: any newline
+		cut = strings.LastIndex(content[:maxChars], "\n")
+	}
+	if cut < 100 {
+		cut = maxChars // No reasonable boundary found
+	}
+	omitted := len(content) - cut
+	return content[:cut] + fmt.Sprintf("\n... (%d chars omitted)", omitted)
 }
 
 // estimateCharBudget computes an appropriate char budget based on content CJK ratio.

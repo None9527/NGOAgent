@@ -259,7 +259,7 @@ func (a *AgentLoop) execToolsSerial(ctx context.Context, calls []llm.ToolCall) b
 				})
 			}
 			a.deps.Delta.OnText("\n" + result + "\n")
-			a.transition(StateDone)
+			a.setPhase(StateDone)
 			return true
 		}
 

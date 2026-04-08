@@ -190,6 +190,9 @@ export function chatStreamWS(
       cancelled = true
       ws.removeHandler(handler)
       if (_activeWSHandler === handler) _activeWSHandler = null
+      // D6 fix: Stop the WS-side run before SSE re-sends the same message
+      // This prevents duplicate message processing on the backend
+      ws.send({ type: 'stop', session_id: sessionId })
       // Fall back to SSE
       const sseHandle = chatStreamSSE(message, sessionId, mode, cb)
       // Replace cancel function  

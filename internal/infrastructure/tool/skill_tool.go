@@ -47,7 +47,7 @@ func (t *SkillTool) Description() string {
 		count = len(t.skillMgr.List())
 	}
 	return fmt.Sprintf("Execute a registered skill by name. %d skills available. "+
-		"Use this tool instead of reading SKILL.md directly.", count)
+		"The skill name (e.g., \"deep-gen\", \"review-pr\", \"pdf\").", count)
 }
 
 func (t *SkillTool) Schema() map[string]any {
@@ -147,7 +147,7 @@ func (t *SkillTool) executeFork(ctx context.Context, s *entity.Skill, args strin
 	task.WriteString(s.Content)
 
 	taskName := "skill:" + s.Name
-	runID, err := t.spawnFn(ctx, task.String(), taskName)
+	runID, err := t.spawnFn(ctx, task.String(), taskName, "general")
 	if err != nil {
 		// Fallback to inline on spawn failure
 		return t.executeInline(s, args)

@@ -11,6 +11,7 @@ import (
 type WorkerTranscript struct {
 	ID        uint   `gorm:"primarykey"`
 	SessionID string `gorm:"index"` // parent session that spawned this worker
+	TraceID   uint   `gorm:"index"` // FK → EvoTrace (links worker to parent run)
 	TaskName  string // human-readable task label
 	RunID     string `gorm:"index"`     // worker's unique run ID
 	TraceJSON string `gorm:"type:text"` // full tool trace as JSON

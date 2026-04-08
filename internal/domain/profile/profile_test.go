@@ -47,25 +47,40 @@ func TestOmniIdentityNoCodingWords(t *testing.T) {
 	}
 }
 
+// TestOmniBehaviorNoCodingWords verifies Omni base is truly domain-agnostic.
+// After the slimdown, OmniBehavior must NOT reference any tool name, file concept,
+// or domain-specific term. Only meta-cognitive and epistemological rules allowed.
 func TestOmniBehaviorNoCodingWords(t *testing.T) {
-	codingOnlyWords := []string{"codebase", "architecture"}
+	codingOnlyWords := []string{
+		"codebase", "architecture", "edit_file",
+		"run the test", "execute the script", "refactor",
+		"error handling", "update_project_context",
+		"Search broadly", "narrow down",
+	}
 	for _, w := range codingOnlyWords {
-		if strings.Contains(strings.ToLower(OmniBehavior), w) {
-			t.Errorf("OmniBehavior should not contain coding-specific word %q", w)
+		if strings.Contains(OmniBehavior, w) {
+			t.Errorf("OmniBehavior should not contain coding-specific content %q — belongs in CodingOverlay", w)
 		}
 	}
 }
 
+// TestCodingGuidelinesComplete verifies CodingOverlay received all migrated rules.
 func TestCodingGuidelinesComplete(t *testing.T) {
 	o := &CodingOverlay{}
 	g := o.Guidelines()
 	requiredContent := []string{
 		"Coding tasks",
-		"refactor code",
 		"Comment policy",
-		"Completion verification",
-		"run the test",
 		"premature abstraction",
+		// Migrated from Omni:
+		"Do not modify files",
+		"Search broadly",
+		"update_project_context",
+		"run the test",
+		"Don't add features",
+		"error handling",
+		// Axis declaration:
+		"Axis:",
 	}
 	for _, rc := range requiredContent {
 		if !strings.Contains(g, rc) {
@@ -83,6 +98,7 @@ func TestResearchGuidelinesComplete(t *testing.T) {
 		"Survey",
 		"Deep-dive",
 		"Synthesis",
+		"Axis:",
 	}
 	for _, rc := range requiredContent {
 		if !strings.Contains(g, rc) {
@@ -142,12 +158,14 @@ func TestActiveOverlaysCodingOnly(t *testing.T) {
 	}
 }
 
+// TestActiveOverlaysDefault verifies that when no signal fires,
+// no overlay is activated (Omni base alone handles the request).
 func TestActiveOverlaysDefault(t *testing.T) {
 	overlays := []BehaviorOverlay{&CodingOverlay{}, &ResearchOverlay{}}
-	// "你好" — no signals → default to coding
+	// "你好" — no signals, no workspace files → should return empty
 	active := ActiveOverlays(overlays, "你好", nil)
-	if len(active) != 1 || active[0].Name() != "coding" {
-		t.Errorf("expected default coding, got %v", ActiveNames(active))
+	if len(active) != 0 {
+		t.Errorf("expected 0 overlays (Omni-only), got %d: %s", len(active), ActiveNames(active))
 	}
 }
 
@@ -163,4 +181,37 @@ func TestOverlayInterface(t *testing.T) {
 	// Verify both implement BehaviorOverlay
 	var _ BehaviorOverlay = &CodingOverlay{}
 	var _ BehaviorOverlay = &ResearchOverlay{}
+}
+
+// TestOmniAloneSufficient verifies that Omni base alone produces
+// a complete, usable prompt without any overlays.
+func TestOmniAloneSufficient(t *testing.T) {
+	identity := ComposeIdentity(nil)
+	if !strings.Contains(identity, "NGOAgent") {
+		t.Error("Omni-only identity should contain NGOAgent")
+	}
+
+	guidelines := ComposeGuidelines(nil)
+	if guidelines != "" {
+		t.Error("Omni-only guidelines should be empty (no overlays)")
+	}
+
+	tone := ComposeTone(nil)
+	if !strings.Contains(tone, "Tone and style") {
+		t.Error("Omni-only tone should contain OmniTone")
+	}
+	if !strings.Contains(tone, "Output efficiency") {
+		t.Error("Omni-only tone should contain OmniOutputEfficiency")
+	}
+}
+
+// TestOverlayAxisDeclared verifies every overlay declares its governance axis.
+func TestOverlayAxisDeclared(t *testing.T) {
+	overlays := []BehaviorOverlay{&CodingOverlay{}, &ResearchOverlay{}}
+	for _, o := range overlays {
+		g := o.Guidelines()
+		if !strings.Contains(g, "Axis:") {
+			t.Errorf("%s overlay Guidelines() must declare governance axis with 'Axis:' line", o.Name())
+		}
+	}
 }

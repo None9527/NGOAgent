@@ -16,11 +16,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 )
 
@@ -28,9 +31,10 @@ import (
 // Thread-safe: all methods are safe for concurrent calls from multiple goroutines.
 type SubagentBarrier struct {
 	mu              sync.Mutex
+	id              string
 	pending         int
 	finalized       bool // P0-3: prevents double finalize after timeout
-	results         map[string]subagentResult
+	members         map[string]barrierMember
 	parentLoop      *AgentLoop
 	autoWake        func()                                                                       // called when all subagents complete
 	pushProgress    func(runID, taskName, status string, done, total int, errMsg, output string) // WS/SSE push (optional)
@@ -41,11 +45,12 @@ type SubagentBarrier struct {
 	parentSessionID string                                                  // P2 F1: parent session ID for transcript storage
 }
 
-type subagentResult struct {
+type barrierMember struct {
 	RunID    string
 	TaskName string
 	Output   string
-	Error    error
+	Error    string
+	Status   string
 	DoneAt   time.Time
 }
 
@@ -53,12 +58,42 @@ type subagentResult struct {
 // autoWake is called (once) when the last subagent completes.
 func NewSubagentBarrier(parentLoop *AgentLoop, autoWake func()) *SubagentBarrier {
 	return &SubagentBarrier{
-		results:       make(map[string]subagentResult),
+		id:            "barrier-" + uuid.New().String()[:8],
+		members:       make(map[string]barrierMember),
 		parentLoop:    parentLoop,
 		autoWake:      autoWake,
 		timeout:       5 * time.Minute,
 		maxConcurrent: 3, // S5: default limit
 	}
+}
+
+func NewSubagentBarrierFromState(parentLoop *AgentLoop, autoWake func(), state graphruntime.BarrierState) *SubagentBarrier {
+	b := NewSubagentBarrier(parentLoop, autoWake)
+	if state.ID != "" {
+		b.id = state.ID
+	}
+	b.finalized = state.Finalized
+	b.members = make(map[string]barrierMember, len(state.Members))
+	completed := 0
+	for _, member := range state.Members {
+		b.members[member.RunID] = barrierMember{
+			RunID:    member.RunID,
+			TaskName: member.TaskName,
+			Output:   member.Output,
+			Error:    member.Error,
+			Status:   member.Status,
+			DoneAt:   member.DoneAt,
+		}
+		if !member.DoneAt.IsZero() {
+			completed++
+		}
+	}
+	if state.PendingCount > 0 {
+		b.pending = state.PendingCount
+	} else if pending := len(state.Members) - completed; pending > 0 {
+		b.pending = pending
+	}
+	return b
 }
 
 // SetProgressPush registers a function for pushing per-subagent SSE progress events.
@@ -74,6 +109,16 @@ func (b *SubagentBarrier) SetMaxConcurrent(n int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.maxConcurrent = n
+}
+
+// SetTimeout overrides the default barrier timeout (5 min).
+// Each Add() resets the timer to this duration.
+func (b *SubagentBarrier) SetTimeout(d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if d > 0 {
+		b.timeout = d
+	}
 }
 
 // SetTranscriptSaver configures a function to persist worker transcripts on completion.
@@ -97,8 +142,8 @@ func (b *SubagentBarrier) Add(runID, taskName string) error {
 	}
 
 	b.pending++
-	b.results[runID] = subagentResult{RunID: runID, TaskName: taskName}
-	total := len(b.results)
+	b.members[runID] = barrierMember{RunID: runID, TaskName: taskName, Status: "running"}
+	total := len(b.members)
 	// S8: compute done inside lock
 	done := total - b.pending
 	push := b.pushProgress
@@ -129,7 +174,10 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 	b.mu.Lock()
 
 	// S4: dedup — skip if already completed (prevents double finalize)
-	entry := b.results[runID]
+	entry, ok := b.members[runID]
+	if !ok {
+		entry = barrierMember{RunID: runID, TaskName: runID, Status: "running"}
+	}
 	if !entry.DoneAt.IsZero() {
 		b.mu.Unlock()
 		slog.Info(fmt.Sprintf("[barrier] Ignoring duplicate OnComplete for %s", runID))
@@ -137,9 +185,15 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 	}
 
 	entry.Output = result
-	entry.Error = err
+	if err != nil {
+		entry.Error = err.Error()
+		entry.Status = "failed"
+	} else {
+		entry.Error = ""
+		entry.Status = "completed"
+	}
 	entry.DoneAt = time.Now()
-	b.results[runID] = entry
+	b.members[runID] = entry
 	b.pending--
 
 	// P0-3: Guard against negative pending (timeout already finalized)
@@ -149,7 +203,7 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 		return
 	}
 
-	total := len(b.results)
+	total := len(b.members)
 	done := total - b.pending
 	shouldFinalize := b.pending <= 0
 	if shouldFinalize {
@@ -166,9 +220,9 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 		}
 		status := "completed"
 		errMsg := ""
-		if err != nil {
+		if entry.Error != "" {
 			status = "failed"
-			errMsg = err.Error()
+			errMsg = entry.Error
 		}
 		// Truncate output for preview (max 500 chars)
 		outputPreview := entry.Output
@@ -182,7 +236,7 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 	// P2 F1: Persist worker transcript to DB (non-blocking)
 	if b.saveTranscript != nil {
 		status := "completed"
-		if err != nil {
+		if entry.Error != "" {
 			status = "failed"
 		}
 		saver := b.saveTranscript
@@ -226,7 +280,7 @@ func (b *SubagentBarrier) onTimeout() {
 		return // Already finalized
 	}
 
-	slog.Info(fmt.Sprintf("[barrier] Timeout! %d/%d subagents still pending", b.pending, len(b.results)))
+	slog.Info(fmt.Sprintf("[barrier] Timeout! %d/%d subagents still pending", b.pending, len(b.members)))
 	b.pending = 0      // Force finalize
 	b.finalized = true // P0-3: Mark as finalized
 
@@ -238,7 +292,7 @@ func (b *SubagentBarrier) onTimeout() {
 	// S1: external calls OUTSIDE lock — prevents deadlock
 	b.parentLoop.InjectEphemeral(summary)
 	b.parentLoop.SignalWake()
-	slog.Info(fmt.Sprintf("[barrier] All %d subagents complete (timeout), waking parent", len(b.results)))
+	slog.Info(fmt.Sprintf("[barrier] All %d subagents complete (timeout), waking parent", len(b.members)))
 
 	if autoWake != nil {
 		go autoWake()
@@ -252,18 +306,18 @@ func (b *SubagentBarrier) formatResults() string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("%s\n\n", prompttext.EphSubAgentResults))
 
-	for _, r := range b.results {
+	for _, r := range b.members {
 		name := r.TaskName
 		if name == "" {
 			name = r.RunID
 		}
-		if r.Error != nil {
-			sb.WriteString(fmt.Sprintf("### ❌ %s (failed)\nError: %v\n", name, r.Error))
+		if r.Error != "" {
+			sb.WriteString(fmt.Sprintf("### ❌ %s (failed)\nError: %s\n", name, r.Error))
 		} else if r.Output == "" && r.DoneAt.IsZero() {
 			sb.WriteString(fmt.Sprintf("### ⏰ %s (timed out)\nNo result received.\n", name))
 		} else {
-			// Extract plain text from StructuredResult JSON if present
-			output := extractText(r.Output)
+			// Extract text + tool summary from StructuredResult JSON
+			output := extractTextWithTools(r.Output)
 			sb.WriteString(fmt.Sprintf("### ✅ %s\n%s\n", name, output))
 		}
 		sb.WriteString("\n")
@@ -272,20 +326,32 @@ func (b *SubagentBarrier) formatResults() string {
 	return sb.String()
 }
 
-// extractText tries to parse StructuredResult JSON and extract the .text field.
+// extractTextWithTools parses StructuredResult JSON and extracts text + tool summary.
 // Falls back to the original string if parsing fails.
-func extractText(s string) string {
+func extractTextWithTools(s string) string {
 	if len(s) == 0 || s[0] != '{' {
 		return s
 	}
+	type toolEvent struct {
+		Name string `json:"name"`
+	}
 	type structured struct {
-		Text string `json:"text"`
+		Text       string      `json:"text"`
+		ToolEvents []toolEvent `json:"tool_events"`
 	}
 	var parsed structured
-	if err := json.Unmarshal([]byte(s), &parsed); err == nil && parsed.Text != "" {
-		return parsed.Text
+	if err := json.Unmarshal([]byte(s), &parsed); err != nil || parsed.Text == "" {
+		return s
 	}
-	return s
+	result := parsed.Text
+	if len(parsed.ToolEvents) > 0 {
+		var names []string
+		for _, ev := range parsed.ToolEvents {
+			names = append(names, ev.Name)
+		}
+		result += fmt.Sprintf("\n[Tools used: %s]", strings.Join(names, ", "))
+	}
+	return result
 }
 
 // Pending returns the number of subagents still running.
@@ -293,4 +359,36 @@ func (b *SubagentBarrier) Pending() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.pending
+}
+
+func (b *SubagentBarrier) Snapshot() graphruntime.BarrierState {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	members := make([]graphruntime.BarrierMemberState, 0, len(b.members))
+	completed := 0
+	for _, member := range b.members {
+		members = append(members, graphruntime.BarrierMemberState{
+			RunID:    member.RunID,
+			TaskName: member.TaskName,
+			Status:   member.Status,
+			Output:   member.Output,
+			Error:    member.Error,
+			DoneAt:   member.DoneAt,
+		})
+		if !member.DoneAt.IsZero() {
+			completed++
+		}
+	}
+	slices.SortFunc(members, func(a, b graphruntime.BarrierMemberState) int {
+		return strings.Compare(a.RunID, b.RunID)
+	})
+	return graphruntime.BarrierState{
+		ID:             b.id,
+		TotalCount:     len(b.members),
+		PendingCount:   b.pending,
+		CompletedCount: completed,
+		Finalized:      b.finalized,
+		Members:        members,
+	}
 }

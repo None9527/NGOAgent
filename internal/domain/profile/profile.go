@@ -14,6 +14,15 @@ import "strings"
 
 // BehaviorOverlay extends the Omni base with domain-specific behavior.
 // Multiple overlays can be active at the same time (composable, not exclusive).
+//
+// Design constraints for new overlays:
+//   1. Each overlay declares a governance axis (file interaction, information organization, etc.)
+//   2. Guidelines() rules MUST use context qualifiers ("When doing X, ...") to avoid
+//      conflicts when multiple overlays are active simultaneously.
+//   3. Two overlays MUST NOT define contradictory absolute rules on the same axis.
+//   4. IdentityTag() describes capabilities, not restrictions.
+//   5. Overlays that only provide task knowledge (not behavioral changes) should be
+//      implemented as Skills instead — loaded on-demand via skill(name="X").
 type BehaviorOverlay interface {
 	// Name returns the overlay identifier (e.g. "coding", "research", "ops").
 	Name() string
@@ -47,14 +56,8 @@ func ActiveOverlays(overlays []BehaviorOverlay, userMessage string, workspaceFil
 			active = append(active, o)
 		}
 	}
-	// Default: if nothing activates, coding is the fallback
-	if len(active) == 0 {
-		for _, o := range overlays {
-			if o.Name() == "coding" {
-				return []BehaviorOverlay{o}
-			}
-		}
-	}
+	// No default fallback — Omni base alone is sufficient for non-domain tasks.
+	// CodingOverlay.Signal fires via workspace file detection for all real coding scenarios.
 	return active
 }
 

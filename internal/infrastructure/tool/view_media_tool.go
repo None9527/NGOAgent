@@ -25,9 +25,11 @@ func NewViewMediaTool(serverAddr string) *ViewMediaTool {
 
 func (t *ViewMediaTool) Name() string { return "view_media" }
 func (t *ViewMediaTool) Description() string {
-	return `Load media files (images/videos/audio) for native multimodal perception.
-Media is injected into your next LLM call. Describe what you see after calling this tool.
-- paths: array of absolute file paths (max 8).`
+	return `Load media files for YOUR OWN multimodal perception (VLM injection).
+IMPORTANT: This tool does NOT display images to the user. It only lets YOU see them.
+- To show images to the USER: output the absolute file path on its own line in your text response (the frontend auto-renders it).
+- To inspect images YOURSELF (e.g. verify quality): use this tool, then describe what you see.
+- paths: array of absolute file paths. Max 8.`
 }
 
 func (t *ViewMediaTool) Schema() map[string]any {

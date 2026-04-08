@@ -222,7 +222,9 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     setTaskProgress(null)
     currentTaskSectionIdRef.current = null
     drainPendingPatches()
-    setConnectionState('connected')
+    // D9 fix: Don't force connectionState to 'connected' — WS onStateChange
+    // manages the real connection state. Forcing here causes stale indicator
+    // when WS disconnects at the same time as stream ends.
     cancelRef.current = null
     refreshSessions(true)
   }, [exitStreamingMode, refreshSessions, drainPendingPatches])

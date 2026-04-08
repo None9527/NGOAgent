@@ -1,8 +1,8 @@
-// Package service — State handler methods for the agent loop.
+// Package service — node-level execution handlers for the graph-backed agent loop.
 //
-// Extracted from runInner() to break the "God Function" anti-pattern.
-// Each method handles one state of the 10-state machine and returns
-// a loopAction to control the main loop flow.
+// These methods retain the existing prepare/generate/tool/guard/compact/done
+// transition logic, but they are now invoked exclusively through the graph
+// runtime adapter instead of a standalone FSM executor.
 package service
 
 import (
@@ -11,12 +11,12 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
 
-// runState holds per-run mutable state shared across state handlers.
-// This replaces the local variables that previously lived in runInner().
+// runState holds per-run mutable state shared across graph node handlers.
 type runState struct {
 	opts              RunOptions
 	steps             int
@@ -25,19 +25,11 @@ type runState struct {
 	lastProvName      string
 }
 
-// loopAction tells the main loop what to do after a state handler returns.
-type loopAction int
-
-const (
-	actionContinue loopAction = iota // re-enter the for loop (continue)
-	actionReturn                     // exit runInner with nil
-)
-
 // ───────────────────────────────────────────
 // StateGenerate handler (was 133 lines inline)
 // ───────────────────────────────────────────
 
-func (a *AgentLoop) handleGenerate(ctx context.Context, rs *runState) (loopAction, error) {
+func (a *AgentLoop) handleGenerate(ctx context.Context, rs *runState) (graphruntime.NodeResult, error) {
 	// P0-D #3: Microcompact — clear old digested tool results before LLM call
 	a.microCompact()
 
@@ -65,8 +57,8 @@ func (a *AgentLoop) handleGenerate(ctx context.Context, rs *runState) (loopActio
 				Role:    "user",
 				Content: "Your previous output was truncated due to length. Continue EXACTLY from where you left off. Do NOT repeat any content. Do NOT add preamble.",
 			})
-			a.transition(StateGenerate)
-			return actionContinue, nil
+			a.setPhase(StateGenerate)
+			return graphruntime.NodeResult{RouteKey: graphRouteGenerate}, nil
 		}
 		slog.Info(fmt.Sprintf("[max-output] exceeded 3 continuations, stopping"))
 		a.deps.Delta.OnText("\n\n[Output continuation limit reached (3/3)]\n")
@@ -87,9 +79,9 @@ func (a *AgentLoop) handleGenerate(ctx context.Context, rs *runState) (loopActio
 	verdict := a.guard.Check(resp.Content, len(resp.ToolCalls), rs.steps)
 	switch verdict.Action {
 	case "terminate":
-		a.transition(StateDone)
+		a.setPhase(StateDone)
 		a.deps.Delta.OnText("\n\n[" + verdict.Message + "]")
-		return actionContinue, nil
+		return graphruntime.NodeResult{RouteKey: graphRouteDone}, nil
 	case "warn":
 		a.InjectEphemeral(verdict.Message)
 	}
@@ -98,21 +90,21 @@ func (a *AgentLoop) handleGenerate(ctx context.Context, rs *runState) (loopActio
 		if a.traceCollector != nil && resp.Content != "" {
 			a.traceCollector.RecordFinalResponse(resp.Content)
 		}
-		a.transition(StateDone)
-		return actionContinue, nil
+		a.setPhase(StateDone)
+		return graphruntime.NodeResult{RouteKey: graphRouteDone}, nil
 	}
-	a.transition(StateToolExec)
-	return actionContinue, nil
+	a.setPhase(StateToolExec)
+	return graphruntime.NodeResult{RouteKey: graphRouteToolExec}, nil
 }
 
 // handleGenerateError handles all LLM error variants with retry/failover/fatal logic.
-func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err error) (loopAction, error) {
-	a.transition(StateError)
+func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err error) (graphruntime.NodeResult, error) {
+	a.setPhase(StateError)
 
 	llmErr, ok := err.(*llm.LLMError)
 	if !ok {
 		a.deps.Delta.OnError(err)
-		return actionContinue, err
+		return graphruntime.NodeResult{Status: graphruntime.NodeStatusFatal}, err
 	}
 
 	switch llmErr.Level {
@@ -121,7 +113,7 @@ func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err e
 		if llmErr.IsBackground {
 			slog.Info(fmt.Sprintf("[retry] background task %s — skipping retry", llmErr.Level))
 			a.deps.Delta.OnError(err)
-			return actionContinue, err
+			return graphruntime.NodeResult{Status: graphruntime.NodeStatusFatal}, err
 		}
 		base, maxR := llm.BackoffConfig(llmErr.Level)
 		if rs.retries < maxR {
@@ -132,11 +124,11 @@ func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err e
 			a.deps.Delta.OnText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
 			select {
 			case <-ctx.Done():
-				return actionContinue, ctx.Err()
+				return graphruntime.NodeResult{Status: graphruntime.NodeStatusFatal}, ctx.Err()
 			case <-time.After(backoff):
 			}
-			a.transition(StateGenerate)
-			return actionContinue, nil
+			a.setPhase(StateGenerate)
+			return graphruntime.NodeResult{RouteKey: graphRouteGenerate}, nil
 		}
 		// Exhausted retries → failover to next provider
 		if rs.lastProvName != "" {
@@ -144,8 +136,8 @@ func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err e
 				maxR, llmErr.Level, rs.lastProvName))
 			rs.excludedProviders = append(rs.excludedProviders, rs.lastProvName)
 			rs.retries = 0
-			a.transition(StateGenerate)
-			return actionContinue, nil
+			a.setPhase(StateGenerate)
+			return graphruntime.NodeResult{RouteKey: graphRouteGenerate}, nil
 		}
 
 	case llm.ErrorContextOverflow:
@@ -155,39 +147,40 @@ func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err e
 			if rs.retries == 1 {
 				slog.Info("[retry] context overflow → compacting then retry")
 				rs.opts.MaxTokens = rs.opts.MaxTokens / 2
-				a.transition(StateCompact)
+				a.setPhase(StateCompact)
+				return graphruntime.NodeResult{RouteKey: graphRouteCompact}, nil
 			} else {
 				slog.Info("[retry] context overflow after compact → forceTruncate(6)")
 				a.forceTruncate(6)
 				a.deps.Delta.OnText("\n\n[Context too large — force-truncated to last 6 messages]\n")
-				a.transition(StateGenerate)
+				a.setPhase(StateGenerate)
+				return graphruntime.NodeResult{RouteKey: graphRouteGenerate}, nil
 			}
-			return actionContinue, nil
 		}
 
 	case llm.ErrorBilling:
 		slog.Info(fmt.Sprintf("[error] billing/quota exhausted: %s", llmErr.Message))
 		a.deps.Delta.OnText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
-		a.transition(StateFatal)
+		a.setPhase(StateFatal)
 		a.deps.Delta.OnError(err)
-		return actionContinue, err
+		return graphruntime.NodeResult{Status: graphruntime.NodeStatusFatal}, err
 
 	case llm.ErrorFatal:
 		a.deps.Delta.OnText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
-		a.transition(StateFatal)
+		a.setPhase(StateFatal)
 		a.deps.Delta.OnError(err)
-		return actionContinue, err
+		return graphruntime.NodeResult{Status: graphruntime.NodeStatusFatal}, err
 	}
 
 	a.deps.Delta.OnError(err)
-	return actionContinue, err
+	return graphruntime.NodeResult{Status: graphruntime.NodeStatusFatal}, err
 }
 
 // ───────────────────────────────────────────
 // StateToolExec handler (was 38 lines inline)
 // ───────────────────────────────────────────
 
-func (a *AgentLoop) handleToolExec(ctx context.Context, rs *runState) (loopAction, error) {
+func (a *AgentLoop) handleToolExec(ctx context.Context, rs *runState) (graphruntime.NodeResult, error) {
 	var lastMsg llm.Message
 	func() { a.mu.Lock(); defer a.mu.Unlock(); lastMsg = a.history[len(a.history)-1] }()
 
@@ -199,16 +192,16 @@ func (a *AgentLoop) handleToolExec(ctx context.Context, rs *runState) (loopActio
 		} else if len(readOnly) > 1 && len(write) > 0 {
 			a.execToolsConcurrent(ctx, readOnly)
 			if a.execToolsSerial(ctx, write) {
-				return actionContinue, nil // StateDone already set by denial
+				return graphruntime.NodeResult{RouteKey: graphRouteDone}, nil
 			}
 		} else {
 			if a.execToolsSerial(ctx, lastMsg.ToolCalls) {
-				return actionContinue, nil
+				return graphruntime.NodeResult{RouteKey: graphRouteDone}, nil
 			}
 		}
 	} else {
 		if a.execToolsSerial(ctx, lastMsg.ToolCalls) {
-			return actionContinue, nil
+			return graphruntime.NodeResult{RouteKey: graphRouteDone}, nil
 		}
 	}
 
@@ -221,19 +214,19 @@ func (a *AgentLoop) handleToolExec(ctx context.Context, rs *runState) (loopActio
 		a.task.YieldRequested = false
 	}()
 	if shouldStop {
-		a.transition(StateDone)
-		return actionContinue, nil
+		a.setPhase(StateDone)
+		return graphruntime.NodeResult{RouteKey: graphRouteDone}, nil
 	}
 
-	a.transition(StateGuardCheck)
-	return actionContinue, nil
+	a.setPhase(StateGuardCheck)
+	return graphruntime.NodeResult{RouteKey: graphRouteGuardCheck}, nil
 }
 
 // ───────────────────────────────────────────
 // StateGuardCheck handler (was 21 lines inline)
 // ───────────────────────────────────────────
 
-func (a *AgentLoop) handleGuardCheck(rs *runState) (loopAction, error) {
+func (a *AgentLoop) handleGuardCheck(rs *runState) (graphruntime.NodeResult, error) {
 	rs.steps++
 
 	tokenEstimate := a.estimateTokens()
@@ -244,21 +237,22 @@ func (a *AgentLoop) handleGuardCheck(rs *runState) (loopAction, error) {
 	if usage > 0.95 {
 		a.forceTruncate(8)
 		a.InjectEphemeral(prompttext.EphCompactionNotice)
-		a.transition(StateGenerate)
+		a.setPhase(StateGenerate)
+		return graphruntime.NodeResult{RouteKey: graphRouteGenerate}, nil
 	} else if usage > 0.70 {
-		a.transition(StateCompact)
+		a.setPhase(StateCompact)
+		return graphruntime.NodeResult{RouteKey: graphRouteCompact}, nil
 	} else {
-		a.transition(StateGenerate)
+		a.setPhase(StateGenerate)
+		return graphruntime.NodeResult{RouteKey: graphRouteGenerate}, nil
 	}
-
-	return actionContinue, nil
 }
 
 // ───────────────────────────────────────────
 // StateCompact handler (was 18 lines inline)
 // ───────────────────────────────────────────
 
-func (a *AgentLoop) handleCompact(ctx context.Context) (loopAction, error) {
+func (a *AgentLoop) handleCompact(ctx context.Context) (graphruntime.NodeResult, error) {
 	// P1-A #24: Try tool-heavy compression first
 	if a.toolHeavyCompact() {
 		newEst := a.estimateTokens()
@@ -266,22 +260,22 @@ func (a *AgentLoop) handleCompact(ctx context.Context) (loopAction, error) {
 		newUsage := float64(newEst) / float64(newPolicy.ContextWindow)
 		if newUsage <= 0.70 {
 			a.InjectEphemeral(prompttext.EphCompactionNotice)
-			a.transition(StateGenerate)
-			return actionContinue, nil
+			a.setPhase(StateGenerate)
+			return graphruntime.NodeResult{RouteKey: graphRouteGenerate}, nil
 		}
 	}
 	a.doCompact(ctx)
 	a.InjectEphemeral(prompttext.EphCompactionNotice)
 	a.persistFullHistory()
-	a.transition(StateGenerate)
-	return actionContinue, nil
+	a.setPhase(StateGenerate)
+	return graphruntime.NodeResult{RouteKey: graphRouteGenerate}, nil
 }
 
 // ───────────────────────────────────────────
 // StateDone handler (was 33 lines inline)
 // ───────────────────────────────────────────
 
-func (a *AgentLoop) handleDone(ctx context.Context, rs *runState) (loopAction, error) {
+func (a *AgentLoop) handleDone(ctx context.Context, rs *runState) (graphruntime.NodeResult, error) {
 	// Snapshot file edit history for this message turn
 	if a.deps.FileHistory != nil && a.deps.FileHistory.HasPendingEdits() {
 		msgID := fmt.Sprintf("%s_step%d", a.SessionID(), rs.steps)
@@ -304,10 +298,10 @@ func (a *AgentLoop) handleDone(ctx context.Context, rs *runState) (loopAction, e
 			a.deps.Delta.OnAutoWakeStart()
 		}
 		func() { a.mu.Lock(); defer a.mu.Unlock(); a.history = append(a.history, a.buildUserMessage("")) }()
-		a.transition(StatePrepare)
-		return actionContinue, nil
+		a.setPhase(StatePrepare)
+		return graphruntime.NodeResult{RouteKey: graphRoutePrepare}, nil
 	}
 	// P3 I2: Session is idle — start background pre-indexing
 	a.dream.OnIdle()
-	return actionReturn, nil
+	return graphruntime.NodeResult{Status: graphruntime.NodeStatusComplete}, nil
 }

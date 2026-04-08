@@ -14,6 +14,7 @@ import (
 type DiaryEntry struct {
 	Time      time.Time
 	SessionID string
+	Scope     string // Namespace (project/domain)
 	Task      string // Short task summary
 	ToolCount int
 	Steps     int
@@ -60,7 +61,11 @@ func (d *DiaryStore) Append(entry DiaryEntry) error {
 	if header != "" {
 		sb.WriteString(header)
 	}
-	sb.WriteString(fmt.Sprintf("### %s | %s\n", timeStr, entry.SessionID[:8]))
+	scopeTag := ""
+	if entry.Scope != "" {
+		scopeTag = fmt.Sprintf(" [%s]", entry.Scope)
+	}
+	sb.WriteString(fmt.Sprintf("### %s | %s%s\n", timeStr, entry.SessionID[:8], scopeTag))
 	sb.WriteString(fmt.Sprintf("- **任务**: %s\n", entry.Task))
 	if entry.Steps > 0 {
 		sb.WriteString(fmt.Sprintf("- **步骤**: %d steps, %d tools\n", entry.Steps, entry.ToolCount))

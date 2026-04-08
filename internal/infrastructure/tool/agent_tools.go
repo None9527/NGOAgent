@@ -15,14 +15,16 @@ import (
 )
 
 // SpawnFunc creates an independent agent loop and runs a task, returning the result.
-type SpawnFunc func(ctx context.Context, task, taskName string) (string, error)
+// agentType selects the AgentDefinition from the registry ("general", "researcher", etc.)
+type SpawnFunc func(ctx context.Context, task, taskName, agentType string) (string, error)
 
 // SpawnAgentTool creates a sub-agent for independent task execution.
 type SpawnAgentTool struct {
-	spawnFn     SpawnFunc
-	EventPusher func(sessionID, eventType string, data any) // wire by server for SSE progress push
-	ToolCtx     prompttext.ToolContext                      // Runtime environment context for dynamic description
-	ScratchDir  string                                      // Session-scoped scratchpad directory (Sprint 3-1)
+	spawnFn       SpawnFunc
+	EventPusher   func(sessionID, eventType string, data any) // wire by server for SSE progress push
+	ToolCtx       prompttext.ToolContext                      // Runtime environment context for dynamic description
+	ScratchDir    string                                      // Session-scoped scratchpad directory (Sprint 3-1)
+	AgentTypeEnum []string                                    // Available agent types from registry (for schema enum)
 }
 
 // NewSpawnAgentTool creates a spawn tool with a factory function.
@@ -45,22 +47,35 @@ func (t *SpawnAgentTool) SetEventPusher(fn func(sessionID, eventType string, dat
 	t.EventPusher = fn
 }
 
+// SetAgentTypes populates the agent_type enum from the registry.
+func (t *SpawnAgentTool) SetAgentTypes(types []string) {
+	t.AgentTypeEnum = types
+}
+
 func (t *SpawnAgentTool) Name() string        { return "spawn_agent" }
 func (t *SpawnAgentTool) Description() string { return prompttext.ToolSpawnAgentDynamic(t.ToolCtx) }
 
 func (t *SpawnAgentTool) Schema() map[string]any {
+	// Build agent_type property with enum if available
+	agentTypeProp := map[string]any{
+		"type":        "string",
+		"description": "Type of agent to spawn. Each type has its own tool set, context level, and timeout.",
+	}
+	if len(t.AgentTypeEnum) > 0 {
+		enumSlice := make([]any, len(t.AgentTypeEnum))
+		for i, v := range t.AgentTypeEnum {
+			enumSlice[i] = v
+		}
+		agentTypeProp["enum"] = enumSlice
+	}
+
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"task":      map[string]any{"type": "string", "description": "Detailed task description for the sub-agent"},
-			"task_name": map[string]any{"type": "string", "description": "Short human-readable name (e.g. 'Fix Auth Tests')"},
-			"context":   map[string]any{"type": "string", "description": "Additional context to pass"},
-			"context_mode": map[string]any{
-				"type":        "string",
-				"enum":        []string{"fresh", "fork"},
-				"description": "fresh=empty context (default), fork=inherit parent conversation context for cache sharing",
-				"default":     "fresh",
-			},
+			"task":       map[string]any{"type": "string", "description": "Detailed task description for the sub-agent"},
+			"task_name":  map[string]any{"type": "string", "description": "Short human-readable name (e.g. 'Fix Auth Tests')"},
+			"agent_type": agentTypeProp,
+			"context":    map[string]any{"type": "string", "description": "Additional context to pass"},
 		},
 		"required": []string{"task"},
 	}
@@ -77,6 +92,11 @@ func (t *SpawnAgentTool) Execute(ctx context.Context, args map[string]any) (dtoo
 		taskName = "sub-agent"
 	}
 
+	agentType, _ := args["agent_type"].(string)
+	if agentType == "" {
+		agentType = "general" // default
+	}
+
 	extraCtx, _ := args["context"].(string)
 	if extraCtx != "" {
 		task = task + "\n\nContext:\n" + extraCtx
@@ -87,10 +107,9 @@ func (t *SpawnAgentTool) Execute(ctx context.Context, args map[string]any) (dtoo
 		task = fmt.Sprintf("Working directory: %s\n\n", cwd) + task
 	}
 
-	// Sprint 3-1: Auto-inject scratchpad path for cross-worker knowledge sharing
+	// Auto-inject scratchpad path for cross-worker knowledge sharing
 	if t.ScratchDir != "" {
 		task = fmt.Sprintf("Scratchpad directory: %s (read/write intermediate results here for other workers)\n\n", t.ScratchDir) + task
-		// Ensure scratchpad directory exists
 		_ = os.MkdirAll(t.ScratchDir, 0755)
 	}
 
@@ -98,22 +117,22 @@ func (t *SpawnAgentTool) Execute(ctx context.Context, args map[string]any) (dtoo
 		return dtool.ToolResult{Output: "Error: spawn agent not available (factory not configured)"}, nil
 	}
 
-	fmt.Printf("[spawn] Starting sub-agent: %s\n", taskName)
+	fmt.Printf("[spawn] Starting sub-agent: %s (type=%s)\n", taskName, agentType)
 
 	// Non-blocking: RunAsync returns runID immediately
-	runID, err := t.spawnFn(ctx, task, taskName)
+	runID, err := t.spawnFn(ctx, task, taskName, agentType)
 	if err != nil {
 		fmt.Printf("[spawn] Sub-agent '%s' failed to start: %v\n", taskName, err)
 		return dtool.ToolResult{Output: fmt.Sprintf("Sub-agent '%s' failed to start: %v", taskName, err)}, nil
 	}
 
-	fmt.Printf("[spawn] Sub-agent '%s' spawned → %s\n", taskName, runID)
+	fmt.Printf("[spawn] Sub-agent '%s' (type=%s) spawned → %s\n", taskName, agentType, runID)
 	return dtool.SpawnYieldResult(fmt.Sprintf(
-		"[Sub-agent '%s' spawned → %s]\n"+
+		"[Sub-agent '%s' (type=%s) spawned → %s]\n"+
 			"⏸ Async task running. Parent loop will pause automatically.\n"+
 			"Results arrive via auto-wake when ALL sub-agents complete.\n"+
 			"DO NOT poll this ID with command_status.",
-		taskName, runID))
+		taskName, agentType, runID))
 }
 
 // EvoTool constructs, executes, and validates structured task environments.

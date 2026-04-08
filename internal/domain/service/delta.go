@@ -139,9 +139,9 @@ func (c *OutputCollector) OnToolResult(callID string, name string, output string
 	if err != nil {
 		ev.Error = err.Error()
 	}
-	// Truncate long output for structured view
-	if len(ev.Output) > 500 {
-		ev.Output = ev.Output[:500] + "..."
+	// Truncate long output for structured view (2K keeps file paths intact)
+	if len(ev.Output) > 2000 {
+		ev.Output = ev.Output[:2000] + "..."
 	}
 	c.events = append(c.events, ev)
 }

@@ -35,6 +35,8 @@ func (o *ResearchOverlay) IdentityTag() string {
 func (o *ResearchOverlay) Guidelines() string {
 	return `# Research tasks
 
+Axis: information organization, evidence standards, citation rules
+
 Core principles:
 - Understand the full picture before deep-diving. Start with a broad survey (README, structure, docs), then drill into specifics.
 - Distinguish facts from opinions. Clearly label observations, inferences, and uncertainties.
@@ -55,7 +57,7 @@ Report quality:
 
 // ToneRules returns research-specific formatting rules.
 func (o *ResearchOverlay) ToneRules() string {
-	return `- Structure reports with clear headings, tables, and numbered findings.
+	return `- When producing research deliverables, structure with clear headings, tables, and numbered findings.
 - Use evidence-based language: "the code shows X" rather than "X probably works".
 - When referencing project files in reports, include relative paths for traceability.`
 }

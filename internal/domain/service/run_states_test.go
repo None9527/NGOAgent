@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
 
@@ -40,13 +41,13 @@ func TestHandleGenerateError_NonLLMError(t *testing.T) {
 	loop, delta := setupTestLoop()
 	rs := &runState{}
 
-	action, _ := loop.handleGenerateError(context.Background(), rs, errors.New("network fail"))
+	result, _ := loop.handleGenerateError(context.Background(), rs, errors.New("network fail"))
 
 	if loop.state != StateError {
 		t.Errorf("expected StateError, got %v", loop.state)
 	}
-	if action != actionContinue {
-		t.Errorf("expected actionContinue, got %v", action)
+	if result.Status != graphruntime.NodeStatusFatal {
+		t.Errorf("expected fatal status, got %#v", result)
 	}
 	if len(delta.errors) != 1 {
 		t.Errorf("expected 1 error emitted, got %d", len(delta.errors))
@@ -58,13 +59,13 @@ func TestHandleGenerateError_Fatal(t *testing.T) {
 	rs := &runState{}
 
 	err := &llm.LLMError{Level: llm.ErrorFatal, Message: "model not found"}
-	action, _ := loop.handleGenerateError(context.Background(), rs, err)
+	result, _ := loop.handleGenerateError(context.Background(), rs, err)
 
 	if loop.state != StateFatal {
 		t.Errorf("expected StateFatal, got %v", loop.state)
 	}
-	if action != actionContinue {
-		t.Errorf("expected actionContinue, got %v", action)
+	if result.Status != graphruntime.NodeStatusFatal {
+		t.Errorf("expected fatal status, got %#v", result)
 	}
 	if len(delta.errors) != 1 {
 		t.Errorf("expected 1 error emitted, got %d", len(delta.errors))
@@ -83,7 +84,7 @@ func TestHandleGenerateError_TransientRetry(t *testing.T) {
 	defer cancel()
 
 	err := &llm.LLMError{Level: llm.ErrorTransient, Message: "502 Gateway"}
-	action, errReturn := loop.handleGenerateError(ctx, rs, err)
+	result, errReturn := loop.handleGenerateError(ctx, rs, err)
 
 	if rs.retries != 1 {
 		t.Errorf("expected retries to increment to 1, got %d", rs.retries)
@@ -94,8 +95,8 @@ func TestHandleGenerateError_TransientRetry(t *testing.T) {
 	if errReturn != context.DeadlineExceeded {
 		t.Errorf("expected context.DeadlineExceeded error, got %v", errReturn)
 	}
-	if action != actionContinue {
-		t.Errorf("expected actionContinue, got %v", action)
+	if result.Status != graphruntime.NodeStatusFatal {
+		t.Errorf("expected fatal status on context cancellation, got %#v", result)
 	}
 	if len(delta.texts) != 1 {
 		t.Errorf("expected text notification for retry warning")
@@ -107,7 +108,7 @@ func TestHandleGenerateError_TransientFailover(t *testing.T) {
 	rs := &runState{retries: 5, lastProvName: "default_prov"} // Exceeds default maxR for transient
 
 	err := &llm.LLMError{Level: llm.ErrorTransient, Message: "502 Gateway"}
-	action, _ := loop.handleGenerateError(context.Background(), rs, err)
+	result, _ := loop.handleGenerateError(context.Background(), rs, err)
 
 	if len(rs.excludedProviders) != 1 || rs.excludedProviders[0] != "default_prov" {
 		t.Errorf("expected default_prov to be excluded for failover, got %v", rs.excludedProviders)
@@ -118,8 +119,8 @@ func TestHandleGenerateError_TransientFailover(t *testing.T) {
 	if loop.state != StateGenerate {
 		t.Errorf("expected transition to StateGenerate for failover, got %v", loop.state)
 	}
-	if action != actionContinue {
-		t.Errorf("expected actionContinue, got %v", action)
+	if result.RouteKey != graphRouteGenerate {
+		t.Errorf("expected generate route, got %#v", result)
 	}
 	if len(delta.texts) != 0 {
 		t.Errorf("failover doesn't immediately send text in this path")
@@ -131,7 +132,7 @@ func TestHandleGenerateError_ContextOverflow(t *testing.T) {
 	rs := &runState{retries: 0, opts: RunOptions{MaxTokens: 2000}}
 
 	err := &llm.LLMError{Level: llm.ErrorContextOverflow, Message: "context length exceeded"}
-	action, _ := loop.handleGenerateError(context.Background(), rs, err)
+	result, _ := loop.handleGenerateError(context.Background(), rs, err)
 
 	if rs.retries != 1 {
 		t.Errorf("expected retries=1, got %d", rs.retries)
@@ -142,7 +143,7 @@ func TestHandleGenerateError_ContextOverflow(t *testing.T) {
 	if loop.state != StateCompact {
 		t.Errorf("first overflow should transition to StateCompact, got %v", loop.state)
 	}
-	if action != actionContinue {
-		t.Errorf("expected actionContinue, got %v", action)
+	if result.RouteKey != graphRouteCompact {
+		t.Errorf("expected compact route, got %#v", result)
 	}
 }

@@ -1,0 +1,17 @@
+agent_type: researcher
+display_name: "🔍 Researcher"
+description: "Deep research agent for complex information gathering, web search, and document analysis"
+tools:
+  - "*"
+disallowed:
+  - spawn_agent
+  - task_boundary
+  - notify_user
+  - task_plan
+  - view_media
+  - save_memory
+context_level: summary
+memory: persistent
+background: true
+max_timeout: 10m
+color: "#4A90D9"

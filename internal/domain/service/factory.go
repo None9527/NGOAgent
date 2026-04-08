@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ngoclaw/ngoagent/internal/domain/model"
 )
 
 // ────────────────────────────────────────────
@@ -69,24 +70,29 @@ func NewLoopFactory(deps Deps, maxConcurrent int) *LoopFactory {
 
 // Create spawns a new AgentRun with an independent AgentLoop.
 // The loop shares infra deps but has its own history, state, and mutex.
-// For subagent channels, orchestration tools are disabled and mode is set to "subagent".
-func (f *LoopFactory) Create(parentSID string, ch AgentChannel) *AgentRun {
+// For subagent channels, orchestration tools are disabled based on the AgentDefinition.
+// If def is nil, a default disallowed list is used for backward compatibility.
+func (f *LoopFactory) Create(parentSID string, ch AgentChannel, def *model.AgentDefinition) *AgentRun {
 	runID := MakeRunID(parentSID, ch.Name())
 
 	// Clone deps with channel-specific delta sink
 	deps := f.baseDeps
 	deps.Delta = ch.DeltaSink()
 
-	// For sub-agents: clone registry with orchestration tools disabled.
+	// For sub-agents: clone registry with tools disabled per AgentDefinition.
 	if ch.Name() == "subagent" {
+		disallowed := []string{
+			"task_boundary", "notify_user", "task_plan",
+			"spawn_agent", "save_memory", "view_media",
+		}
+		if def != nil && len(def.DisallowedTools) > 0 {
+			disallowed = def.DisallowedTools
+		}
 		type withClone interface {
 			CloneWithDisabled([]string) any
 		}
 		if c, ok := deps.ToolExec.(withClone); ok {
-			if te, ok := c.CloneWithDisabled([]string{
-				"task_boundary", "notify_user", "task_plan",
-				"spawn_agent", "save_memory",
-			}).(ToolExecutor); ok {
+			if te, ok := c.CloneWithDisabled(disallowed).(ToolExecutor); ok {
 				deps.ToolExec = te
 			}
 		}
@@ -97,6 +103,11 @@ func (f *LoopFactory) Create(parentSID string, ch AgentChannel) *AgentRun {
 	// Set subagent mode so prompt engine uses AssembleSubagent
 	if ch.Name() == "subagent" {
 		loop.options.Mode = "subagent"
+		// Store agent definition for prompt assembly
+		if def != nil {
+			loop.options.AgentType = def.AgentType
+			loop.options.AgentDef = def
+		}
 	}
 
 	run := &AgentRun{

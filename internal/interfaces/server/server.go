@@ -305,8 +305,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve session
-	req.SessionID = s.api.SessionID(req.SessionID)
+	// P0 fix: use the frontend-provided session_id directly.
+	// SessionID() fallback to default loop creates ghost sessions.
+	if req.SessionID == "" {
+		http.Error(w, `{"error":"session_id required"}`, http.StatusBadRequest)
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -363,6 +367,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				buf.MakeDelta().OnError(fmt.Errorf("%s", string(data)))
 			} else {
 				slog.Info(fmt.Sprintf("[handleChat] run error: %v", err))
+				// D2 fix: Forward all errors through SSE stream — don't silently swallow
+				buf.MakeDelta().OnError(err)
 			}
 			buf.MarkDone()
 		}

@@ -1,6 +1,6 @@
 package service
 
-// State represents the agent state machine.
+// State is an observational phase label for the graph-backed runtime.
 type State int
 
 const (
@@ -42,41 +42,4 @@ func (s State) String() string {
 	default:
 		return "unknown"
 	}
-}
-
-// Transition defines a valid state transition.
-type Transition struct {
-	From State
-	To   State
-}
-
-// ValidTransitions defines the state machine transition rules.
-var ValidTransitions = []Transition{
-	{StateIdle, StatePrepare},
-	{StatePrepare, StateGenerate},
-	{StateGenerate, StateToolExec}, // Tool calls present
-	{StateGenerate, StateDone},     // No tool calls → done
-	{StateToolExec, StateGuardCheck},
-	{StateGuardCheck, StateGenerate}, // Loop back for next turn
-	{StateGuardCheck, StateDone},     // Max steps reached
-	{StateGuardCheck, StateCompact},  // Context too large
-	{StateCompact, StateGenerate},    // Resume after compaction
-	{StateGenerate, StateError},      // LLM error
-	{StateError, StateGenerate},      // Retry
-	{StateError, StateFatal},         // Give up
-	{StateFatal, StateIdle},          // Reset
-	{StateDone, StateIdle},           // Reset for next turn
-	{StateDone, StatePrepare},        // PendingWake: subagent results continuation
-	{StateDone, StateEvaluating},     // Reserved: evo mode (currently unused, evaluation is async)
-	// Evaluating transitions removed: evaluation now runs async in fireHooks goroutine
-}
-
-// CanTransition checks if a state transition is valid.
-func CanTransition(from, to State) bool {
-	for _, t := range ValidTransitions {
-		if t.From == from && t.To == to {
-			return true
-		}
-	}
-	return false
 }

@@ -127,7 +127,7 @@ func HasWorkflow(skillDir string) bool {
 func AgentHintFromWorkflow(name, skillPath string, def *WorkflowDef) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("🧭 Skill: %s [agent mode — you control execution]\n", name))
-	b.WriteString(fmt.Sprintf("Full guide: read_file(path='%s/SKILL.md')\n", skillPath))
+	b.WriteString(fmt.Sprintf("Full guide: skill(name=\"%s\")\n", name))
 	if def.Description != "" {
 		b.WriteString(fmt.Sprintf("Description: %s\n", def.Description))
 	}

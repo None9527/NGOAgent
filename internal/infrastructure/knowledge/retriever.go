@@ -3,7 +3,9 @@ package knowledge
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
+	"time"
 )
 
 // Retriever provides semantic search over Knowledge Items using embeddings.
@@ -19,23 +21,75 @@ func NewRetriever(store *Store, embedder Embedder, index *VectorIndex) *Retrieve
 }
 
 // Retrieve returns the top-K most semantically relevant KIs for a query.
-// Uses GetWithContent to ensure full overview.md content is available.
-func (r *Retriever) Retrieve(query string, topK int) ([]*Item, error) {
+// Filters by scope (global KIs always included) and excludes deprecated/expired KIs.
+// Results are scored with cosine similarity × time-decay weighting.
+func (r *Retriever) Retrieve(query string, topK int, scope ...string) ([]*Item, error) {
 	queryVec, err := r.embedder.Embed(query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 
-	results := r.index.Search(queryVec, topK)
+	// Overfetch to allow for filtering
+	results := r.index.Search(queryVec, topK*3)
 
-	var items []*Item
+	activeScope := ""
+	if len(scope) > 0 {
+		activeScope = scope[0]
+	}
+
+	type scored struct {
+		item  *Item
+		score float64
+	}
+	var candidates []scored
+
 	for _, res := range results {
 		item, err := r.store.GetWithContent(res.ID)
 		if err != nil {
 			continue
 		}
-		items = append(items, item)
+
+		// Hard filter: skip inactive (deprecated or expired) KIs
+		if !item.IsActive() {
+			continue
+		}
+
+		// Scope filter: skip KIs from other scopes
+		if activeScope != "" && !item.MatchesScope(activeScope) {
+			continue
+		}
+
+		// Time-decay: score *= 1 / (1 + ageDays/180)
+		finalScore := res.Score
+		ageDays := time.Since(item.UpdatedAt).Hours() / 24
+		if ageDays > 0 {
+			finalScore *= 1.0 / (1.0 + ageDays/180.0)
+		}
+
+		candidates = append(candidates, scored{item: item, score: finalScore})
 	}
+
+	// Sort by decayed score descending
+	for i := 0; i < len(candidates); i++ {
+		for j := i + 1; j < len(candidates); j++ {
+			if candidates[j].score > candidates[i].score {
+				candidates[i], candidates[j] = candidates[j], candidates[i]
+			}
+		}
+	}
+
+	// Trim to topK
+	var items []*Item
+	for i, c := range candidates {
+		if i >= topK {
+			break
+		}
+		items = append(items, c.item)
+	}
+
+	// Suppress unused import warning
+	_ = math.Abs
+
 	return items, nil
 }
 

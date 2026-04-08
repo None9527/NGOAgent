@@ -9,14 +9,16 @@ import (
 // HistoryMessage is a persisted conversation message.
 type HistoryMessage struct {
 	ID          uint   `gorm:"primarykey"`
-	SessionID   string `gorm:"index"`
-	Role        string // user / assistant / tool / system
+	SessionID   string `gorm:"index;index:idx_session_time"`
+	Role        string `gorm:"index"` // user / assistant / tool / system
 	Content     string `gorm:"type:text"`
 	ToolCalls   string `gorm:"type:text"` // JSON-encoded tool calls
-	ToolCallID  string
+	ToolCallID  string `gorm:"index"`
+	ParentMsgID *uint  `gorm:"index"` // Pointer to the assistant message that spawned this tool/sub-message
+	TokenCount  int    // Token count for this specific message
 	Reasoning   string `gorm:"type:text"` // Thinking/reasoning content
 	Attachments string `gorm:"type:text"` // B2: JSON-encoded multimodal references [{type,path,mime_type,name}]
-	CreatedAt   time.Time
+	CreatedAt   time.Time `gorm:"index:idx_session_time"`
 }
 
 // HistoryStore persists and retrieves conversation history.
@@ -40,12 +42,18 @@ func (hs *HistoryStore) SaveAll(sessionID string, msgs []HistoryMessage) error {
 		if len(msgs) == 0 {
 			return nil
 		}
-		// Prepare for bulk insert
+		// Prepare for bulk insert — preserve original timestamps
+		now := time.Now()
 		for i := range msgs {
 			msgs[i].ID = 0
 			msgs[i].SessionID = sessionID
+			// Preserve original CreatedAt; only set if zero (new messages)
+			if msgs[i].CreatedAt.IsZero() {
+				msgs[i].CreatedAt = now
+			}
 		}
-		return tx.CreateInBatches(msgs, 100).Error
+		// Use Session to skip GORM's auto-timestamp overwrite
+		return tx.Session(&gorm.Session{SkipHooks: true}).CreateInBatches(msgs, 100).Error
 	})
 }
 

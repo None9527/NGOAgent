@@ -140,13 +140,6 @@ func (m *Manager) ensureHeartbeatJobs() {
 			Enabled:  true,
 			Internal: true,
 		},
-		{
-			Name:     "_ki_consolidate",
-			Schedule: "6h",
-			Prompt:   "KI 知识库整合（native callback，不消耗 LLM token）",
-			Enabled:  true,
-			Internal: true,
-		},
 	}
 	for _, hb := range heartbeats {
 		if _, err := m.getJob(hb.Name); err != nil {

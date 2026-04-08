@@ -161,12 +161,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	ws.readLoop(ctx, s)
 
-	// Cleanup
+	// Cleanup — D5 fix: close connection first (fast-fail writes), then clean tracker
+	ws.closeConn()
 	if ws.sessionID != "" {
 		s.wsTracker.Delete(ws.sessionID)
 		slog.Info(fmt.Sprintf("[ws] Connection closed for session %s", ws.sessionID))
 	}
-	ws.closeConn()
 	cancel()
 }
 
@@ -231,7 +231,15 @@ func (ws *wsConn) onChat(s *Server, msg wsUpstream) {
 		return
 	}
 
-	sessionID := s.api.SessionID(msg.SessionID)
+	// P0 fix: use frontend session_id directly — do NOT resolve through SessionID()
+	// which falls back to the default loop's startup UUID (ghost session bug).
+	// ChatStream's loopPool.Get() will auto-create a loop for new sessions.
+	sessionID := msg.SessionID
+	if sessionID == "" {
+		slog.Warn("[ws] chat received without session_id, rejecting")
+		ws.writeJSON(map[string]string{"type": "error", "message": "session_id required"})
+		return
+	}
 	ws.sessionID = sessionID
 
 	// Register for async push (subagent_progress, title_updated, etc.)
@@ -252,14 +260,14 @@ func (ws *wsConn) onChat(s *Server, msg wsUpstream) {
 		}
 	}
 
-	// Create Delta with WS writer — NO MarkDone, NO RunTracker.
-	// BufferedDelta is reused here only for its emit() serialization,
-	// NOT for SSE reconnect buffering. Writer lifetime = WS lifetime.
+	// Create Delta with WS writer.
+	// D3 fix: Also register in RunTracker so WS disconnections can be recovered
+	// via SSE reconnect (checkActiveRun + handleReconnect path).
 	buf := service.NewBufferedDelta(ws.wsWriter)
 	delta := buf.MakeDelta()
 
-	// DO NOT register in RunTracker — WS doesn't need SSE reconnect.
-	// DO NOT call buf.MarkDone() — writer must stay alive for auto-wake.
+	// D3 fix: Register in RunTracker — enables SSE reconnect after WS drop
+	s.runTracker.Register(sessionID, buf)
 
 	go func() {
 		slog.Info(fmt.Sprintf("[ws] ChatStream: session=%s mode=%q msgLen=%d", sessionID, msg.Mode, len(message)))
@@ -269,11 +277,15 @@ func (ws *wsConn) onChat(s *Server, msg wsUpstream) {
 				ws.writeJSON(map[string]string{"type": "error", "message": "agent is busy"})
 			} else {
 				slog.Info(fmt.Sprintf("[ws] chat error for session %s: %v", sessionID, err))
+				// D2 fix: Forward all errors to frontend — don't silently swallow 503/context overflow
+				ws.writeJSON(map[string]string{"type": "error", "message": err.Error()})
 			}
 		}
 		// Signal frontend: this chat turn is done. Input can be re-enabled.
 		// NOTE: auto-wake may send more events later through the same wsWriter.
 		ws.writeJSON(map[string]string{"type": "done"})
+		// D3+D4 fix: Mark the run as complete so RunTracker can clean up after 30min
+		buf.MarkDone()
 	}()
 }
 

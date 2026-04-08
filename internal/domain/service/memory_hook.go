@@ -12,7 +12,7 @@ import (
 
 // MemoryStorer abstracts the vector memory store (avoids import cycle with memory package).
 type MemoryStorer interface {
-	Save(sessionID, content string) error
+	Save(sessionID, content string, scope ...string) error
 	FormatForPrompt(query string, topK, budgetChars int) string
 }
 
@@ -148,4 +148,90 @@ func isCompactSummary(content string) bool {
 		strings.Contains(content, "## session_summary") ||
 		strings.Contains(content, "## code_changes") ||
 		strings.Contains(content, "## learned_facts")
+}
+
+// ═══════════════════════════════════════════
+// Phase 3: MemoryPostRunHook — Real-time Memory Sink
+// Saves conversation memory after EVERY run, not just during compaction.
+// This eliminates the compaction-dependency gap where short sessions lose all memory.
+// ═══════════════════════════════════════════
+
+// MemoryPostRunHook saves the current run's conversation to vector memory asynchronously.
+// Unlike MemoryCompactHook (which only fires during compaction), this fires after every run,
+// ensuring no conversation content is lost regardless of session length.
+type MemoryPostRunHook struct {
+	store   MemoryStorer
+	kiDedup KIDuplicateChecker // nil = no dedup
+}
+
+// NewMemoryPostRunHook creates a post-run hook that persists conversation to vector memory.
+func NewMemoryPostRunHook(store MemoryStorer, kiDedup KIDuplicateChecker) *MemoryPostRunHook {
+	return &MemoryPostRunHook{store: store, kiDedup: kiDedup}
+}
+
+// OnRunComplete saves the run's conversation history to vector memory asynchronously.
+// Filters: noise gate + KI dedup + compact summary detection.
+func (h *MemoryPostRunHook) OnRunComplete(ctx context.Context, info RunInfo) {
+	if h.store == nil || len(info.History) == 0 || info.Steps < 1 {
+		return
+	}
+
+	// Async: don't block the run completion
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Info(fmt.Sprintf("[memory-postrun] panic: %v", r))
+			}
+		}()
+
+		var kept, skipped, noisy int
+		var content strings.Builder
+
+		for _, msg := range info.History {
+			if msg.Content == "" {
+				continue
+			}
+
+			// Only store user and assistant messages (skip tool output)
+			if msg.Role != "user" && msg.Role != "assistant" {
+				continue
+			}
+
+			// Skip compact summaries
+			if msg.Role == "assistant" && isCompactSummary(msg.Content) {
+				noisy++
+				continue
+			}
+
+			// Noise gate
+			if isNoisyMemoryContent(msg.Content) {
+				noisy++
+				continue
+			}
+
+			// KI dedup: skip if already covered by distilled knowledge
+			if h.kiDedup != nil {
+				dupID, score := h.kiDedup.FindDuplicate(msg.Content, 0.75)
+				if dupID != "" {
+					skipped++
+					continue
+				}
+				_ = score // suppress unused
+			}
+
+			kept++
+			content.WriteString("[" + msg.Role + "]: " + msg.Content + "\n\n")
+		}
+
+		if content.Len() == 0 {
+			return
+		}
+
+		if err := h.store.Save(info.SessionID, content.String()); err != nil {
+			slog.Info(fmt.Sprintf("[memory-postrun] save failed: %v", err))
+		} else {
+			slog.Info(fmt.Sprintf("[memory-postrun] session=%s saved=%d skipped_ki=%d noise=%d",
+				info.SessionID, kept, skipped, noisy))
+		}
+	}()
 }

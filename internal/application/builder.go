@@ -77,8 +77,24 @@ func Build() (*App, error) {
 	}
 	repo := persistence.NewRepository(db)
 	historyStore := persistence.NewHistoryStore(db)
+	snapshotStore := persistence.NewRunSnapshotStore(db)
 	evoStore := persistence.NewEvoStore(db)               // Evo tables: evo_traces, evo_evaluations, evo_repairs
 	transcriptStore := persistence.NewTranscriptStore(db) // P2 F1: subagent transcripts
+
+	// SubAgent v2: Agent Definition Registry
+	agentRegistry := service.NewAgentRegistry()
+	// Load built-in agent definitions from agents/built-in/
+	exePath, _ := os.Executable()
+	builtInDir := filepath.Join(filepath.Dir(exePath), "agents", "built-in")
+	if _, err := os.Stat(builtInDir); os.IsNotExist(err) {
+		// Fallback: try relative to CWD (dev mode)
+		if cwd, err := os.Getwd(); err == nil {
+			builtInDir = filepath.Join(cwd, "agents", "built-in")
+		}
+	}
+	if err := agentRegistry.LoadFromDir(builtInDir, "built-in"); err != nil {
+		slog.Info(fmt.Sprintf("Warning: agent registry load: %v", err))
+	}
 
 	// ═══════════════════════════════════════════
 	// Phase 2: Core Infrastructure
@@ -155,7 +171,11 @@ func Build() (*App, error) {
 	// ═══════════════════════════════════════════
 	// Phase 3: Storage Layer
 	// ═══════════════════════════════════════════
-	sessionID := generateSessionID()
+	// Default session ID: fixed identifier for the CLI/fallback loop.
+	// Web sessions use LoopPool with per-conversation UUIDs from the DB.
+	// Previously used generateSessionID() (random UUID), which created
+	// "ghost sessions" — unregistered in conversations table.
+	sessionID := "__default__"
 	brainDir := config.ResolvePath(cfg.Storage.BrainDir)
 	brainStore := brain.NewArtifactStore(brainDir, sessionID)
 
@@ -296,6 +316,8 @@ func Build() (*App, error) {
 	hookChain.AddCompactHook(service.NewCompactAuditHook())
 	if memStore != nil {
 		hookChain.AddCompactHook(service.NewMemoryCompactHook(memStore, sessionID, dedupChecker))
+		// Phase 3: Real-time memory sink — save after every run, not just compaction
+		hookChain.Add(service.NewMemoryPostRunHook(memStore, dedupChecker))
 	}
 	// Diary hook: record run summary to daily diary after each session
 	hookChain.Add(service.NewDiaryHook(&diaryAdapter{store: diaryStore}))
@@ -335,6 +357,7 @@ func Build() (*App, error) {
 		FileHistory:     fileHistory,
 		Hooks:           hookChain,
 		MemoryStore:     memStore,
+		SnapshotStore:   snapshotStore,
 		EvoEvaluator:    evoEvaluator,
 		EvoRepairRouter: evoRepairRouter,
 		EvoStore:        evoStore,
@@ -355,7 +378,12 @@ func Build() (*App, error) {
 	var barrierMu sync.Mutex
 	barriers := make(map[string]*service.SubagentBarrier) // keyed by sessionID for correctness
 
-	spawnTool.SetSpawnFunc(func(ctx context.Context, task, taskName string) (string, error) {
+	spawnTool.SetSpawnFunc(func(ctx context.Context, task, taskName, agentType string) (string, error) {
+		// Resolve agent definition from registry
+		agentDef, defErr := agentRegistry.Resolve(agentType)
+		if defErr != nil {
+			return "", fmt.Errorf("agent type %q not found: %w", agentType, defErr)
+		}
 		// Get the RUNTIME session ID from context (injected by ChatStream)
 		// instead of the fixed builder-time sessionID variable.
 		runtimeSID := ctxutil.SessionIDFromContext(ctx)
@@ -370,6 +398,12 @@ func Build() (*App, error) {
 		}
 		if parentLoop == nil {
 			parentLoop = loop // fallback for backward compat (CLI mode)
+		}
+
+		// SubAgent v2 P2: Enrich task with L1/L2/L3 parent context
+		if parentLoop != nil {
+			parentHistory := parentLoop.History()
+			task = service.BuildSubagentContext(task, parentHistory, agentDef)
 		}
 
 		// Get or create barrier for this parent session's turn (keyed by runtimeSID)
@@ -409,10 +443,16 @@ func Build() (*App, error) {
 					}
 				}()
 				// Clean up barrier reference
+				if capturedLoop != nil {
+					capturedLoop.ClearActiveBarrier()
+				}
 				barrierMu.Lock()
 				delete(barriers, capturedSID)
 				barrierMu.Unlock()
 			})
+			if capturedLoop != nil {
+				capturedLoop.SetActiveBarrier(b)
+			}
 			// Wire SSE/WS progress push if server has configured it
 			if spawnTool.EventPusher != nil {
 				pusher := spawnTool.EventPusher // capture
@@ -435,6 +475,10 @@ func Build() (*App, error) {
 			if cfg.Agent.MaxSubagents > 0 {
 				b.SetMaxConcurrent(cfg.Agent.MaxSubagents)
 			}
+			// SubAgent v2: Wire per-definition timeout
+			if agentDef != nil && agentDef.MaxTimeout > 0 {
+				b.SetTimeout(agentDef.MaxTimeout)
+			}
 			// P2 F1: Wire transcript persistence via TranscriptStore.SaveSimple
 			if transcriptStore != nil {
 				ts := transcriptStore // capture for closure
@@ -456,8 +500,13 @@ func Build() (*App, error) {
 			// Route completion through barrier instead of direct ephemeral
 			b.OnComplete(runID, result, err)
 		})
-		run := factory.Create(runtimeSID, ch)
+		run := factory.Create(runtimeSID, ch, agentDef)
 		run.Loop.InjectEphemeral(prompttext.EphSubAgentContext)
+
+		// SubAgent v2 P2: Model routing — agentDef.Model overrides parent model
+		if agentDef != nil && agentDef.Model != "" {
+			run.Loop.SetModel(agentDef.Model)
+		}
 
 		// P1-B #54: Inject coordinator mode into the PARENT loop.
 		// This activates orchestrator-mode rules: synthesize research before delegating,
@@ -515,6 +564,8 @@ func Build() (*App, error) {
 	if brainDir != "" {
 		spawnTool.ScratchDir = filepath.Join(brainDir, sessionID, "scratchpad")
 	}
+	// SubAgent v2: populate agent_type enum from registry
+	spawnTool.SetAgentTypes(agentRegistry.TypeNames())
 
 	// Per-session loop pool (uses factory baseDeps)
 	// NOTE: must be assigned AFTER spawnTool.SetSpawnFunc so the closure captures the pointer correctly.
@@ -645,12 +696,6 @@ func Build() (*App, error) {
 		// Register manage_cron tool now that manager is ready
 		registry.Register(tool.NewManageCronTool(cronMgr))
 
-		// Register native callbacks for system maintenance (zero LLM cost)
-		if kiRetriever != nil {
-			cronMgr.RegisterNative("_ki_consolidate", func(ctx context.Context) {
-				kiRetriever.ConsolidateDuplicates(0.60)
-			})
-		}
 	}
 
 	// Start skill file watcher
@@ -673,18 +718,17 @@ func Build() (*App, error) {
 		tool.RegisterMCPTools(registry, mcpMgr)
 	}
 	// Skill registration:
-	// - light + executable: register as ScriptTool (LLM calls directly)
-	// - heavy + executable: agent-discoverable (listed in skill listing, agent reads SKILL.md via read_file)
-	// - workflow: agent uses read_file on SKILL.md when needed (no dedicated tool)
+	// - executable/hybrid: register as ScriptTool (LLM calls directly via tool name)
+	// - workflow/guide: agent-discoverable (invoked via skill(name="X"))
 	for _, sk := range skillMgr.AutoPromote() {
-		if (sk.Type == "executable" || sk.Type == "hybrid") && sk.Weight == "light" {
+		if sk.Type == "executable" || sk.Type == "hybrid" {
 			registry.Register(tool.NewScriptTool(sk))
-			slog.Info(fmt.Sprintf("[skill] Registered light ScriptTool: %s", sk.Name))
-		} else if sk.Weight == "heavy" {
-			slog.Info(fmt.Sprintf("[skill] Heavy skill (agent-discoverable): %s", sk.Name))
+			slog.Info(fmt.Sprintf("[skill] Registered ScriptTool: %s", sk.Name))
+		} else {
+			slog.Info(fmt.Sprintf("[skill] Registered standard skill: %s", sk.Name))
 		}
 	}
-	slog.Info(fmt.Sprintf("[skill] %d skills discovered (YAML pre-read, no use_skill tool)", len(skillMgr.List())))
+	slog.Info(fmt.Sprintf("[skill] %d skills discovered (pre-read, invoked via SkillTool)", len(skillMgr.List())))
 
 	// ═══════════════════════════════════════════
 	// Phase 8: Unified API + Server

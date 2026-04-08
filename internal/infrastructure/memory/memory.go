@@ -41,6 +41,7 @@ type Store struct {
 type fragmentMeta struct {
 	Content   string    `json:"content"`
 	SessionID string    `json:"session_id"`
+	Scope     string    `json:"scope,omitempty"` // Namespace isolation
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -80,7 +81,8 @@ func NewStore(embedder knowledge.Embedder, indexDir string, cfg ...StoreConfig) 
 
 // Save splits content into chunks, embeds each, and stores them.
 // Called by CompactHook.BeforeCompact to preserve conversation before compression.
-func (s *Store) Save(sessionID, content string) error {
+// Optional scope parameter enables namespace isolation for multi-project support.
+func (s *Store) Save(sessionID, content string, scope ...string) error {
 	if content == "" {
 		return nil
 	}
@@ -93,6 +95,11 @@ func (s *Store) Save(sessionID, content string) error {
 	vecs, err := s.embedder.EmbedBatch(chunks)
 	if err != nil {
 		return fmt.Errorf("embed memory chunks: %w", err)
+	}
+
+	activeScope := ""
+	if len(scope) > 0 {
+		activeScope = scope[0]
 	}
 
 	s.mu.Lock()
@@ -108,6 +115,7 @@ func (s *Store) Save(sessionID, content string) error {
 		s.contents[id] = fragmentMeta{
 			Content:   chunk,
 			SessionID: sessionID,
+			Scope:     activeScope,
 			CreatedAt: time.Now(),
 		}
 	}
@@ -123,19 +131,25 @@ func (s *Store) Save(sessionID, content string) error {
 		slog.Info(fmt.Sprintf("[memory] fragments save failed: %v", err))
 	}
 
-	slog.Info(fmt.Sprintf("[memory] saved %d chunks from session %s (total: %d)", len(chunks), sessionID, len(s.contents)))
+	slog.Info(fmt.Sprintf("[memory] saved %d chunks from session %s scope=%q (total: %d)", len(chunks), sessionID, activeScope, len(s.contents)))
 	return nil
 }
 
 // Search returns the top-K most relevant memory fragments for a query.
 // Results are scored with cosine similarity × time-decay weighting.
-func (s *Store) Search(query string, topK int) ([]Fragment, error) {
+// Optional scope parameter filters by namespace.
+func (s *Store) Search(query string, topK int, scope ...string) ([]Fragment, error) {
 	queryVec, err := s.embedder.Embed(query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 
 	results := s.index.Search(queryVec, topK*2) // Overfetch for re-ranking
+
+	activeScope := ""
+	if len(scope) > 0 {
+		activeScope = scope[0]
+	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -144,6 +158,11 @@ func (s *Store) Search(query string, topK int) ([]Fragment, error) {
 	for _, r := range results {
 		meta, ok := s.contents[r.ID]
 		if !ok {
+			continue
+		}
+
+		// Scope filter: skip fragments from other scopes
+		if activeScope != "" && meta.Scope != "" && meta.Scope != activeScope {
 			continue
 		}
 

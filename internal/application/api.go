@@ -119,6 +119,12 @@ var ErrBusy = agenterr.ErrBusy
 //   - Delta sink binding
 //   - Agent loop execution
 func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message, mode string, delta *service.Delta) error {
+	// D1 fix: Synchronize Active session pointer to prevent ghost sessions on reconnect.
+	// Any chat interaction proves the frontend is using this session.
+	if sessionID != "" {
+		a.sessMgr.Activate(sessionID)
+	}
+
 	// Resolve loop: per-session if LoopPool available
 	loop := a.loop
 	if sessionID != "" && a.loopPool != nil {
@@ -130,8 +136,21 @@ func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message, mode stri
 		loop.SetPlanMode(mode)
 	}
 
+	// Execution resume: reconnects should continue the pending graph run instead of
+	// starting an empty user turn.
+	if message == "" {
+		runID, ok, err := loop.PendingRunID(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("no pending execution for session %s", sessionID)
+		}
+		slog.Info(fmt.Sprintf("[session] Resuming pending run %s for session %s", runID, sessionID))
+	}
+
 	// Session resume: load persisted history if loop's memory is empty
-	if sessionID != "" && a.histQuery != nil && len(loop.GetHistory()) == 0 {
+	if message != "" && sessionID != "" && a.histQuery != nil && len(loop.GetHistory()) == 0 {
 		exports, err := a.histQuery.LoadAll(sessionID)
 		if err == nil && len(exports) > 0 {
 			msgs := service.RestoreHistory(exports)
@@ -169,14 +188,17 @@ func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message, mode stri
 	return err
 }
 
-// SessionID returns the current session ID for a given session loop.
+// SessionID is DEPRECATED — callers should use the frontend-provided session_id directly.
+// The previous implementation fell back to the default loop's startup UUID when
+// LoopPool had no entry for a new session, creating "ghost sessions" whose history
+// was invisible to the frontend. Retained only for compile-time interface compliance.
 func (a *AgentAPI) SessionID(sessionID string) string {
-	if sessionID != "" && a.loopPool != nil {
-		if loop := a.loopPool.GetIfExists(sessionID); loop != nil {
-			return loop.SessionID()
-		}
+	if sessionID != "" {
+		return sessionID
 	}
-	return a.loop.SessionID()
+	// Defensive: return empty to surface bugs early rather than silently
+	// routing to the default loop's random UUID.
+	return ""
 }
 
 // StopRun signals the correct agent loop to stop.
@@ -280,6 +302,12 @@ func (a *AgentAPI) SetSessionTitle(id, title string) {
 func (a *AgentAPI) GetHistory(sessionID string) ([]apitype.HistoryMessage, error) {
 	if a.histQuery == nil {
 		return nil, fmt.Errorf("history store not configured")
+	}
+
+	// D1 fix: Loading history means the frontend is viewing this session.
+	// Sync Active pointer so ListSessions returns the correct active ID.
+	if sessionID != "" {
+		a.sessMgr.Activate(sessionID)
 	}
 
 	// First Principles: The Active AgentLoop memory is the absolute Ground Truth.

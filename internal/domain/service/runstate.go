@@ -30,13 +30,10 @@ func NewRunState(sessionID string) *RunState {
 	}
 }
 
-// Transition attempts a state transition, returns error if invalid.
+// Transition updates the observed run phase.
 func (rs *RunState) Transition(to State) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	if !CanTransition(rs.State, to) {
-		return false
-	}
 	rs.State = to
 	return true
 }

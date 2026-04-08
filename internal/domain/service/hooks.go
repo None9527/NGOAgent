@@ -216,6 +216,7 @@ type KIDistillHook struct {
 	getKI          func() KIStore
 	llm            KILLMDistiller
 	dedup          KIDuplicateChecker // optional: embedding-based dedup
+	judger         KIRelationJudger   // optional: LLM-based MERGE/SUPERSEDE/INDEPENDENT
 	dedupThreshold float64            // cosine similarity threshold for dedup (default 0.60)
 }
 
@@ -225,12 +226,19 @@ type KIStore interface {
 	UpdateMerge(id, appendContent, newSummary string) error // Legacy append merge
 	ReplaceMerge(id, newContent, newSummary string) error   // Full replacement merge
 	GetContent(id string) (string, error)                   // Read existing content
+	MarkDeprecated(id, supersededBy string) error            // Phase 2: temporal deprecation
 }
 
 // KIDuplicateChecker detects duplicate KIs using embedding similarity.
 type KIDuplicateChecker interface {
 	FindDuplicate(text string, threshold float64) (string, float64)
 	EmbedAndIndexByID(id string) error // Re-index after update
+}
+
+// KIRelationJudger uses LLM to determine the relationship between two KIs.
+// Returns one of: "MERGE", "SUPERSEDE", or "INDEPENDENT".
+type KIRelationJudger interface {
+	JudgeRelation(existingContent, newContent string) (string, error)
 }
 
 // KILLMDistiller abstracts the LLM call for knowledge distillation.
@@ -241,6 +249,7 @@ type KILLMDistiller interface {
 
 // NewKIDistillHook creates the KI distillation hook.
 // dedup can be nil if embedding is not configured.
+// judger can be nil — defaults to always MERGE for backward compatibility.
 func NewKIDistillHook(getKI func() KIStore, distiller KILLMDistiller, threshold float64, dedup ...KIDuplicateChecker) *KIDistillHook {
 	h := &KIDistillHook{getKI: getKI, llm: distiller, dedupThreshold: threshold}
 	if h.dedupThreshold <= 0 {
@@ -250,6 +259,12 @@ func NewKIDistillHook(getKI func() KIStore, distiller KILLMDistiller, threshold 
 		h.dedup = dedup[0]
 	}
 	return h
+}
+
+// SetRelationJudger configures LLM-based MERGE/SUPERSEDE/INDEPENDENT judgment.
+// When set, duplicate detection will classify the relationship before acting.
+func (h *KIDistillHook) SetRelationJudger(j KIRelationJudger) {
+	h.judger = j
 }
 
 func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
@@ -300,40 +315,63 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		// P0-E #2: Scrub sensitive content before saving
 		content = scrubSensitiveContent(content)
 
-		// Dedup check: if a similar KI exists, merge via LLM instead of concatenation
+		// Dedup check: if a similar KI exists, judge relationship then act
 		if h.dedup != nil {
 			queryText := result.Title + "\n" + result.Summary
 			dupID, score := h.dedup.FindDuplicate(queryText, h.dedupThreshold)
 			if dupID != "" {
-				slog.Info(fmt.Sprintf("[hook] KI dedup: merging into %q (score=%.3f)", dupID, score))
+				slog.Info(fmt.Sprintf("[hook] KI dedup: found similar %q (score=%.3f)", dupID, score))
 
-				// Read existing KI content for LLM merge
+				// Read existing KI content
 				existingContent, err := store.GetContent(dupID)
-				if err != nil {
-					slog.Info(fmt.Sprintf("[hook] KI dedup: read existing failed: %v, falling back to append", err))
-					_ = store.UpdateMerge(dupID, "\n\n---\n\n"+result.Content, result.Summary)
-					_ = h.dedup.EmbedAndIndexByID(dupID)
-					return
-				}
+				if err == nil {
+					// Phase 2: Judge relationship (MERGE / SUPERSEDE / INDEPENDENT)
+					relation := "MERGE" // default for backward compatibility
+					if h.judger != nil {
+						if rel, judgeErr := h.judger.JudgeRelation(existingContent, result.Content); judgeErr != nil {
+							slog.Info(fmt.Sprintf("[hook] KI relation judge failed: %v, defaulting to MERGE", judgeErr))
+						} else {
+							relation = rel
+						}
+					}
 
-				// LLM merge: consolidate old + new into one concise document
-				merged, err := h.llm.MergeKnowledge(existingContent, result.Content)
-				if err != nil {
-					slog.Info(fmt.Sprintf("[hook] KI LLM merge failed: %v, falling back to append", err))
-					_ = store.UpdateMerge(dupID, "\n\n---\n\n"+result.Content, result.Summary)
-					_ = h.dedup.EmbedAndIndexByID(dupID)
-					return
-				}
+					switch relation {
+					case "SUPERSEDE":
+						// New knowledge replaces old — mark old as deprecated, save new below
+						slog.Info(fmt.Sprintf("[hook] KI SUPERSEDE: deprecating %q, saving new KI", dupID))
+						if depErr := store.MarkDeprecated(dupID, ""); depErr != nil {
+							slog.Info(fmt.Sprintf("[hook] KI deprecate failed: %v", depErr))
+						}
+						// Fall through to SaveDistilled below
 
-				// Replace (not append) with merged content
-				mergedContent := fmt.Sprintf("# %s\n\n%s\n\n---\n\n%s", merged.Title, merged.Summary, merged.Content)
-				if err := store.ReplaceMerge(dupID, mergedContent, merged.Summary); err != nil {
-					slog.Info(fmt.Sprintf("[hook] KI replace merge failed: %v", err))
+					case "INDEPENDENT":
+						// Similar wording but different knowledge — save separately
+						slog.Info(fmt.Sprintf("[hook] KI INDEPENDENT: saving as new despite similarity"))
+						// Fall through to SaveDistilled below
+
+					default: // "MERGE"
+						// LLM merge: consolidate old + new into one concise document
+						merged, mergeErr := h.llm.MergeKnowledge(existingContent, result.Content)
+						if mergeErr != nil {
+							slog.Info(fmt.Sprintf("[hook] KI LLM merge failed: %v, falling back to append", mergeErr))
+							_ = store.UpdateMerge(dupID, "\n\n---\n\n"+result.Content, result.Summary)
+							_ = h.dedup.EmbedAndIndexByID(dupID)
+							return
+						}
+
+						// Replace (not append) with merged content
+						mergedContent := fmt.Sprintf("# %s\n\n%s\n\n---\n\n%s", merged.Title, merged.Summary, merged.Content)
+						if replaceErr := store.ReplaceMerge(dupID, mergedContent, merged.Summary); replaceErr != nil {
+							slog.Info(fmt.Sprintf("[hook] KI replace merge failed: %v", replaceErr))
+						} else {
+							_ = h.dedup.EmbedAndIndexByID(dupID)
+							slog.Info(fmt.Sprintf("[hook] KI LLM merged into %q: %q", dupID, merged.Title))
+						}
+						return
+					}
 				} else {
-					_ = h.dedup.EmbedAndIndexByID(dupID)
-					slog.Info(fmt.Sprintf("[hook] KI LLM merged into %q: %q", dupID, merged.Title))
+					slog.Info(fmt.Sprintf("[hook] KI dedup: read existing failed: %v, saving as new", err))
 				}
-				return
 			}
 		}
 

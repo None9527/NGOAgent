@@ -20,8 +20,42 @@ type Item struct {
 	Content   string    `json:"content"`
 	Tags      []string  `json:"tags,omitempty"`
 	Sources   []string  `json:"sources,omitempty"` // Conversation IDs
+
+	// Scope namespace — enables multi-project/domain memory isolation.
+	// "global" or "" means accessible from any scope.
+	Scope string `json:"scope,omitempty"`
+
+	// Temporal Knowledge Graph — knowledge has a lifecycle.
+	ValidFrom    *time.Time `json:"valid_from,omitempty"`    // When this knowledge became valid (nil = CreatedAt)
+	ValidUntil   *time.Time `json:"valid_until,omitempty"`   // When this knowledge expires (nil = never)
+	Deprecated   bool       `json:"deprecated,omitempty"`    // Explicitly superseded by newer knowledge
+	SupersededBy string     `json:"superseded_by,omitempty"` // ID of the KI that replaced this one
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// IsActive returns true if this KI is neither deprecated nor expired.
+func (item *Item) IsActive() bool {
+	if item.Deprecated {
+		return false
+	}
+	if item.ValidUntil != nil && time.Now().After(*item.ValidUntil) {
+		return false
+	}
+	return true
+}
+
+// MatchesScope returns true if this KI is accessible from the given scope.
+// Global KIs (empty scope) are always accessible.
+func (item *Item) MatchesScope(scope string) bool {
+	if item.Scope == "" || item.Scope == "global" {
+		return true
+	}
+	if scope == "" || scope == "global" {
+		return true
+	}
+	return item.Scope == scope
 }
 
 // Store manages the KI Store directory.
@@ -252,6 +286,25 @@ func (s *Store) SaveDistilled(title, summary, content string, tags, sources []st
 		Tags:    tags,
 		Sources: sources,
 	})
+}
+
+// MarkDeprecated marks a KI as deprecated and optionally links to its replacement.
+// Implements the KIStore interface for Phase 2 governance.
+func (s *Store) MarkDeprecated(id, supersededBy string) error {
+	item, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("get KI for deprecation %s: %w", id, err)
+	}
+	item.Deprecated = true
+	if supersededBy != "" {
+		item.SupersededBy = supersededBy
+	}
+	item.UpdatedAt = time.Now()
+	meta, err := json.MarshalIndent(item, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal KI %s: %w", id, err)
+	}
+	return os.WriteFile(filepath.Join(s.baseDir, id, "metadata.json"), meta, 0644)
 }
 
 // UpdateMerge appends content to an existing KI AND refreshes its metadata (summary, updated_at).

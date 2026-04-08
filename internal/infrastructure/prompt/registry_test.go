@@ -103,7 +103,7 @@ func TestRegistrySizeAndNames(t *testing.T) {
 	}
 }
 
-// TestEngineDefaultRegistry verifies the Engine initializes with all 19 defaults.
+// TestEngineDefaultRegistry verifies the Engine initializes with all 18 defaults.
 func TestEngineDefaultRegistry(t *testing.T) {
 	e := NewEngine()
 	r := e.Registry()
@@ -113,7 +113,7 @@ func TestEngineDefaultRegistry(t *testing.T) {
 		"KnowledgeIndex", "OutputCapabilities", "ProjectContext",
 		"ResponseFormat", "Runtime", "Safety", "SemanticMemory",
 		"Skills", "ToneAndStyle", "ToolCalling", "ToolProtocol", "Tooling",
-		"UserRules", "Variants",
+		"UserRules",
 	}
 
 	names := r.Names()

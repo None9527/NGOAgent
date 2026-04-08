@@ -8,6 +8,7 @@ import (
 	"time"
 
 	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
@@ -25,7 +26,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string) error {
 		return agenterr.NewBusy("another run is in progress")
 	}
 	defer a.runMu.Unlock()
-	return a.runInner(ctx, userMessage)
+	return a.runEntry(ctx, userMessage)
 }
 
 // TryAcquire attempts to acquire the run lock without blocking.
@@ -41,33 +42,19 @@ func (a *AgentLoop) ReleaseAcquire() {
 
 // RunWithoutAcquire runs the loop assuming the caller already holds the run lock.
 func (a *AgentLoop) RunWithoutAcquire(ctx context.Context, userMessage string) error {
-	return a.runInner(ctx, userMessage)
+	return a.runEntry(ctx, userMessage)
 }
 
-func (a *AgentLoop) runInner(ctx context.Context, userMessage string) (runErr error) {
-	// Create cancellable context — Stop() calls runCancel() to kill running sandbox processes.
-	runCtx, runCancel := context.WithCancel(ctx)
-	func() { a.mu.Lock(); defer a.mu.Unlock(); a.runCancel = runCancel }()
-	defer func() {
-		runCancel()
-		func() { a.mu.Lock(); defer a.mu.Unlock(); a.runCancel = nil }()
-	}()
-
-	// Guarantee history is persisted on ALL exit paths (API error, Stop, ctx cancel).
-	// persistHistory is idempotent — the extra call from StateDone is harmless.
-	defer a.persistHistory()
-
-	// P3 M1: Webhook complete/error notification on run exit
-	defer func() {
-		if a.deps.WebhookHook != nil {
-			if runErr != nil {
-				a.deps.WebhookHook.OnError(a.SessionID(), runErr)
-			} else {
-				a.deps.WebhookHook.OnComplete(a.SessionID())
-			}
+func (a *AgentLoop) runEntry(ctx context.Context, userMessage string) error {
+	if a.deps.SnapshotStore != nil && userMessage == "" {
+		if snap, err := a.deps.SnapshotStore.LoadLatestBySession(ctx, a.SessionID()); err == nil && snap != nil && snap.Status == graphruntime.NodeStatusWait {
+			return a.resumeGraph(ctx, snap.RunID)
 		}
-	}()
+	}
+	return a.runGraph(ctx, userMessage)
+}
 
+func (a *AgentLoop) prepareTurn(userMessage string) {
 	func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -85,9 +72,7 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) (runErr er
 	// will still see the user's prompt in the session history.
 	a.persistHistory()
 
-	// ═══ Dynamic Overlay Activation ═══
 	// Detect which behavior overlays should be active based on user message + workspace.
-	// Multiple overlays can activate simultaneously (e.g. coding + research).
 	if a.deps.PromptEngine != nil {
 		var wsFiles []string
 		if a.deps.Workspace != nil {
@@ -97,16 +82,9 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) (runErr er
 		slog.Info(fmt.Sprintf("[overlay] Active: %s", a.deps.PromptEngine.ActiveProfile()))
 	}
 
-	// Pipeline skill interception removed — all skills use agent-mode,
-	// selecting from listing and reading SKILL.md via read_file.
-
-	// P3 I2: Wake dream task (cancel any background indexing from previous idle)
 	a.dream.OnWake()
-	// P3 I1: Reset phase detector for fresh run
 	a.phaseDetector.Reset()
 
-	// Reset stale task boundary — new user message = new intent.
-	// Agent will set a fresh boundary via task_boundary tool if needed.
 	func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -117,63 +95,128 @@ func (a *AgentLoop) runInner(ctx context.Context, userMessage string) (runErr er
 	}()
 
 	a.guard.ResetTurn()
-
-	rs := &runState{
-		opts: a.options,
-	}
-
-	for {
-		select {
-		case <-runCtx.Done():
-			return runCtx.Err()
-		case <-a.stopCh:
-			return fmt.Errorf("agent stopped")
-		default:
-		}
-
-		var act loopAction
-		var err error
-
-		switch a.CurrentState() {
-		case StatePrepare:
-			a.doPrepare(runCtx)
-			a.transition(StateGenerate)
-
-		case StateGenerate:
-			act, err = a.handleGenerate(runCtx, rs)
-
-		case StateToolExec:
-			act, err = a.handleToolExec(runCtx, rs)
-
-		case StateGuardCheck:
-			act, err = a.handleGuardCheck(rs)
-
-		case StateCompact:
-			act, err = a.handleCompact(runCtx)
-
-		case StateDone:
-			act, err = a.handleDone(runCtx, rs)
-
-		default:
-			return fmt.Errorf("unexpected state: %s", a.CurrentState())
-		}
-
-		if err != nil {
-			return err
-		}
-		if act == actionReturn {
-			return nil
-		}
-		// actionContinue → re-enter the loop
-	}
 }
 
-func (a *AgentLoop) transition(to State) {
+func (a *AgentLoop) runGraph(ctx context.Context, userMessage string) (runErr error) {
+	runCtx, runCancel := context.WithCancel(ctx)
+	func() { a.mu.Lock(); defer a.mu.Unlock(); a.runCancel = runCancel }()
+	defer func() {
+		runCancel()
+		func() { a.mu.Lock(); defer a.mu.Unlock(); a.runCancel = nil }()
+	}()
+
+	defer a.persistHistory()
+	defer func() {
+		if a.deps.WebhookHook != nil {
+			if runErr != nil {
+				a.deps.WebhookHook.OnError(a.SessionID(), runErr)
+			} else {
+				a.deps.WebhookHook.OnComplete(a.SessionID())
+			}
+		}
+	}()
+
+	a.prepareTurn(userMessage)
+
+	rt, err := NewAgentLoopRuntime(a, a.deps.SnapshotStore)
+	if err != nil {
+		return err
+	}
+
+	turnState := graphruntime.TurnState{
+		RunID:       MakeRunID(a.SessionID(), "chat"),
+		UserMessage: userMessage,
+		Mode:        a.options.Mode,
+	}
+	req := graphruntime.RunRequest{
+		RunID:   turnState.RunID,
+		Session: &graphruntime.SessionState{SessionID: a.SessionID()},
+		Turn:    turnState,
+	}
+	return rt.Run(runCtx, req)
+}
+
+func (a *AgentLoop) resumeGraph(ctx context.Context, runID string) (runErr error) {
+	runCtx, runCancel := context.WithCancel(ctx)
+	func() { a.mu.Lock(); defer a.mu.Unlock(); a.runCancel = runCancel }()
+	defer func() {
+		runCancel()
+		func() { a.mu.Lock(); defer a.mu.Unlock(); a.runCancel = nil }()
+	}()
+
+	defer a.persistHistory()
+	defer func() {
+		if a.deps.WebhookHook != nil {
+			if runErr != nil {
+				a.deps.WebhookHook.OnError(a.SessionID(), runErr)
+			} else {
+				a.deps.WebhookHook.OnComplete(a.SessionID())
+			}
+		}
+	}()
+
+	rt, err := NewAgentLoopRuntime(a, a.deps.SnapshotStore)
+	if err != nil {
+		return err
+	}
+	if err := a.hydratePendingBarrier(runCtx, runID); err != nil {
+		return err
+	}
+	return rt.Resume(runCtx, runID)
+}
+
+func (a *AgentLoop) hydratePendingBarrier(ctx context.Context, runID string) error {
+	if a.deps.SnapshotStore == nil {
+		return nil
+	}
+	snap, err := a.deps.SnapshotStore.LoadLatest(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if snap == nil || snap.ExecutionState.PendingBarrier == nil {
+		a.ClearActiveBarrier()
+		return nil
+	}
+
+	target := snap.ExecutionState.PendingBarrier
+	if existing := a.activeBarrierSnapshot(); existing != nil && existing.ID == target.ID {
+		return nil
+	}
+
+	a.SetActiveBarrier(NewSubagentBarrierFromState(a, func() {
+		a.ClearActiveBarrier()
+		a.SignalWake()
+	}, *target))
+	return nil
+}
+
+func (a *AgentLoop) PendingRunID(ctx context.Context) (string, bool, error) {
+	if a.deps.SnapshotStore == nil {
+		return "", false, nil
+	}
+	snap, err := a.deps.SnapshotStore.LoadLatestBySession(ctx, a.SessionID())
+	if err != nil {
+		return "", false, err
+	}
+	if snap == nil || snap.Status != graphruntime.NodeStatusWait {
+		return "", false, nil
+	}
+	return snap.RunID, true, nil
+}
+
+func (a *AgentLoop) activeBarrierSnapshot() *graphruntime.BarrierState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !CanTransition(a.state, to) {
-		slog.Info(fmt.Sprintf("[loop] WARN: invalid state transition: %s → %s", a.state, to))
+	if a.barrier == nil {
+		return nil
 	}
+	barrier := a.barrier.Snapshot()
+	return &barrier
+}
+
+func (a *AgentLoop) setPhase(to State) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.state = to
 }
 
@@ -514,6 +557,12 @@ func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunO
 		} else if task, err := a.deps.Brain.Read("task.md"); err == nil && task != "" {
 			deps.FocusFile = task
 		}
+	}
+
+	// SubAgent v2: Thread agent definition into prompt deps
+	if opts.AgentDef != nil {
+		deps.AgentType = opts.AgentDef.AgentType
+		deps.AgentSystemPrompt = opts.AgentDef.SystemPrompt
 	}
 
 	return deps

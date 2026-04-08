@@ -438,7 +438,7 @@ You can use specialized 'skills' to help you with complex tasks. Each skill has 
 Skills are folders of instructions, scripts, and resources that extend your capabilities for specialized tasks. Each skill folder contains:
 - SKILL.md (required): The main instruction file with YAML frontmatter (name, description) and detailed markdown instructions
 
-If a skill seems relevant to your current task, you MUST use the read_file tool on the SKILL.md file to read its full instructions before proceeding. Once you have read the instructions, follow them exactly as documented.
+If a skill seems relevant to your current task, invoke it via skill(name="skill-name"). The skill content will be injected into your context automatically. Follow the instructions exactly as documented.
 ```
 
 ---
@@ -547,8 +547,8 @@ Consider using task_plan to record progress in case of context reset.
 ```
 <ephemeral_message>
 The user invoked skill command /{skill_name}.
-Please read the skill file first: {skill_dir}/SKILL.md using read_file
-Then follow the skill instructions exactly.
+Execute: skill(name="{skill_name}")
+The skill content will be injected automatically. Follow the instructions exactly.
 </ephemeral_message>
 ```
 

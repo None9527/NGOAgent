@@ -10,7 +10,7 @@ import (
 type EvoTrace struct {
 	ID            uint   `gorm:"primarykey"`
 	SessionID     string `gorm:"index"`
-	RunIndex      int    // Which run in this session (1, 2, 3...)
+	RunIndex      int    `gorm:"index"` // Which run in this session (1, 2, 3...)
 	Steps         string `gorm:"type:text"` // JSON: []TraceStep (full args + full output)
 	Summary       string `gorm:"type:text"` // LLM-compressed summary (lazy-generated)
 	TokensIn      int    // Total input tokens
@@ -50,6 +50,19 @@ type EvoRepair struct {
 	CreatedAt   time.Time
 }
 
+// EvoToolUsage tracks individual tool calls for aggregation and analytics.
+type EvoToolUsage struct {
+	ID         uint   `gorm:"primarykey"`
+	SessionID  string `gorm:"index"`
+	TraceID    uint   `gorm:"index"`
+	RunIndex   int
+	ToolName   string `gorm:"index"`
+	DurationMs int
+	IsError    bool
+	TokensUsed int
+	CreatedAt  time.Time
+}
+
 // EvoStore provides CRUD operations for evolution data.
 type EvoStore struct {
 	db *gorm.DB
@@ -57,11 +70,11 @@ type EvoStore struct {
 
 // NewEvoStore creates an evolution data store.
 func NewEvoStore(db *gorm.DB) *EvoStore {
-	db.AutoMigrate(&EvoTrace{}, &EvoEvaluation{}, &EvoRepair{})
+	db.AutoMigrate(&EvoTrace{}, &EvoEvaluation{}, &EvoRepair{}, &EvoToolUsage{})
 	return &EvoStore{db: db}
 }
 
-// SaveTrace persists an execution trace.
+// SaveTrace records a new trace.
 func (s *EvoStore) SaveTrace(trace *EvoTrace) error {
 	return s.db.Create(trace).Error
 }
@@ -95,6 +108,27 @@ func (s *EvoStore) GetTraceByID(id uint) (*EvoTrace, error) {
 	return &trace, nil
 }
 
+// GetTraces retrieves all traces for a session, ordered by run index.
+func (s *EvoStore) GetTraces(sessionID string) ([]EvoTrace, error) {
+	var traces []EvoTrace
+	err := s.db.Where("session_id = ?", sessionID).Order("run_index ASC").Find(&traces).Error
+	return traces, err
+}
+
+// GetRecentTraces retrieves the most recent traces across all sessions.
+func (s *EvoStore) GetRecentTraces(limit int) ([]EvoTrace, error) {
+	var traces []EvoTrace
+	err := s.db.Order("created_at DESC").Limit(limit).Find(&traces).Error
+	return traces, err
+}
+
+// GetEvaluations retrieves all evaluations for a session.
+func (s *EvoStore) GetEvaluations(sessionID string) ([]EvoEvaluation, error) {
+	var evals []EvoEvaluation
+	err := s.db.Where("session_id = ?", sessionID).Order("created_at ASC").Find(&evals).Error
+	return evals, err
+}
+
 // CountRepairs returns the number of repair attempts for a session.
 func (s *EvoStore) CountRepairs(sessionID string) int {
 	var count int64
@@ -106,6 +140,10 @@ func (s *EvoStore) CountRepairs(sessionID string) int {
 func (s *EvoStore) CleanOld(days int) error {
 	cutoff := time.Now().AddDate(0, 0, -days)
 	return s.db.Transaction(func(tx *gorm.DB) error {
+		// Clean tool usage first (depends on TraceID)
+		if err := tx.Where("created_at < ?", cutoff).Delete(&EvoToolUsage{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("created_at < ?", cutoff).Delete(&EvoRepair{}).Error; err != nil {
 			return err
 		}

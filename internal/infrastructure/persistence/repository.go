@@ -90,6 +90,10 @@ func (r *Repository) DeleteConversation(id string) error {
 		if err := tx.Where("session_id = ?", id).Delete(&EvoEvaluation{}).Error; err != nil {
 			return err
 		}
+		// 4b. Evo tool usage (must delete before traces due to TraceID FK)
+		if err := tx.Where("session_id = ?", id).Delete(&EvoToolUsage{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("session_id = ?", id).Delete(&EvoTrace{}).Error; err != nil {
 			return err
 		}

@@ -18,6 +18,9 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt"
+
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
+	"github.com/ngoclaw/ngoagent/internal/domain/model"
 )
 
 // ToolExecutor is the interface for executing tools.
@@ -105,10 +108,11 @@ type Deps struct {
 	SkillMgr    SkillLister         // was: *skill.Manager
 
 	// Persistence + Hooks
-	HistoryStore HistoryPersister
-	FileHistory  FileEditTracker // was: *workspace.FileHistory
-	Hooks        *HookManager
-	MemoryStore  MemoryStorer // Vector memory for semantic recall (nil = disabled)
+	HistoryStore  HistoryPersister
+	FileHistory   FileEditTracker // was: *workspace.FileHistory
+	Hooks         *HookManager
+	MemoryStore   MemoryStorer // Vector memory for semantic recall (nil = disabled)
+	SnapshotStore graphruntime.SnapshotStore
 
 	// Evo Mode
 	EvoEvaluator    *EvoEvaluator                               // Quality evaluation engine (nil = disabled)
@@ -172,6 +176,7 @@ type AgentLoop struct {
 	// ── Phase Detection & Dream ──
 	phaseDetector *PhaseDetector
 	dream         *DreamTask
+	barrier       *SubagentBarrier
 
 	// ── Evo State (per-run, reset on new user message) ──
 	evoLastEval      *EvalResult
@@ -188,9 +193,11 @@ type AgentLoop struct {
 
 // RunOptions configure a single run.
 type RunOptions struct {
-	Mode      string // chat / evo
+	Mode      string // chat / evo / subagent
 	Model     string
-	MaxTokens int // P0-A #5: overridable max_tokens for context overflow recovery (0 = use model default)
+	MaxTokens int                    // P0-A #5: overridable max_tokens for context overflow recovery (0 = use model default)
+	AgentType string                 // SubAgent v2: agent type identifier (e.g. "researcher", "code-reviewer")
+	AgentDef  *model.AgentDefinition // SubAgent v2: full agent definition (nil for parent/chat loops)
 }
 
 // NewAgentLoop creates an agent loop with injected dependencies.
@@ -279,6 +286,19 @@ func (a *AgentLoop) GetHistory() []llm.Message {
 	return h
 }
 
+// History is an alias for GetHistory used by the context builder.
+func (a *AgentLoop) History() []llm.Message {
+	return a.GetHistory()
+}
+
+// SetModel overrides the default model for the next LLM call.
+// Used by SubAgent v2 model routing (agentDef.Model override).
+func (a *AgentLoop) SetModel(model string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.options.Model = model
+}
+
 // StripLastTurn removes the last assistant turn (tool + assistant messages)
 // and extracts the last user message content. Used for retry: the frontend
 // re-sends the returned text through the normal ChatStream flow.
@@ -306,18 +326,23 @@ func (a *AgentLoop) StripLastTurn() (string, error) {
 	return lastUser, nil
 }
 
-// CurrentState returns the current state machine state.
-func (a *AgentLoop) CurrentState() State {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.state
-}
-
 // SetDelta replaces the DeltaSink (used by server to inject per-request SSE sink).
 func (a *AgentLoop) SetDelta(d DeltaSink) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.deps.Delta = d
+}
+
+func (a *AgentLoop) SetActiveBarrier(b *SubagentBarrier) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.barrier = b
+}
+
+func (a *AgentLoop) ClearActiveBarrier() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.barrier = nil
 }
 
 // InjectEphemeral adds an ephemeral message to the next LLM call.

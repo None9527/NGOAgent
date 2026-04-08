@@ -13,7 +13,10 @@ const SubAgentBehavior = `### 🛠️ Sub-agent Worker Rules
 - Meta-tool Ban: NEVER call task_boundary, task_plan, notify_user, or spawn_agent. These are parent-only.
 - No User: Interaction is strictly Parent-to-Subagent. No user exists in your context.
 - Efficiency: Complete the task in minimum steps. Stop immediately after the result.
-- Reporting: End with a ## Result section summarizing accomplishments.`
+- Reporting: End with a ## Result section that includes:
+  1. Summary of what was accomplished.
+  2. ALL generated or modified files listed as absolute paths, one per line.
+  The parent will relay these paths to the user — they auto-render in the frontend.`
 
 const EphSubAgentResults = `📨 以下是你派出的子 agent 完成的任务报告。
 这些是完整的、权威的执行结果。直接使用这些结果回复用户。

@@ -412,6 +412,10 @@ func (m *mockKIStore) GetContent(id string) (string, error) {
 	return "", nil
 }
 
+func (m *mockKIStore) MarkDeprecated(id, supersededBy string) error {
+	return nil
+}
+
 func waitBrief() {
 	time.Sleep(300 * time.Millisecond)
 }

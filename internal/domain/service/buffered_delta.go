@@ -68,6 +68,7 @@ func (bd *BufferedDelta) emit(eventType string, data any) {
 
 	// Cap buffer at 5000 events to prevent memory leak on very long runs
 	if len(bd.events) > 5000 {
+		slog.Info(fmt.Sprintf("[delta] Event buffer overflow, truncating oldest %d events", len(bd.events)-5000))
 		bd.events = bd.events[len(bd.events)-5000:]
 	}
 

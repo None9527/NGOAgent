@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 )
@@ -177,6 +178,78 @@ func TestBarrierConcurrentFinalization(t *testing.T) {
 	}
 
 	t.Log("✅ Barrier: concurrent finalization handled correctly")
+}
+
+func TestBarrierSnapshotReflectsMembers(t *testing.T) {
+	loop := &AgentLoop{}
+	b := NewSubagentBarrier(loop, nil)
+	if err := b.Add("run-a", "task a"); err != nil {
+		t.Fatalf("Add run-a error: %v", err)
+	}
+	if err := b.Add("run-b", "task b"); err != nil {
+		t.Fatalf("Add run-b error: %v", err)
+	}
+	b.OnComplete("run-a", "done", nil)
+
+	snap := b.Snapshot()
+	if snap.TotalCount != 2 {
+		t.Fatalf("unexpected total count: %d", snap.TotalCount)
+	}
+	if snap.PendingCount != 1 {
+		t.Fatalf("unexpected pending count: %d", snap.PendingCount)
+	}
+	if snap.CompletedCount != 1 {
+		t.Fatalf("unexpected completed count: %d", snap.CompletedCount)
+	}
+	if snap.Finalized {
+		t.Fatal("barrier should not be finalized yet")
+	}
+	if len(snap.Members) != 2 {
+		t.Fatalf("unexpected members: %#v", snap.Members)
+	}
+	if snap.Members[0].RunID == "" && snap.Members[1].RunID == "" {
+		t.Fatalf("expected member run ids in snapshot: %#v", snap.Members)
+	}
+}
+
+func TestNewSubagentBarrierFromState_RestoresMembers(t *testing.T) {
+	loop := &AgentLoop{}
+	state := graphruntime.BarrierState{
+		ID:             "barrier-restore",
+		TotalCount:     2,
+		PendingCount:   1,
+		CompletedCount: 1,
+		Members: []graphruntime.BarrierMemberState{
+			{
+				RunID:    "run-a",
+				TaskName: "task a",
+				Status:   "completed",
+				Output:   "done",
+			},
+			{
+				RunID:    "run-b",
+				TaskName: "task b",
+				Status:   "failed",
+				Error:    "boom",
+			},
+		},
+	}
+
+	restored := NewSubagentBarrierFromState(loop, nil, state)
+	snap := restored.Snapshot()
+
+	if snap.ID != state.ID {
+		t.Fatalf("unexpected barrier id: %s", snap.ID)
+	}
+	if snap.PendingCount != 1 {
+		t.Fatalf("unexpected pending count: %d", snap.PendingCount)
+	}
+	if len(snap.Members) != 2 {
+		t.Fatalf("unexpected members after restore: %#v", snap.Members)
+	}
+	if snap.Members[1].Error != "boom" {
+		t.Fatalf("expected restored error, got %#v", snap.Members[1])
+	}
 }
 
 // ═══════════════════════════════════════════

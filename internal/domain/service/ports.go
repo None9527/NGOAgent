@@ -10,6 +10,7 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"github.com/ngoclaw/ngoagent/internal/domain/entity"
 	dmodel "github.com/ngoclaw/ngoagent/internal/domain/model"
@@ -91,12 +92,22 @@ type ApprovalTicket struct {
 	Result chan bool // Receives true=approved, false=denied
 }
 
+// ApprovalSnapshot is a serializable view of a pending approval.
+type ApprovalSnapshot struct {
+	ID        string
+	ToolName  string
+	Args      map[string]any
+	Reason    string
+	Requested time.Time
+}
+
 // SecurityChecker provides the tool security decision chain.
 // Implemented by: *security.Hook (via securityAdapter in application/)
 type SecurityChecker interface {
 	BeforeToolCall(ctx context.Context, toolName string, args map[string]any) (SecurityDecision, string)
 	AfterToolCall(ctx context.Context, toolName string, result string, err error)
 	RequestApproval(toolName string, args map[string]any, reason string) *ApprovalTicket
+	ListPendingApprovals() []ApprovalSnapshot
 	CleanupPending(approvalID string)
 }
 

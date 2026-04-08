@@ -8,10 +8,16 @@ import (
 	"path/filepath"
 	"time"
 
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func init() {
+	// Register sqlite-vec extension functions for all future SQLite connections.
+	sqlite_vec.Auto()
+}
 
 // Conversation represents a chat session (sidebar metadata).
 // All other tables reference this via session_id = Conversation.ID.
@@ -19,7 +25,7 @@ type Conversation struct {
 	ID        string `gorm:"primaryKey"`
 	Channel   string `gorm:"index"`
 	Title     string
-	Status    string `gorm:"default:active"` // active / archived
+	Status    string `gorm:"index;default:active"` // active / archived
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

@@ -189,6 +189,21 @@ func (a *securityAdapter) RequestApproval(toolName string, args map[string]any, 
 	}
 }
 
+func (a *securityAdapter) ListPendingApprovals() []service.ApprovalSnapshot {
+	pending := a.hook.ListPending()
+	out := make([]service.ApprovalSnapshot, 0, len(pending))
+	for _, p := range pending {
+		out = append(out, service.ApprovalSnapshot{
+			ID:        p.ID,
+			ToolName:  p.ToolName,
+			Args:      p.Args,
+			Reason:    p.Reason,
+			Requested: p.Created,
+		})
+	}
+	return out
+}
+
 func (a *securityAdapter) CleanupPending(approvalID string) {
 	a.hook.CleanupPending(approvalID)
 }

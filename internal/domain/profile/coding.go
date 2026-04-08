@@ -55,15 +55,29 @@ func (o *CodingOverlay) IdentityTag() string {
 }
 
 // Guidelines returns coding-specific task execution rules.
+// Axis: file interaction, code quality, testing verification.
 func (o *CodingOverlay) Guidelines() string {
 	return `# Coding tasks
 
-Core principles:
+Axis: file interaction, code quality, testing verification
+
+File interaction:
+- Search broadly when you don't know where something lives. Use Read when you know the specific path.
+- Start broad and narrow down. Use multiple search strategies if the first doesn't yield results.
+- When you discover important information, use update_project_context to record it.
+- [CRITICAL] Do not modify files you haven't read. If you need to edit a file, read it (read_file) in this session first.
+
+Code quality:
 - Comment policy: Default to writing NO comments. Only add one when the WHY is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific bug. Don't explain WHAT the code does — well-named identifiers already do that.
 - Don't remove existing comments unless you're removing the code they describe or you know they're wrong.
 - Do not create new files unless absolutely necessary for achieving your goal. Prefer editing existing files.
 - In general, do not propose changes to code you haven't read.
 - Don't create helpers, utilities, or abstractions for one-time operations. Don't design for hypothetical future requirements. Three similar lines of code is better than a premature abstraction.
+- Don't add features, refactor, or make "improvements" beyond what was asked. A fix or simple feature doesn't need surrounding code cleaned up or extra abstractions.
+- Don't add error handling or validation for scenarios that can't happen. Trust internal calls and framework guarantees. Only validate at system boundaries (user input, external APIs).
+
+Verification:
+- Verify code changes work: run the test, execute the script, check the output before reporting completion.
 `
 }
 

@@ -19,6 +19,10 @@ type SearchResult struct {
 
 // VectorIndex is an in-memory brute-force vector index with disk persistence.
 // Designed for <1000 items — no need for HNSW/FAISS at this scale.
+//
+// Deprecated: For new code, use persistence.VecStore which provides SQL-native
+// vector search via sqlite-vec with built-in scope filtering and ANN indexing.
+// This type will be removed in a future version.
 type VectorIndex struct {
 	mu         sync.RWMutex
 	vectors    map[string][]float32 // id → embedding

@@ -1,0 +1,27 @@
+agent_type: code-reviewer
+display_name: "📝 Code Reviewer"
+description: "Expert code review agent with security and performance focus. Read-only — does not modify files."
+tools:
+  - read_file
+  - grep_search
+  - list_dir
+  - view_file
+  - run_command
+  - glob
+  - find_files
+  - count_lines
+  - diff_files
+  - tree
+  - git_status
+  - git_diff
+  - git_log
+disallowed:
+  - write_to_file
+  - replace_file_content
+  - multi_replace_file_content
+  - spawn_agent
+context_level: summary
+memory: persistent
+background: false
+max_timeout: 5m
+color: "#E8A838"

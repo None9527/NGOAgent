@@ -40,7 +40,7 @@ const EphPlanningMode = `### 📝 Planning Mode Protocol
 
 **Mandatory Rules:**
 - First tool call MUST be task_boundary(mode="planning").
-- Read relevant SKILL.md/MCP docs BEFORE planning if they match the task.
+- Load relevant skills via skill(name="X") and check MCP docs BEFORE planning if they match the task.
 - NEVER write code (edit/write_file) before plan is approved.
 - NO sub-agents during PLANNING. Allowed during EXECUTION only.
 - User approvals: "ok/yes/approve" → EXECUTION; "no/reject" → CANCEL; feedback → REVISE.
@@ -55,7 +55,7 @@ const EphPlanningMode = `### 📝 Planning Mode Protocol
 const EphPlanningNoPlanReminder = `Reminder: you are in planning mode but no plan.md exists yet.
 
 Before writing a plan:
-1. Check if any of your available Skills or MCP tools match this task. If yes, read its SKILL.md FIRST.
+1. Check if any of your available Skills or MCP tools match this task. If yes, invoke skill(name="X") FIRST.
 2. Search/list/view files to understand existing code and architecture.
 
 Then create plan.md via task_plan(action=create, type=plan) and call notify_user to pause for approval.`

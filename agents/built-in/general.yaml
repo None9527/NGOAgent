@@ -1,0 +1,17 @@
+agent_type: general
+display_name: "⚡ General Worker"
+description: "General purpose worker for any delegated task"
+tools:
+  - "*"
+disallowed:
+  - spawn_agent
+  - task_boundary
+  - notify_user
+  - task_plan
+  - view_media
+  - save_memory
+context_level: task
+memory: none
+background: false
+max_timeout: 5m
+color: "#7B8794"
