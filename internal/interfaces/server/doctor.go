@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
+	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
 )
 
 // execDoctor runs diagnostic checks and returns a formatted report.
@@ -238,19 +238,11 @@ func (s *Server) execMemory() string {
 
 // execKI lists all Knowledge Items.
 func (s *Server) execKI() string {
-	kiRaw, err := s.api.ListKI()
+	items, err := s.api.ListKI()
 	if err != nil {
 		return "Error: " + err.Error()
 	}
-	// ListKI returns []KIInfo
-	type kiEntry struct {
-		ID      string `json:"id"`
-		Title   string `json:"title"`
-		Summary string `json:"summary"`
-	}
-	data, _ := json.Marshal(kiRaw)
-	var items []kiEntry
-	json.Unmarshal(data, &items) // best-effort: data from our own json.Marshal above
+	items = kiSummariesFromItems(items)
 
 	if len(items) == 0 {
 		return "📚 No Knowledge Items stored."
@@ -267,6 +259,10 @@ func (s *Server) execKI() string {
 		b.WriteString(fmt.Sprintf("  📖 %s\n     %s\n\n", ki.Title, summary))
 	}
 	return b.String()
+}
+
+func kiSummariesFromItems(items []apitype.KIInfo) []apitype.KIInfo {
+	return items
 }
 
 // execTools lists all registered tools and their enabled status.

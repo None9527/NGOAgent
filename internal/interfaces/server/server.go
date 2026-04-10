@@ -31,6 +31,9 @@ type API interface {
 	StopRun(sessionID string)
 	RetryRun(ctx context.Context, sessionID string) (string, error)
 	Approve(approvalID string, approved bool) error
+	ApplyDecision(ctx context.Context, sessionID, kind, decision, feedback string) error
+	ResumeRun(ctx context.Context, sessionID, runID string) error
+	ApplyRuntimeIngress(ctx context.Context, req apitype.RuntimeIngressRequest) (apitype.RuntimeIngressResponse, error)
 
 	// Session
 	NewSession(title string) apitype.SessionResponse
@@ -60,14 +63,14 @@ type API interface {
 	ListTools() []apitype.ToolInfoResponse
 	EnableTool(name string) error
 	DisableTool(name string) error
-	ListSkills() (any, error)
+	ListSkills() ([]apitype.SkillInfoResponse, error)
 	ReadSkillContent(name string) (string, error)
 	RefreshSkills() error
 	DeleteSkill(name string) error
 
 	// MCP
-	ListMCPServers() (any, error)
-	ListMCPTools() (any, error)
+	ListMCPServers() ([]apitype.MCPServerInfo, error)
+	ListMCPTools() ([]apitype.MCPToolInfo, error)
 
 	// Status
 	Health() apitype.HealthResponse
@@ -77,13 +80,13 @@ type API interface {
 	CronStatus() map[string]any
 
 	// Cron management
-	ListCronJobs() (any, error)
+	ListCronJobs() ([]apitype.CronJobInfo, error)
 	CreateCronJob(name, schedule, prompt string) error
 	DeleteCronJob(name string) error
 	EnableCronJob(name string) error
 	DisableCronJob(name string) error
 	RunCronJobNow(name string) error
-	ListCronLogs(jobName string) (any, error)
+	ListCronLogs(jobName string) ([]apitype.CronLogInfo, error)
 	ReadCronLog(jobName, logFile string) (string, error)
 
 	// Brain artifacts
@@ -91,11 +94,18 @@ type API interface {
 	ReadBrainArtifact(sessionID, name string) (string, error)
 
 	// KI management
-	ListKI() (any, error)
-	GetKI(id string) (any, error)
+	ListKI() ([]apitype.KIInfo, error)
+	GetKI(id string) (apitype.KIDetailResponse, error)
 	DeleteKI(id string) error
 	ListKIArtifacts(id string) ([]apitype.BrainArtifactInfo, error)
 	ReadKIArtifact(id, name string) (string, error)
+
+	// Runtime / orchestration
+	ListRuntimeRuns(ctx context.Context, sessionID string) ([]apitype.RuntimeRunInfo, error)
+	ListPendingRuns(ctx context.Context, sessionID string) ([]apitype.RuntimeRunInfo, error)
+	ListPendingDecisions(ctx context.Context, sessionID string) ([]apitype.RuntimeRunInfo, error)
+	ListRuntimeGraph(ctx context.Context, sessionID string) (apitype.OrchestrationGraphInfo, error)
+	ListChildRuns(ctx context.Context, parentRunID string) ([]apitype.RuntimeRunInfo, error)
 
 	// P2 H2: Token usage persistence
 	GetSessionCost(sessionID string) (map[string]any, error)

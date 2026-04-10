@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
+	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
 )
 
 // registerAPIRoutes registers all REST API routes on the given mux.
@@ -42,7 +43,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			return
 		}
 		s.api.SetSessionTitle(req.ID, req.Title)
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": req.ID, "title": req.Title})
+		json.NewEncoder(w).Encode(apitype.StatusIDResponse{Status: "ok", ID: req.ID})
 	})
 
 	mux.HandleFunc("/api/v1/session/delete", func(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +59,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+		json.NewEncoder(w).Encode(apitype.StatusResponse{Status: "deleted"})
 	})
 
 	// ─── History ───
@@ -70,7 +71,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"messages": msgs})
+		json.NewEncoder(w).Encode(apitype.MessageListResponse{Messages: msgs})
 	})
 
 	mux.HandleFunc("/api/v1/history/clear", func(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +80,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			return
 		}
 		s.api.ClearHistory()
-		json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
+		json.NewEncoder(w).Encode(apitype.StatusResponse{Status: "cleared"})
 	})
 
 	mux.HandleFunc("/api/v1/history/compact", func(w http.ResponseWriter, r *http.Request) {
@@ -88,13 +89,153 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			return
 		}
 		s.api.CompactContext()
-		json.NewEncoder(w).Encode(map[string]string{"status": "compacted"})
+		json.NewEncoder(w).Encode(apitype.StatusResponse{Status: "compacted"})
+	})
+
+	// ─── Runtime / Orchestration ───
+
+	mux.HandleFunc("/api/v1/runtime/runs", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			http.Error(w, "session_id required", http.StatusBadRequest)
+			return
+		}
+		runs, err := s.api.ListRuntimeRuns(r.Context(), sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(apitype.RuntimeRunListResponse{Runs: runs})
+	})
+
+	mux.HandleFunc("/api/v1/runtime/graph", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			http.Error(w, "session_id required", http.StatusBadRequest)
+			return
+		}
+		graph, err := s.api.ListRuntimeGraph(r.Context(), sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(graph)
+	})
+
+	mux.HandleFunc("/api/v1/runtime/runs/pending", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			http.Error(w, "session_id required", http.StatusBadRequest)
+			return
+		}
+		runs, err := s.api.ListPendingRuns(r.Context(), sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(apitype.RuntimeRunListResponse{Runs: runs})
+	})
+
+	mux.HandleFunc("/api/v1/runtime/decisions/pending", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			http.Error(w, "session_id required", http.StatusBadRequest)
+			return
+		}
+		runs, err := s.api.ListPendingDecisions(r.Context(), sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(apitype.RuntimeRunListResponse{Runs: runs})
+	})
+
+	mux.HandleFunc("/api/v1/runtime/runs/children", func(w http.ResponseWriter, r *http.Request) {
+		parentRunID := r.URL.Query().Get("parent_run_id")
+		if parentRunID == "" {
+			http.Error(w, "parent_run_id required", http.StatusBadRequest)
+			return
+		}
+		runs, err := s.api.ListChildRuns(r.Context(), parentRunID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(apitype.RuntimeRunListResponse{Runs: runs})
+	})
+
+	mux.HandleFunc("/api/v1/runtime/runs/resume", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		req, err := decodeRuntimeResumeRequest(r)
+		if err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if req.SessionID == "" {
+			http.Error(w, "session_id required", http.StatusBadRequest)
+			return
+		}
+		if err := s.api.ResumeRun(r.Context(), req.SessionID, resolvedRuntimeRunID(req)); err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		json.NewEncoder(w).Encode(apitype.RuntimeResumeResponse{
+			Status:    "resumed",
+			SessionID: req.SessionID,
+			Run:       apitype.RuntimeRunTarget{RunID: resolvedRuntimeRunID(req)},
+		})
+	})
+
+	mux.HandleFunc("/api/v1/runtime/decision/apply", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		req, err := decodeRuntimeDecisionApplyRequest(r)
+		if err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if req.SessionID == "" || req.Decision.Decision == "" {
+			http.Error(w, "session_id and decision required", http.StatusBadRequest)
+			return
+		}
+		if err := s.api.ApplyDecision(r.Context(), req.SessionID, req.Decision.Kind, req.Decision.Decision, req.Decision.Feedback); err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		json.NewEncoder(w).Encode(apitype.RuntimeDecisionApplyResponse{
+			Status:    "applied",
+			SessionID: req.SessionID,
+			Decision:  req.Decision,
+		})
+	})
+
+	mux.HandleFunc("/api/v1/runtime/ingress", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		req, err := decodeRuntimeIngressRequest(r)
+		if err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		resp, err := s.api.ApplyRuntimeIngress(r.Context(), req)
+		if err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	// ─── Tools ───
 
 	mux.HandleFunc("/api/v1/tools", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"tools": s.api.ListTools()})
+		json.NewEncoder(w).Encode(apitype.ToolListResponse{Tools: s.api.ListTools()})
 	})
 
 	mux.HandleFunc("/api/v1/tools/enable", func(w http.ResponseWriter, r *http.Request) {
@@ -110,7 +251,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "enabled", "tool": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusToolResponse{Status: "enabled", Tool: req.Name})
 	})
 
 	mux.HandleFunc("/api/v1/tools/disable", func(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +267,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "disabled", "tool": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusToolResponse{Status: "disabled", Tool: req.Name})
 	})
 
 	mux.HandleFunc("/api/v1/skills/list", func(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +276,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"skills": skills})
+		json.NewEncoder(w).Encode(apitype.SkillListResponse{Skills: skills})
 	})
 
 	mux.HandleFunc("/api/v1/skills/read", func(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +290,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"name": name, "content": content})
+		json.NewEncoder(w).Encode(apitype.SkillContentResponse{Name: name, Content: content})
 	})
 
 	mux.HandleFunc("/api/v1/skills/refresh", func(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +302,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "refreshed"})
+		json.NewEncoder(w).Encode(apitype.StatusResponse{Status: "refreshed"})
 	})
 
 	mux.HandleFunc("/api/v1/skills/delete", func(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +321,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "name": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusNameResponse{Status: "deleted", Name: req.Name})
 	})
 
 	// ─── MCP ───
@@ -191,7 +332,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"servers": servers})
+		json.NewEncoder(w).Encode(apitype.ServerListResponse{Servers: servers})
 	})
 
 	mux.HandleFunc("/api/v1/mcp/tools", func(w http.ResponseWriter, r *http.Request) {
@@ -200,7 +341,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"tools": tools})
+		json.NewEncoder(w).Encode(apitype.MCPToolListResponse{Tools: tools})
 	})
 
 	// ─── Config set ───
@@ -226,7 +367,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"status": "ok", "key": req.Key, "value": req.Value})
+		json.NewEncoder(w).Encode(apitype.StatusKeyValueResponse{Status: "ok", Key: req.Key, Value: req.Value})
 	})
 
 	// ─── Provider management ───
@@ -245,7 +386,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "added", "provider": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusProviderResponse{Status: "added", Provider: req.Name})
 	})
 
 	mux.HandleFunc("/api/v1/config/provider/remove", func(w http.ResponseWriter, r *http.Request) {
@@ -264,7 +405,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "removed", "provider": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusProviderResponse{Status: "removed", Provider: req.Name})
 	})
 
 	// ─── MCP management ───
@@ -283,7 +424,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "added", "mcp_server": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusMCPServerResponse{Status: "added", MCPServer: req.Name})
 	})
 
 	mux.HandleFunc("/api/v1/config/mcp/remove", func(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +443,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "removed", "mcp_server": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusMCPServerResponse{Status: "removed", MCPServer: req.Name})
 	})
 
 	// ─── Security ───
@@ -330,7 +471,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"artifacts": files})
+		json.NewEncoder(w).Encode(apitype.ArtifactListResponse{Artifacts: files})
 	})
 
 	mux.HandleFunc("/api/v1/brain/read", func(w http.ResponseWriter, r *http.Request) {
@@ -341,7 +482,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"name": name, "content": content})
+		json.NewEncoder(w).Encode(apitype.SkillContentResponse{Name: name, Content: content})
 	})
 
 	// ─── KI (Knowledge Items) ───
@@ -352,7 +493,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"items": items})
+		json.NewEncoder(w).Encode(apitype.KIItemListResponse{Items: items})
 	})
 
 	mux.HandleFunc("/api/v1/ki/get", func(w http.ResponseWriter, r *http.Request) {
@@ -378,7 +519,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+		json.NewEncoder(w).Encode(apitype.StatusResponse{Status: "deleted"})
 	})
 
 	mux.HandleFunc("/api/v1/ki/artifacts", func(w http.ResponseWriter, r *http.Request) {
@@ -388,7 +529,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"artifacts": files})
+		json.NewEncoder(w).Encode(apitype.ArtifactListResponse{Artifacts: files})
 	})
 
 	mux.HandleFunc("/api/v1/ki/artifact/read", func(w http.ResponseWriter, r *http.Request) {
@@ -399,7 +540,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"name": name, "content": content})
+		json.NewEncoder(w).Encode(apitype.SkillContentResponse{Name: name, Content: content})
 	})
 
 	// ─── Cron management ───
@@ -410,7 +551,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"jobs": jobs})
+		json.NewEncoder(w).Encode(apitype.CronJobListResponse{Jobs: jobs})
 	})
 
 	mux.HandleFunc("/api/v1/cron/create", func(w http.ResponseWriter, r *http.Request) {
@@ -435,7 +576,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "created", "name": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusNameResponse{Status: "created", Name: req.Name})
 	})
 
 	mux.HandleFunc("/api/v1/cron/delete", func(w http.ResponseWriter, r *http.Request) {
@@ -451,7 +592,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+		json.NewEncoder(w).Encode(apitype.StatusResponse{Status: "deleted"})
 	})
 
 	mux.HandleFunc("/api/v1/cron/enable", func(w http.ResponseWriter, r *http.Request) {
@@ -467,7 +608,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "enabled", "name": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusNameResponse{Status: "enabled", Name: req.Name})
 	})
 
 	mux.HandleFunc("/api/v1/cron/disable", func(w http.ResponseWriter, r *http.Request) {
@@ -483,7 +624,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "disabled", "name": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusNameResponse{Status: "disabled", Name: req.Name})
 	})
 
 	mux.HandleFunc("/api/v1/cron/run", func(w http.ResponseWriter, r *http.Request) {
@@ -499,7 +640,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "triggered", "name": req.Name})
+		json.NewEncoder(w).Encode(apitype.StatusNameResponse{Status: "triggered", Name: req.Name})
 	})
 
 	mux.HandleFunc("/api/v1/cron/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -513,7 +654,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"logs": logs})
+		json.NewEncoder(w).Encode(apitype.CronLogListResponse{Logs: logs})
 	})
 
 	mux.HandleFunc("/api/v1/cron/log/read", func(w http.ResponseWriter, r *http.Request) {
@@ -528,6 +669,6 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"file": file, "content": content})
+		json.NewEncoder(w).Encode(apitype.FileContentResponse{File: file, Content: content})
 	})
 }

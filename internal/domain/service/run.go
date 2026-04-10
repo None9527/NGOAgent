@@ -46,10 +46,13 @@ func (a *AgentLoop) RunWithoutAcquire(ctx context.Context, userMessage string) e
 }
 
 func (a *AgentLoop) runEntry(ctx context.Context, userMessage string) error {
-	if a.deps.SnapshotStore != nil && userMessage == "" {
-		if snap, err := a.deps.SnapshotStore.LoadLatestBySession(ctx, a.SessionID()); err == nil && snap != nil && snap.Status == graphruntime.NodeStatusWait {
-			return a.resumeGraph(ctx, snap.RunID)
+	if userMessage == "" {
+		if handled, err := a.HandleReconnect(ctx); err != nil {
+			return err
+		} else if handled {
+			return nil
 		}
+		return fmt.Errorf("no pending execution for session %s", a.SessionID())
 	}
 	return a.runGraph(ctx, userMessage)
 }
@@ -65,7 +68,6 @@ func (a *AgentLoop) prepareTurn(userMessage string) {
 		default:
 		}
 		a.history = append(a.history, a.buildUserMessage(userMessage))
-		a.state = StatePrepare
 	}()
 
 	// Persist the user message immediately so that UI refreshes during a long LLM generation
@@ -88,10 +90,13 @@ func (a *AgentLoop) prepareTurn(userMessage string) {
 	func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		a.task.BoundaryTaskName = ""
-		a.task.BoundaryStatus = ""
-		a.task.BoundarySummary = ""
+		a.task.Name = ""
+		a.task.Mode = ""
+		a.task.PreviousMode = ""
+		a.task.Status = ""
+		a.task.Summary = ""
 		a.task.StepsSinceUpdate = 0
+		a.task.YieldRequested = false
 	}()
 
 	a.guard.ResetTurn()
@@ -128,6 +133,7 @@ func (a *AgentLoop) runGraph(ctx context.Context, userMessage string) (runErr er
 		UserMessage: userMessage,
 		Mode:        a.options.Mode,
 	}
+	runCtx = ctxutil.WithRunID(runCtx, turnState.RunID)
 	req := graphruntime.RunRequest{
 		RunID:   turnState.RunID,
 		Session: &graphruntime.SessionState{SessionID: a.SessionID()},
@@ -159,6 +165,7 @@ func (a *AgentLoop) resumeGraph(ctx context.Context, runID string) (runErr error
 	if err != nil {
 		return err
 	}
+	runCtx = ctxutil.WithRunID(runCtx, runID)
 	if err := a.hydratePendingBarrier(runCtx, runID); err != nil {
 		return err
 	}
@@ -173,12 +180,13 @@ func (a *AgentLoop) hydratePendingBarrier(ctx context.Context, runID string) err
 	if err != nil {
 		return err
 	}
-	if snap == nil || snap.ExecutionState.PendingBarrier == nil {
+	wait := newWaitSnapshotView(snap)
+	target := wait.hydratableBarrier()
+	if target == nil {
 		a.ClearActiveBarrier()
 		return nil
 	}
 
-	target := snap.ExecutionState.PendingBarrier
 	if existing := a.activeBarrierSnapshot(); existing != nil && existing.ID == target.ID {
 		return nil
 	}
@@ -190,18 +198,274 @@ func (a *AgentLoop) hydratePendingBarrier(ctx context.Context, runID string) err
 	return nil
 }
 
-func (a *AgentLoop) PendingRunID(ctx context.Context) (string, bool, error) {
+func (a *AgentLoop) RestorePendingApproval(ctx context.Context, approvalID string) (bool, error) {
+	if approvalID == "" || a.deps.SnapshotStore == nil || a.deps.Security == nil {
+		return false, nil
+	}
+
+	wait, err := a.latestWaitSnapshotView(ctx)
+	if err != nil {
+		return false, err
+	}
+	snap := wait.approvalSnapshot(approvalID)
+	if snap == nil {
+		return false, nil
+	}
+
+	a.deps.Security.RestorePendingApproval(ApprovalSnapshot{
+		ID:        snap.ExecutionState.PendingApproval.ID,
+		ToolName:  snap.ExecutionState.PendingApproval.ToolName,
+		Args:      cloneMap(snap.ExecutionState.PendingApproval.Args),
+		Reason:    snap.ExecutionState.PendingApproval.Reason,
+		Requested: snap.ExecutionState.PendingApproval.RequestedAt,
+	})
+	return true, nil
+}
+
+func (a *AgentLoop) ApprovePending(ctx context.Context, approvalID string, approved bool) (bool, error) {
+	if approvalID == "" || a.deps.Security == nil {
+		return false, nil
+	}
+
+	if err := a.deps.Security.ResolvePendingApproval(approvalID, approved); err == nil {
+		return true, a.finalizePendingApproval(ctx, approvalID)
+	} else if restored, restoreErr := a.RestorePendingApproval(ctx, approvalID); restoreErr != nil {
+		return false, restoreErr
+	} else if !restored {
+		return false, nil
+	}
+
+	if err := a.deps.Security.ResolvePendingApproval(approvalID, approved); err != nil {
+		return false, err
+	}
+	return true, a.finalizePendingApproval(ctx, approvalID)
+}
+
+func (a *AgentLoop) finalizePendingApproval(ctx context.Context, approvalID string) error {
+	a.deps.Security.CleanupPending(approvalID)
+	_, err := a.ClearPendingApprovalSnapshot(ctx, approvalID)
+	return err
+}
+
+func (a *AgentLoop) HandleReconnect(ctx context.Context) (bool, error) {
+	wait, err := a.latestWaitSnapshotView(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	switch wait.reconnectAction() {
+	case reconnectActionResumeBarrier:
+		runID, _ := wait.autoResumeRunID()
+		slog.Info(fmt.Sprintf("[session] Resuming pending run %s for session %s", runID, a.SessionID()))
+		return true, a.resumeGraph(ctx, runID)
+	case reconnectActionReplayApproval:
+		return wait.emitApprovalRequest(a.deps.Delta), nil
+	case reconnectActionReplayPlan:
+		return wait.emitPlanReview(a.deps.Delta), nil
+	}
+
+	return false, nil
+}
+
+func (a *AgentLoop) ClearPendingApprovalSnapshot(ctx context.Context, approvalID string) (bool, error) {
+	if approvalID == "" || a.deps.SnapshotStore == nil {
+		return false, nil
+	}
+
+	wait, err := a.latestWaitSnapshotView(ctx)
+	if err != nil {
+		return false, err
+	}
+	snap := wait.approvalSnapshot(approvalID)
+	if snap == nil {
+		return false, nil
+	}
+
+	snap.ExecutionState.PendingApproval = nil
+	snap.ExecutionState.WaitReason = graphruntime.WaitReasonNone
+	snap.UpdatedAt = time.Now()
+	return true, a.deps.SnapshotStore.Save(ctx, snap)
+}
+
+func (a *AgentLoop) ReviewPendingPlan(ctx context.Context, approved bool, feedback string) (bool, error) {
+	decision := "revise"
+	if approved {
+		decision = "approved"
+	}
+	return a.ApplyPendingDecision(ctx, string(graphruntime.DecisionKindPlanReview), decision, feedback)
+}
+
+func (a *AgentLoop) ResumeRun(ctx context.Context, runID string) (bool, error) {
 	if a.deps.SnapshotStore == nil {
-		return "", false, nil
+		return false, nil
+	}
+
+	runID = strings.TrimSpace(runID)
+	if runID != "" {
+		snap, err := a.deps.SnapshotStore.LoadLatest(ctx, runID)
+		if err != nil {
+			return false, err
+		}
+		if snap == nil || snap.SessionID != a.SessionID() {
+			return false, nil
+		}
+		return true, a.resumeGraph(ctx, runID)
+	}
+
+	snap, err := a.latestWaitSnapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	if snap == nil {
+		return false, nil
+	}
+	return true, a.resumeGraph(ctx, snap.RunID)
+}
+
+func (a *AgentLoop) latestWaitSnapshot(ctx context.Context) (*graphruntime.RunSnapshot, error) {
+	if a.deps.SnapshotStore == nil {
+		return nil, nil
 	}
 	snap, err := a.deps.SnapshotStore.LoadLatestBySession(ctx, a.SessionID())
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	if snap == nil || snap.Status != graphruntime.NodeStatusWait {
-		return "", false, nil
+		return nil, nil
 	}
-	return snap.RunID, true, nil
+	return snap, nil
+}
+
+func (a *AgentLoop) latestWaitSnapshotView(ctx context.Context) (waitSnapshotView, error) {
+	snap, err := a.latestWaitSnapshot(ctx)
+	if err != nil {
+		return waitSnapshotView{}, err
+	}
+	return newWaitSnapshotView(snap), nil
+}
+
+type waitSnapshotKind string
+type reconnectAction string
+
+const (
+	waitSnapshotNone     waitSnapshotKind = ""
+	waitSnapshotApproval waitSnapshotKind = "approval"
+	waitSnapshotBarrier  waitSnapshotKind = "barrier"
+	waitSnapshotPlan     waitSnapshotKind = "plan_review"
+	waitSnapshotOther    waitSnapshotKind = "other"
+
+	reconnectActionNone           reconnectAction = ""
+	reconnectActionReplayApproval reconnectAction = "replay_approval"
+	reconnectActionReplayPlan     reconnectAction = "replay_plan_review"
+	reconnectActionResumeBarrier  reconnectAction = "resume_barrier"
+)
+
+type waitSnapshotView struct {
+	snapshot *graphruntime.RunSnapshot
+}
+
+func newWaitSnapshotView(snap *graphruntime.RunSnapshot) waitSnapshotView {
+	return waitSnapshotView{snapshot: snap}
+}
+
+func (w waitSnapshotView) kind() waitSnapshotKind {
+	if w.snapshot == nil || w.snapshot.Status != graphruntime.NodeStatusWait {
+		return waitSnapshotNone
+	}
+	switch w.snapshot.ExecutionState.WaitReason {
+	case graphruntime.WaitReasonApproval:
+		return waitSnapshotApproval
+	case graphruntime.WaitReasonBarrier:
+		return waitSnapshotBarrier
+	case graphruntime.WaitReasonUserInput:
+		if w.snapshot.TurnState.Intelligence.Planning.Required && w.snapshot.TurnState.Intelligence.Planning.ReviewRequired {
+			return waitSnapshotPlan
+		}
+		return waitSnapshotOther
+	case graphruntime.WaitReasonNone:
+		return waitSnapshotNone
+	default:
+		return waitSnapshotOther
+	}
+}
+
+func (w waitSnapshotView) approvalSnapshot(approvalID string) *graphruntime.RunSnapshot {
+	if w.kind() != waitSnapshotApproval || w.snapshot.ExecutionState.PendingApproval == nil {
+		return nil
+	}
+	if approvalID != "" && w.snapshot.ExecutionState.PendingApproval.ID != approvalID {
+		return nil
+	}
+	return w.snapshot
+}
+
+func (w waitSnapshotView) planSnapshot() *graphruntime.RunSnapshot {
+	if w.kind() != waitSnapshotPlan {
+		return nil
+	}
+	return w.snapshot
+}
+
+func (w waitSnapshotView) hydratableBarrier() *graphruntime.BarrierState {
+	if w.kind() != waitSnapshotBarrier || w.snapshot.ExecutionState.PendingWake {
+		return nil
+	}
+	return w.snapshot.ExecutionState.PendingBarrier
+}
+
+func (w waitSnapshotView) autoResumeRunID() (string, bool) {
+	if w.kind() != waitSnapshotBarrier || !w.snapshot.ExecutionState.PendingWake {
+		return "", false
+	}
+	return w.snapshot.RunID, true
+}
+
+func (w waitSnapshotView) replaysApprovalOnReconnect() bool {
+	return w.kind() == waitSnapshotApproval && w.snapshot.ExecutionState.PendingApproval != nil
+}
+
+func (w waitSnapshotView) reconnectAction() reconnectAction {
+	if _, ok := w.autoResumeRunID(); ok {
+		return reconnectActionResumeBarrier
+	}
+	if w.replaysApprovalOnReconnect() {
+		return reconnectActionReplayApproval
+	}
+	if w.replaysPlanReviewOnReconnect() {
+		return reconnectActionReplayPlan
+	}
+	return reconnectActionNone
+}
+
+func (w waitSnapshotView) emitApprovalRequest(delta DeltaSink) bool {
+	if !w.replaysApprovalOnReconnect() || delta == nil {
+		return false
+	}
+	pending := w.snapshot.ExecutionState.PendingApproval
+	delta.OnApprovalRequest(
+		pending.ID,
+		pending.ToolName,
+		cloneMap(pending.Args),
+		pending.Reason,
+	)
+	return true
+}
+
+func (w waitSnapshotView) replaysPlanReviewOnReconnect() bool {
+	return w.kind() == waitSnapshotPlan && strings.TrimSpace(w.snapshot.TurnState.Intelligence.Planning.ReviewDecision) == ""
+}
+
+func (w waitSnapshotView) emitPlanReview(delta DeltaSink) bool {
+	if !w.replaysPlanReviewOnReconnect() || delta == nil {
+		return false
+	}
+	planning := w.snapshot.TurnState.Intelligence.Planning
+	message := "Planning review required before execution"
+	if planning.Trigger != "" {
+		message = "Planning trigger: " + planning.Trigger
+	}
+	delta.OnPlanReview(message, append([]string(nil), planning.MissingArtifacts...))
+	return true
 }
 
 func (a *AgentLoop) activeBarrierSnapshot() *graphruntime.BarrierState {
@@ -214,10 +478,12 @@ func (a *AgentLoop) activeBarrierSnapshot() *graphruntime.BarrierState {
 	return &barrier
 }
 
-func (a *AgentLoop) setPhase(to State) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.state = to
+func (a *AgentLoop) transitionTo(next State, route string) graphruntime.NodeResult {
+	return graphruntime.NodeResult{RouteKey: route, ObservedState: next.String()}
+}
+
+func (a *AgentLoop) finishWith(observed State, status graphruntime.NodeStatus) graphruntime.NodeResult {
+	return graphruntime.NodeResult{Status: status, ObservedState: observed.String()}
 }
 
 // doPrepare and shouldInjectPlanning are in prepare.go

@@ -57,14 +57,14 @@ type API interface {
 	ListTools() []apitype.ToolInfoResponse
 	EnableTool(name string) error
 	DisableTool(name string) error
-	ListSkills() (any, error)
+	ListSkills() ([]apitype.SkillInfoResponse, error)
 	ReadSkillContent(name string) (string, error)
 	RefreshSkills() error
 	DeleteSkill(name string) error
 
 	// MCP
-	ListMCPServers() (any, error)
-	ListMCPTools() (any, error)
+	ListMCPServers() ([]apitype.MCPServerInfo, error)
+	ListMCPTools() ([]apitype.MCPToolInfo, error)
 
 	// Status
 	Health() apitype.HealthResponse
@@ -74,13 +74,13 @@ type API interface {
 	CronStatus() map[string]any
 
 	// Cron management
-	ListCronJobs() (any, error)
+	ListCronJobs() ([]apitype.CronJobInfo, error)
 	CreateCronJob(name, schedule, prompt string) error
 	DeleteCronJob(name string) error
 	EnableCronJob(name string) error
 	DisableCronJob(name string) error
 	RunCronJobNow(name string) error
-	ListCronLogs(jobName string) (any, error)
+	ListCronLogs(jobName string) ([]apitype.CronLogInfo, error)
 	ReadCronLog(jobName, logFile string) (string, error)
 
 	// Brain artifacts
@@ -88,8 +88,8 @@ type API interface {
 	ReadBrainArtifact(sessionID, name string) (string, error)
 
 	// KI management
-	ListKI() (any, error)
-	GetKI(id string) (any, error)
+	ListKI() ([]apitype.KIInfo, error)
+	GetKI(id string) (apitype.KIDetailResponse, error)
 	DeleteKI(id string) error
 	ListKIArtifacts(id string) ([]apitype.BrainArtifactInfo, error)
 	ReadKIArtifact(id, name string) (string, error)
@@ -332,18 +332,13 @@ func (s *Server) DisableTool(_ context.Context, req *pb.StringValueRequest) (*pb
 }
 
 func (s *Server) ListSkills(_ context.Context, _ *pb.EmptyRequest) (*pb.ListSkillsResponse, error) {
-	skillsRaw, err := s.api.ListSkills()
+	skills, err := s.api.ListSkills()
 	if err != nil {
 		return nil, err
 	}
-	data, _ := json.Marshal(skillsRaw)
-	var skills []struct {
-		Name string `json:"name"`
-	}
-	json.Unmarshal(data, &skills) //nolint:errcheck — self-marshalled data
 	items := make([]*pb.SkillItem, len(skills))
 	for i, sk := range skills {
-		items[i] = &pb.SkillItem{Name: sk.Name, Enabled: true}
+		items[i] = &pb.SkillItem{Name: sk.Name, Enabled: sk.Enabled}
 	}
 	return &pb.ListSkillsResponse{Skills: items}, nil
 }
@@ -402,20 +397,17 @@ func (s *Server) SetConfigValue(_ context.Context, req *pb.SetConfigValueRequest
 // ═══════════════════════════════════════════
 
 func (s *Server) ListMCPServers(_ context.Context, _ *pb.EmptyRequest) (*pb.ListMCPServersResponse, error) {
-	serversRaw, err := s.api.ListMCPServers()
+	servers, err := s.api.ListMCPServers()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	data, _ := json.Marshal(serversRaw)
-	var servers []struct {
-		Name   string `json:"name"`
-		Status string `json:"status"`
-		Tools  int    `json:"tool_count"`
-	}
-	json.Unmarshal(data, &servers) //nolint:errcheck — self-marshalled data
 	items := make([]*pb.MCPServerItem, len(servers))
 	for i, srv := range servers {
-		items[i] = &pb.MCPServerItem{Name: srv.Name, Status: srv.Status, ToolCount: int32(srv.Tools)}
+		statusText := "stopped"
+		if srv.Running {
+			statusText = "running"
+		}
+		items[i] = &pb.MCPServerItem{Name: srv.Name, Status: statusText}
 	}
 	return &pb.ListMCPServersResponse{Servers: items}, nil
 }
@@ -436,19 +428,13 @@ func (s *Server) RemoveMCPServer(_ context.Context, req *pb.StringValueRequest) 
 }
 
 func (s *Server) GetMCPServerTools(_ context.Context, _ *pb.StringValueRequest) (*pb.ListToolsInfoResponse, error) {
-	toolsRaw, err := s.api.ListMCPTools()
+	tools, err := s.api.ListMCPTools()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	data, _ := json.Marshal(toolsRaw)
-	var tools []struct {
-		Name    string `json:"name"`
-		Enabled bool   `json:"enabled"`
-	}
-	json.Unmarshal(data, &tools) //nolint:errcheck — self-marshalled data
 	items := make([]*pb.ToolInfoItem, len(tools))
 	for i, t := range tools {
-		items[i] = &pb.ToolInfoItem{Name: t.Name, Enabled: t.Enabled, Source: "mcp"}
+		items[i] = &pb.ToolInfoItem{Name: t.Name, Enabled: true, Source: t.Server}
 	}
 	return &pb.ListToolsInfoResponse{Tools: items}, nil
 }
@@ -458,20 +444,10 @@ func (s *Server) GetMCPServerTools(_ context.Context, _ *pb.StringValueRequest) 
 // ═══════════════════════════════════════════
 
 func (s *Server) ListCronJobs(_ context.Context, _ *pb.EmptyRequest) (*pb.CronJobsResponse, error) {
-	jobsRaw, err := s.api.ListCronJobs()
+	jobs, err := s.api.ListCronJobs()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	data, _ := json.Marshal(jobsRaw)
-	var jobs []struct {
-		Name      string `json:"name"`
-		Schedule  string `json:"schedule"`
-		Prompt    string `json:"prompt"`
-		Enabled   bool   `json:"enabled"`
-		RunCount  int    `json:"run_count"`
-		FailCount int    `json:"fail_count"`
-	}
-	json.Unmarshal(data, &jobs) //nolint:errcheck — self-marshalled data
 	items := make([]*pb.CronJobItem, len(jobs))
 	for i, j := range jobs {
 		items[i] = &pb.CronJobItem{
@@ -522,20 +498,13 @@ func (s *Server) CronRunNow(_ context.Context, req *pb.StringValueRequest) (*pb.
 // ═══════════════════════════════════════════
 
 func (s *Server) ListCronLogs(_ context.Context, req *pb.StringValueRequest) (*pb.CronLogsResponse, error) {
-	logsRaw, err := s.api.ListCronLogs(req.GetValue())
+	logs, err := s.api.ListCronLogs(req.GetValue())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	data, _ := json.Marshal(logsRaw)
-	var logs []struct {
-		Name string `json:"name"`
-		Time string `json:"time"`
-		Size int64  `json:"size"`
-	}
-	json.Unmarshal(data, &logs) //nolint:errcheck — self-marshalled data
 	items := make([]*pb.CronLogItem, len(logs))
 	for i, l := range logs {
-		items[i] = &pb.CronLogItem{Name: l.Name, Time: l.Time, Size: l.Size}
+		items[i] = &pb.CronLogItem{Name: l.File, Time: l.Time, Size: l.Size}
 	}
 	return &pb.CronLogsResponse{Logs: items}, nil
 }
@@ -577,25 +546,15 @@ func (s *Server) ReadBrainArtifact(_ context.Context, req *pb.BrainReadRequest) 
 // ═══════════════════════════════════════════
 
 func (s *Server) ListKI(_ context.Context, _ *pb.EmptyRequest) (*pb.KIListResponse, error) {
-	itemsRaw, err := s.api.ListKI()
+	items, err := s.api.ListKI()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	data, _ := json.Marshal(itemsRaw)
-	var items []struct {
-		ID        string   `json:"id"`
-		Summary   string   `json:"summary"`
-		CreatedAt string   `json:"created_at"`
-		UpdatedAt string   `json:"updated_at"`
-		Artifacts []string `json:"artifact_names"`
-	}
-	json.Unmarshal(data, &items) //nolint:errcheck — self-marshalled data
 	pbItems := make([]*pb.KIItem, len(items))
 	for i, ki := range items {
 		pbItems[i] = &pb.KIItem{
 			Id: ki.ID, Summary: ki.Summary,
 			CreatedAt: ki.CreatedAt, UpdatedAt: ki.UpdatedAt,
-			ArtifactNames: ki.Artifacts,
 		}
 	}
 	return &pb.KIListResponse{Items: pbItems}, nil

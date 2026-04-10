@@ -10,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
@@ -62,6 +64,7 @@ type AgentAPI struct {
 	sandboxMgr      *sandbox.Manager // for process cleanup on stop
 	startedAt       time.Time
 	tokenUsageStore *persistence.TokenUsageStore // P2 H2: session token usage persistence (nil = disabled)
+	runtimeStore    *persistence.RunSnapshotStore
 }
 
 // NewAgentAPI creates a unified API facade.
@@ -126,38 +129,16 @@ func (a *AgentAPI) ChatStream(ctx context.Context, sessionID, message, mode stri
 	}
 
 	// Resolve loop: per-session if LoopPool available
-	loop := a.loop
-	if sessionID != "" && a.loopPool != nil {
-		loop = a.loopPool.Get(sessionID)
-	}
+	loop := service.ResolveSessionLoop(a.loop, a.loopPool, sessionID, true)
 
 	// Set per-request plan mode ("auto" | "plan" | "agentic")
 	if mode != "" {
 		loop.SetPlanMode(mode)
 	}
 
-	// Execution resume: reconnects should continue the pending graph run instead of
-	// starting an empty user turn.
-	if message == "" {
-		runID, ok, err := loop.PendingRunID(ctx)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("no pending execution for session %s", sessionID)
-		}
-		slog.Info(fmt.Sprintf("[session] Resuming pending run %s for session %s", runID, sessionID))
-	}
-
-	// Session resume: load persisted history if loop's memory is empty
-	if message != "" && sessionID != "" && a.histQuery != nil && len(loop.GetHistory()) == 0 {
-		exports, err := a.histQuery.LoadAll(sessionID)
-		if err == nil && len(exports) > 0 {
-			msgs := service.RestoreHistory(exports)
-			loop.SetHistory(msgs)
-			// Auto-compact on resume: prevent full-history overload
-			loop.CompactIfNeeded()
-			slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s (stream)", len(msgs), sessionID))
+	if message != "" {
+		if restored := service.RestoreLoopHistoryIfNeeded(loop, a.histQuery, sessionID, true); restored > 0 {
+			slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s (%s)", restored, sessionID, "stream"))
 		}
 	}
 
@@ -205,33 +186,27 @@ func (a *AgentAPI) SessionID(sessionID string) string {
 // Uses sessionID to find the pool loop that is actually running.
 // Uses GetIfExists to avoid creating a ghost loop for evicted sessions.
 func (a *AgentAPI) StopRun(sessionID string) {
-	if sessionID != "" && a.loopPool != nil {
-		if loop := a.loopPool.GetIfExists(sessionID); loop != nil {
+	if sessionID == "" {
+		if loop := service.ResolveSessionLoop(a.loop, a.loopPool, a.sessMgr.Active(), false); loop != nil {
 			loop.Stop()
-			return
 		}
+		return
 	}
-	a.loop.Stop()
+	if loop := service.ResidentSessionLoop(a.loop, a.loopPool, sessionID); loop != nil && loop != a.loop {
+		loop.Stop()
+		return
+	}
+	if a.loop != nil && a.loop.SessionID() == sessionID {
+		a.loop.Stop()
+	}
 }
 
 // RetryRun strips the last assistant turn from the agent loop and returns
 // the last user message text. The frontend re-sends it via normal ChatStream.
 func (a *AgentAPI) RetryRun(_ context.Context, sessionID string) (string, error) {
-	// Use GetIfExists to avoid creating ghost loops for evicted sessions
-	loop := a.loop
-	if sessionID != "" && a.loopPool != nil {
-		if existing := a.loopPool.GetIfExists(sessionID); existing != nil {
-			loop = existing
-		}
-	}
-	// Session resume: load persisted history if loop's memory is empty
-	if sessionID != "" && a.histQuery != nil && len(loop.GetHistory()) == 0 {
-		exports, err := a.histQuery.LoadAll(sessionID)
-		if err == nil && len(exports) > 0 {
-			msgs := service.RestoreHistory(exports)
-			loop.SetHistory(msgs)
-			slog.Info(fmt.Sprintf("[retry] Resumed %d messages for session %s", len(msgs), sessionID))
-		}
+	loop := service.ResolveRetryLoop(a.loop, a.loopPool, sessionID)
+	if restored := service.RestoreLoopHistoryIfNeeded(loop, a.histQuery, sessionID, false); restored > 0 {
+		slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s (%s)", restored, sessionID, "retry"))
 	}
 	return loop.StripLastTurn()
 }
@@ -241,7 +216,379 @@ func (a *AgentAPI) Approve(approvalID string, approved bool) error {
 	if a.secHook == nil {
 		return fmt.Errorf("security hook not configured")
 	}
+	if err := a.secHook.Resolve(approvalID, approved); err == nil {
+		a.secHook.CleanupPending(approvalID)
+		_, clearErr := service.ForEachCandidateLoop(a.loop, a.loopPool, a.sessMgr, func(loop *service.AgentLoop) (bool, error) {
+			return loop.ClearPendingApprovalSnapshot(context.Background(), approvalID)
+		})
+		if clearErr != nil {
+			return clearErr
+		}
+		return nil
+	}
+	handled, err := service.ForEachCandidateLoop(a.loop, a.loopPool, a.sessMgr, func(loop *service.AgentLoop) (bool, error) {
+		return loop.ApprovePending(context.Background(), approvalID, approved)
+	})
+	if handled || err != nil {
+		return err
+	}
 	return a.secHook.Resolve(approvalID, approved)
+}
+
+func (a *AgentAPI) ReviewPlan(ctx context.Context, sessionID string, approved bool, feedback string) error {
+	loop := service.ResolveSessionLoop(a.loop, a.loopPool, sessionID, true)
+	if restored := service.RestoreLoopHistoryIfNeeded(loop, a.histQuery, sessionID, true); restored > 0 {
+		slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s (%s)", restored, sessionID, "plan_review"))
+	}
+
+	if !loop.TryAcquire() {
+		return ErrBusy
+	}
+	defer loop.ReleaseAcquire()
+
+	handled, err := loop.ReviewPendingPlan(ctx, approved, feedback)
+	if handled || err != nil {
+		return err
+	}
+	return fmt.Errorf("no pending planning review for session %s", sessionID)
+}
+
+func (a *AgentAPI) ApplyDecision(ctx context.Context, sessionID, kind, decision, feedback string) error {
+	loop := service.ResolveSessionLoop(a.loop, a.loopPool, sessionID, true)
+	if restored := service.RestoreLoopHistoryIfNeeded(loop, a.histQuery, sessionID, true); restored > 0 {
+		slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s (%s)", restored, sessionID, "decision_apply"))
+	}
+
+	if !loop.TryAcquire() {
+		return ErrBusy
+	}
+	defer loop.ReleaseAcquire()
+
+	handled, err := loop.ApplyPendingDecision(ctx, kind, decision, feedback)
+	if handled || err != nil {
+		return err
+	}
+	return agenterr.NewNotFound("decision", "pending")
+}
+
+func (a *AgentAPI) ResumeRun(ctx context.Context, sessionID, runID string) error {
+	loop := service.ResolveSessionLoop(a.loop, a.loopPool, sessionID, true)
+	if restored := service.RestoreLoopHistoryIfNeeded(loop, a.histQuery, sessionID, true); restored > 0 {
+		slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s (%s)", restored, sessionID, "resume_run"))
+	}
+
+	if !loop.TryAcquire() {
+		return ErrBusy
+	}
+	defer loop.ReleaseAcquire()
+
+	handled, err := loop.ResumeRun(ctx, runID)
+	if handled || err != nil {
+		return err
+	}
+	if runID != "" {
+		return agenterr.NewNotFound("run", runID)
+	}
+	return agenterr.NewNotFound("run", "pending")
+}
+
+func (a *AgentAPI) ApplyRuntimeIngress(ctx context.Context, req apitype.RuntimeIngressRequest) (apitype.RuntimeIngressResponse, error) {
+	resp := apitype.RuntimeIngressResponse{
+		Status:    "accepted",
+		SessionID: req.SessionID,
+		Ingress:   req.Ingress,
+	}
+	if req.SessionID == "" {
+		return resp, agenterr.NewValidation("session_id", "is required")
+	}
+
+	switch req.Ingress.Kind {
+	case "message":
+		if strings.TrimSpace(req.Ingress.Message) == "" {
+			return resp, agenterr.NewValidation("ingress.message", "is required")
+		}
+		if err := a.ChatStream(ctx, req.SessionID, req.Ingress.Message, req.Ingress.Mode, &service.Delta{}); err != nil {
+			return resp, err
+		}
+	case "decision":
+		if strings.TrimSpace(req.Ingress.Decision.Decision) == "" {
+			return resp, agenterr.NewValidation("ingress.decision.decision", "is required")
+		}
+		if err := a.ApplyDecision(ctx, req.SessionID, req.Ingress.Decision.Kind, req.Ingress.Decision.Decision, req.Ingress.Decision.Feedback); err != nil {
+			return resp, err
+		}
+	case "resume":
+		runID := req.Ingress.Run.RunID
+		if runID == "" {
+			runID = req.Ingress.RunID
+		}
+		if err := a.ResumeRun(ctx, req.SessionID, runID); err != nil {
+			return resp, err
+		}
+	case "reconnect":
+		if err := a.ChatStream(ctx, req.SessionID, "", req.Ingress.Mode, &service.Delta{}); err != nil {
+			return resp, err
+		}
+	default:
+		return resp, agenterr.NewValidation("ingress.kind", "unsupported ingress kind")
+	}
+
+	return resp, nil
+}
+
+func (a *AgentAPI) contextStatsForLoop(loop *service.AgentLoop) apitype.ContextStats {
+	stats := service.CollectLoopContextStats(loop)
+	byModel := make(map[string]any)
+	for model, mu := range stats.ByModel {
+		byModel[model] = mu
+	}
+
+	return apitype.ContextStats{
+		Model:         a.router.CurrentModel(),
+		HistoryCount:  stats.HistoryCount,
+		TokenEstimate: stats.TokenEstimate,
+		TotalCostUSD:  stats.TotalCostUSD,
+		TotalCalls:    stats.TotalCalls,
+		ByModel:       byModel,
+		CacheHitRate:  stats.CacheHitRate,
+		CacheBreaks:   stats.CacheBreaks,
+	}
+}
+
+func (a *AgentAPI) ListRuntimeRuns(ctx context.Context, sessionID string) ([]apitype.RuntimeRunInfo, error) {
+	if a.runtimeStore == nil {
+		return nil, nil
+	}
+	snaps, err := a.runtimeStore.ListBySession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return a.runtimeSnapshotsToInfo(snaps), nil
+}
+
+func (a *AgentAPI) ListPendingRuns(ctx context.Context, sessionID string) ([]apitype.RuntimeRunInfo, error) {
+	runs, err := a.ListRuntimeRuns(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	pending := make([]apitype.RuntimeRunInfo, 0, len(runs))
+	for _, run := range runs {
+		if run.Status == "wait" || run.WaitReason != "" {
+			pending = append(pending, run)
+		}
+	}
+	return pending, nil
+}
+
+func (a *AgentAPI) ListPendingDecisions(ctx context.Context, sessionID string) ([]apitype.RuntimeRunInfo, error) {
+	runs, err := a.ListPendingRuns(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	decisions := make([]apitype.RuntimeRunInfo, 0, len(runs))
+	for _, run := range runs {
+		if run.PendingDecision != nil {
+			decisions = append(decisions, run)
+		}
+	}
+	return decisions, nil
+}
+
+func (a *AgentAPI) ListRuntimeGraph(ctx context.Context, sessionID string) (apitype.OrchestrationGraphInfo, error) {
+	graph := apitype.OrchestrationGraphInfo{SessionID: sessionID}
+	runs, err := a.ListRuntimeRuns(ctx, sessionID)
+	if err != nil {
+		return graph, err
+	}
+	graph.Nodes = runs
+	graph.RootRunIDs = rootRunIDs(runs)
+	graph.Edges = runtimeEdges(runs)
+	return graph, nil
+}
+
+func (a *AgentAPI) ListChildRuns(ctx context.Context, parentRunID string) ([]apitype.RuntimeRunInfo, error) {
+	if a.runtimeStore == nil {
+		return nil, nil
+	}
+	snaps, err := a.runtimeStore.ListByParentRun(ctx, parentRunID)
+	if err != nil {
+		return nil, err
+	}
+	return a.runtimeSnapshotsToInfo(snaps), nil
+}
+
+func rootRunIDs(runs []apitype.RuntimeRunInfo) []string {
+	roots := make([]string, 0, len(runs))
+	for _, run := range runs {
+		if run.RunID == "" || run.ParentRunID != "" {
+			continue
+		}
+		roots = append(roots, run.RunID)
+	}
+	sort.Strings(roots)
+	return roots
+}
+
+func runtimeEdges(runs []apitype.RuntimeRunInfo) []apitype.RuntimeEdgeInfo {
+	edges := make([]apitype.RuntimeEdgeInfo, 0, len(runs)*2)
+	seen := make(map[string]struct{}, len(runs)*4)
+	addEdge := func(edge apitype.RuntimeEdgeInfo) {
+		key := edge.Kind + "|" + edge.SourceRunID + "|" + edge.TargetRunID + "|" + edge.BarrierID + "|" + edge.Summary
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		edges = append(edges, edge)
+	}
+
+	for _, run := range runs {
+		if run.ParentRunID != "" {
+			addEdge(apitype.RuntimeEdgeInfo{
+				Kind:        "parent_child",
+				SourceRunID: run.ParentRunID,
+				TargetRunID: run.RunID,
+			})
+		}
+		for _, handoff := range run.Handoffs {
+			kind := handoff.Kind
+			if kind == "" {
+				kind = "handoff"
+			}
+			addEdge(apitype.RuntimeEdgeInfo{
+				Kind:        kind,
+				SourceRunID: run.RunID,
+				TargetRunID: handoff.TargetRunID,
+				Summary:     handoff.TargetNode,
+			})
+		}
+		if barrier := run.ActiveBarrier; barrier != nil {
+			addEdge(apitype.RuntimeEdgeInfo{
+				Kind:        "barrier_wait",
+				SourceRunID: run.RunID,
+				BarrierID:   barrier.ID,
+				Summary:     run.WaitReason,
+			})
+			for _, member := range barrier.Members {
+				if member.RunID == "" {
+					continue
+				}
+				addEdge(apitype.RuntimeEdgeInfo{
+					Kind:        "barrier_member",
+					SourceRunID: member.RunID,
+					BarrierID:   barrier.ID,
+					Summary:     member.TaskName,
+				})
+			}
+		}
+	}
+
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].Kind != edges[j].Kind {
+			return edges[i].Kind < edges[j].Kind
+		}
+		if edges[i].SourceRunID != edges[j].SourceRunID {
+			return edges[i].SourceRunID < edges[j].SourceRunID
+		}
+		if edges[i].TargetRunID != edges[j].TargetRunID {
+			return edges[i].TargetRunID < edges[j].TargetRunID
+		}
+		if edges[i].BarrierID != edges[j].BarrierID {
+			return edges[i].BarrierID < edges[j].BarrierID
+		}
+		return edges[i].Summary < edges[j].Summary
+	})
+	return edges
+}
+
+func (a *AgentAPI) runtimeSnapshotsToInfo(snaps []*graphruntime.RunSnapshot) []apitype.RuntimeRunInfo {
+	out := make([]apitype.RuntimeRunInfo, 0, len(snaps))
+	for _, snap := range snaps {
+		if snap == nil {
+			continue
+		}
+		out = append(out, runtimeSnapshotToInfo(snap))
+	}
+	return out
+}
+
+func runtimeSnapshotToInfo(snap *graphruntime.RunSnapshot) apitype.RuntimeRunInfo {
+	info := apitype.RuntimeRunInfo{
+		RunID:           snap.RunID,
+		ParentRunID:     snap.TurnState.Orchestration.ParentRunID,
+		Status:          string(snap.Status),
+		CurrentNode:     snap.Cursor.CurrentNode,
+		CurrentRoute:    snap.Cursor.RouteKey,
+		WaitReason:      string(snap.ExecutionState.WaitReason),
+		UpdatedAt:       snap.UpdatedAt.UTC().Format(time.RFC3339),
+		PendingMerge:    snap.TurnState.Orchestration.PendingMerge,
+		LastWakeSource:  snap.TurnState.Orchestration.LastWakeSource,
+		ChildRunIDs:     append([]string(nil), snap.TurnState.Orchestration.ChildRunIDs...),
+		PendingDecision: pendingDecisionInfo(snap),
+		LastDecision:    lastDecisionInfo(snap),
+	}
+	if len(snap.TurnState.Orchestration.Handoffs) > 0 {
+		info.Handoffs = make([]apitype.RuntimeHandoffInfo, 0, len(snap.TurnState.Orchestration.Handoffs))
+		for _, handoff := range snap.TurnState.Orchestration.Handoffs {
+			info.Handoffs = append(info.Handoffs, apitype.RuntimeHandoffInfo{
+				TargetRunID: handoff.TargetRunID,
+				TargetNode:  handoff.TargetNode,
+				Kind:        handoff.Kind,
+				PayloadJSON: handoff.PayloadJSON,
+			})
+		}
+	}
+	if len(snap.TurnState.Orchestration.Events) > 0 {
+		info.Events = make([]apitype.RuntimeEventInfo, 0, len(snap.TurnState.Orchestration.Events))
+		for _, event := range snap.TurnState.Orchestration.Events {
+			eventAt := ""
+			if !event.At.IsZero() {
+				eventAt = event.At.UTC().Format(time.RFC3339)
+			}
+			info.Events = append(info.Events, apitype.RuntimeEventInfo{
+				Type:      event.Type,
+				RunID:     event.RunID,
+				SourceRun: event.SourceRun,
+				BarrierID: event.BarrierID,
+				At:        eventAt,
+				Summary:   event.Summary,
+			})
+		}
+	}
+	return info
+}
+
+func pendingDecisionInfo(snap *graphruntime.RunSnapshot) *apitype.RuntimeDecisionInfo {
+	contract := service.PendingDecisionFromSnapshot(snap)
+	if contract == nil {
+		return nil
+	}
+	return decisionContractInfo(contract)
+}
+
+func lastDecisionInfo(snap *graphruntime.RunSnapshot) *apitype.RuntimeDecisionInfo {
+	contract := service.DecisionFromSnapshot(snap)
+	if contract == nil {
+		return nil
+	}
+	return decisionContractInfo(contract)
+}
+
+func decisionContractInfo(contract *graphruntime.DecisionContractState) *apitype.RuntimeDecisionInfo {
+	if contract == nil {
+		return nil
+	}
+	info := &apitype.RuntimeDecisionInfo{
+		Kind:         string(contract.Kind),
+		Schema:       contract.SchemaName,
+		Decision:     contract.Decision,
+		Reason:       contract.Reason,
+		Feedback:     contract.Feedback,
+		ResumeAction: contract.ResumeAction,
+	}
+	if !contract.AppliedAt.IsZero() {
+		info.AppliedAt = contract.AppliedAt.UTC().Format(time.RFC3339)
+	}
+	return info
 }
 
 // ─── Session ───
@@ -313,12 +660,10 @@ func (a *AgentAPI) GetHistory(sessionID string) ([]apitype.HistoryMessage, error
 	// First Principles: The Active AgentLoop memory is the absolute Ground Truth.
 	// If the loop is actively running (or recently used and in memory), it has
 	// messages that are not yet persisted to the database.
-	if sessionID != "" && a.loopPool != nil {
-		if loop := a.loopPool.GetIfExists(sessionID); loop != nil {
-			msgs := loop.GetHistory()
-			if len(msgs) > 0 {
-				return a.convertLLMToHistory(msgs), nil
-			}
+	if loop := service.ResidentSessionLoop(a.loop, a.loopPool, sessionID); loop != nil {
+		msgs := loop.GetHistory()
+		if len(msgs) > 0 {
+			return a.convertLLMToHistory(msgs), nil
 		}
 	}
 
@@ -405,22 +750,16 @@ func (a *AgentAPI) convertExportsToHistory(exports []service.HistoryExport) []ap
 
 // ClearHistory resets the conversation history for the active session.
 func (a *AgentAPI) ClearHistory() {
-	sid := a.sessMgr.Active()
-	if sid != "" && a.loopPool != nil {
-		a.loopPool.Get(sid).ClearHistory()
-		return
+	if loop := service.ResolveActiveManagedLoop(a.loop, a.loopPool, a.sessMgr); loop != nil {
+		loop.ClearHistory()
 	}
-	a.loop.ClearHistory()
 }
 
 // CompactContext triggers context compaction for the active session.
 func (a *AgentAPI) CompactContext() {
-	sid := a.sessMgr.Active()
-	if sid != "" && a.loopPool != nil {
-		a.loopPool.Get(sid).Compact()
-		return
+	if loop := service.ResolveActiveManagedLoop(a.loop, a.loopPool, a.sessMgr); loop != nil {
+		loop.Compact()
 	}
-	a.loop.Compact()
 }
 
 // ─── Model ───
@@ -541,41 +880,7 @@ func (a *AgentAPI) GetSecurity() apitype.SecurityResponse {
 
 // GetContextStats returns context usage stats for the active session.
 func (a *AgentAPI) GetContextStats() apitype.ContextStats {
-	var history []llm.Message
-	var tokenStats service.TokenStats = service.TokenStats{}
-	var cacheStats llm.CacheStats
-	sid := a.sessMgr.Active()
-	if sid != "" && a.loopPool != nil {
-		loop := a.loopPool.Get(sid)
-		history = loop.GetHistory()
-		tokenStats = loop.GetTokenStats()
-		cacheStats = loop.GetCacheStats()
-	} else {
-		history = a.loop.GetHistory()
-		tokenStats = a.loop.GetTokenStats()
-		cacheStats = a.loop.GetCacheStats()
-	}
-	tokenEst := 0
-	for _, m := range history {
-		tokenEst += len(m.Content) / 4
-	}
-
-	// Build per-model breakdown for JSON
-	byModel := make(map[string]any)
-	for model, mu := range tokenStats.ByModel {
-		byModel[model] = mu
-	}
-
-	return apitype.ContextStats{
-		Model:         a.router.CurrentModel(),
-		HistoryCount:  len(history),
-		TokenEstimate: tokenEst,
-		TotalCostUSD:  tokenStats.TotalCostUSD,
-		TotalCalls:    tokenStats.TotalCalls,
-		ByModel:       byModel,
-		CacheHitRate:  cacheStats.HitRate,
-		CacheBreaks:   cacheStats.CacheBreaks,
-	}
+	return a.contextStatsForLoop(service.ResolveSessionLoop(a.loop, a.loopPool, a.sessMgr.Active(), false))
 }
 
 // GetSystemInfo returns runtime system information.
@@ -612,11 +917,19 @@ func (a *AgentAPI) CronStatus() map[string]any {
 }
 
 // ListCronJobs returns all cron jobs.
-func (a *AgentAPI) ListCronJobs() (any, error) {
+func (a *AgentAPI) ListCronJobs() ([]apitype.CronJobInfo, error) {
 	if a.cronMgr == nil {
 		return nil, fmt.Errorf("cron not enabled")
 	}
-	return a.cronMgr.List()
+	jobs, err := a.cronMgr.List()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]apitype.CronJobInfo, len(jobs))
+	for i, job := range jobs {
+		result[i] = cronJobToInfo(job)
+	}
+	return result, nil
 }
 
 // CreateCronJob creates a new cron job.
@@ -660,11 +973,24 @@ func (a *AgentAPI) RunCronJobNow(name string) error {
 }
 
 // ListCronLogs returns log entries for a specific cron job.
-func (a *AgentAPI) ListCronLogs(jobName string) (any, error) {
+func (a *AgentAPI) ListCronLogs(jobName string) ([]apitype.CronLogInfo, error) {
 	if a.cronMgr == nil {
 		return nil, fmt.Errorf("cron not enabled")
 	}
-	return a.cronMgr.ListLogs(jobName)
+	logs, err := a.cronMgr.ListLogs(jobName)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]apitype.CronLogInfo, len(logs))
+	for i, entry := range logs {
+		result[i] = apitype.CronLogInfo{
+			File:    entry.File,
+			Time:    entry.Time,
+			Size:    entry.Size,
+			Success: entry.Success,
+		}
+	}
+	return result, nil
 }
 
 // ReadCronLog reads a specific cron job log file.
@@ -680,28 +1006,20 @@ func (a *AgentAPI) ReadCronLog(jobName, logFile string) (string, error) {
 // ═══════════════════════════════════════════
 
 // ListSkills returns all discovered skills.
-func (a *AgentAPI) ListSkills() (any, error) {
+func (a *AgentAPI) ListSkills() ([]apitype.SkillInfoResponse, error) {
 	if a.skillMgr == nil {
 		return nil, fmt.Errorf("skill manager not configured")
 	}
 	skills := a.skillMgr.List()
-	type skillInfo struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Path        string `json:"path"`
-		Type        string `json:"type"`
-		Enabled     bool   `json:"enabled"`
-		EvoStatus   string `json:"forge_status"`
-	}
-	var result []skillInfo
+	var result []apitype.SkillInfoResponse
 	for _, s := range skills {
-		result = append(result, skillInfo{
+		result = append(result, apitype.SkillInfoResponse{
 			Name:        s.Name,
 			Description: s.Description,
 			Path:        s.Path,
 			Type:        s.Type,
 			Enabled:     s.Enabled,
-			EvoStatus:   s.EvoStatus,
+			Status:      s.EvoStatus,
 		})
 	}
 	return result, nil
@@ -741,36 +1059,27 @@ func (a *AgentAPI) DeleteSkill(name string) error {
 // ═══════════════════════════════════════════
 
 // ListMCPServers returns all MCP server names and their running status.
-func (a *AgentAPI) ListMCPServers() (any, error) {
+func (a *AgentAPI) ListMCPServers() ([]apitype.MCPServerInfo, error) {
 	if a.mcpMgr == nil {
 		return nil, fmt.Errorf("MCP not configured")
 	}
 	servers := a.mcpMgr.ListServers()
-	type srvInfo struct {
-		Name    string `json:"name"`
-		Running bool   `json:"running"`
-	}
-	var result []srvInfo
+	var result []apitype.MCPServerInfo
 	for name, running := range servers {
-		result = append(result, srvInfo{Name: name, Running: running})
+		result = append(result, apitype.MCPServerInfo{Name: name, Running: running})
 	}
 	return result, nil
 }
 
 // ListMCPTools returns all tools exposed by MCP servers.
-func (a *AgentAPI) ListMCPTools() (any, error) {
+func (a *AgentAPI) ListMCPTools() ([]apitype.MCPToolInfo, error) {
 	if a.mcpMgr == nil {
 		return nil, fmt.Errorf("MCP not configured")
 	}
 	tools := a.mcpMgr.ListTools()
-	type toolInfo struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Server      string `json:"server"`
-	}
-	var result []toolInfo
+	var result []apitype.MCPToolInfo
 	for _, t := range tools {
-		result = append(result, toolInfo{
+		result = append(result, apitype.MCPToolInfo{
 			Name:        t.Name,
 			Description: t.Description,
 			Server:      t.ServerName,
@@ -825,19 +1134,8 @@ func (a *AgentAPI) ReadBrainArtifact(sessionID, name string) (string, error) {
 // KI (Knowledge Items) management
 // ═══════════════════════════════════════════
 
-// KIInfo is a summary of a Knowledge Item for API responses.
-type KIInfo struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	Summary   string   `json:"summary"`
-	Tags      []string `json:"tags"`
-	Sources   []string `json:"sources"`
-	CreatedAt string   `json:"created_at"`
-	UpdatedAt string   `json:"updated_at"`
-}
-
-func kiToInfo(item *knowledge.Item) KIInfo {
-	return KIInfo{
+func kiToInfo(item *knowledge.Item) apitype.KIInfo {
+	return apitype.KIInfo{
 		ID:        item.ID,
 		Title:     item.Title,
 		Summary:   item.Summary,
@@ -848,8 +1146,55 @@ func kiToInfo(item *knowledge.Item) KIInfo {
 	}
 }
 
+func kiToDetail(item *knowledge.Item) apitype.KIDetailResponse {
+	return apitype.KIDetailResponse{
+		ID:           item.ID,
+		Title:        item.Title,
+		Summary:      item.Summary,
+		Content:      item.Content,
+		Tags:         item.Tags,
+		Sources:      item.Sources,
+		Scope:        item.Scope,
+		Deprecated:   item.Deprecated,
+		SupersededBy: item.SupersededBy,
+		ValidFrom:    formatOptionalTime(item.ValidFrom),
+		ValidUntil:   formatOptionalTime(item.ValidUntil),
+		CreatedAt:    item.CreatedAt.Format("2006-01-02 15:04"),
+		UpdatedAt:    item.UpdatedAt.Format("2006-01-02 15:04"),
+	}
+}
+
+func cronJobToInfo(job cron.Job) apitype.CronJobInfo {
+	return apitype.CronJobInfo{
+		Name:      job.Name,
+		Schedule:  job.Schedule,
+		Prompt:    job.Prompt,
+		Enabled:   job.Enabled,
+		Internal:  job.Internal,
+		RunCount:  job.RunCount,
+		FailCount: job.FailCount,
+		LastRun:   formatOptionalTime(job.LastRun),
+		CreatedAt: formatTime(job.CreatedAt),
+		UpdatedAt: formatTime(job.UpdatedAt),
+	}
+}
+
+func formatOptionalTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return formatTime(*t)
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format("2006-01-02 15:04")
+}
+
 // ListKI returns all Knowledge Items.
-func (a *AgentAPI) ListKI() (any, error) {
+func (a *AgentAPI) ListKI() ([]apitype.KIInfo, error) {
 	if a.kiStore == nil {
 		return nil, fmt.Errorf("KI store not configured")
 	}
@@ -857,7 +1202,7 @@ func (a *AgentAPI) ListKI() (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := make([]KIInfo, len(items))
+	result := make([]apitype.KIInfo, len(items))
 	for i, item := range items {
 		result[i] = kiToInfo(item)
 	}
@@ -865,11 +1210,15 @@ func (a *AgentAPI) ListKI() (any, error) {
 }
 
 // GetKI returns a single Knowledge Item with full content.
-func (a *AgentAPI) GetKI(id string) (any, error) {
+func (a *AgentAPI) GetKI(id string) (apitype.KIDetailResponse, error) {
 	if a.kiStore == nil {
-		return nil, fmt.Errorf("KI store not configured")
+		return apitype.KIDetailResponse{}, fmt.Errorf("KI store not configured")
 	}
-	return a.kiStore.Get(id)
+	item, err := a.kiStore.GetWithContent(id)
+	if err != nil {
+		return apitype.KIDetailResponse{}, err
+	}
+	return kiToDetail(item), nil
 }
 
 // DeleteKI removes a Knowledge Item directory.
@@ -924,15 +1273,27 @@ func (a *AgentAPI) SetTokenUsageStore(store *persistence.TokenUsageStore) {
 	a.tokenUsageStore = store
 }
 
+func (a *AgentAPI) SetRuntimeStore(store *persistence.RunSnapshotStore) {
+	a.runtimeStore = store
+}
+
 // SaveSessionCost persists the current session's token usage to the database.
 func (a *AgentAPI) SaveSessionCost(sessionID string) error {
 	if a.tokenUsageStore == nil {
 		return fmt.Errorf("token usage store not configured")
 	}
-	stats := a.GetContextStats()
+	loop := service.ResolveStatsLoop(a.loop, a.loopPool, a.sessMgr, sessionID)
+	if loop == nil {
+		return fmt.Errorf("session %s not found in memory", sessionID)
+	}
+	stats := a.contextStatsForLoop(loop)
 	var promptTok, completeTok int
 	for _, usage := range stats.ByModel {
-		if u, ok := usage.(map[string]any); ok {
+		switch u := usage.(type) {
+		case service.ModelUsage:
+			promptTok += u.PromptTokens
+			completeTok += u.CompletionTokens
+		case map[string]any:
 			if pt, ok := u["prompt_tokens"].(float64); ok {
 				promptTok += int(pt)
 			}

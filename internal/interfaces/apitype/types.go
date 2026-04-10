@@ -98,6 +98,65 @@ type SkillInfoResponse struct {
 	Type        string `json:"type"`
 	Status      string `json:"status"`
 	Description string `json:"description"`
+	Path        string `json:"path,omitempty"`
+	Enabled     bool   `json:"enabled,omitempty"`
+}
+
+type MCPServerInfo struct {
+	Name    string `json:"name"`
+	Running bool   `json:"running"`
+}
+
+type MCPToolInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Server      string `json:"server"`
+}
+
+type CronJobInfo struct {
+	Name      string `json:"name"`
+	Schedule  string `json:"schedule"`
+	Prompt    string `json:"prompt"`
+	Enabled   bool   `json:"enabled"`
+	Internal  bool   `json:"internal,omitempty"`
+	RunCount  int    `json:"run_count"`
+	FailCount int    `json:"fail_count"`
+	LastRun   string `json:"last_run,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+type CronLogInfo struct {
+	File    string `json:"file"`
+	Time    string `json:"time"`
+	Size    int64  `json:"size"`
+	Success bool   `json:"success"`
+}
+
+type KIInfo struct {
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Summary   string   `json:"summary"`
+	Tags      []string `json:"tags,omitempty"`
+	Sources   []string `json:"sources,omitempty"`
+	CreatedAt string   `json:"created_at,omitempty"`
+	UpdatedAt string   `json:"updated_at,omitempty"`
+}
+
+type KIDetailResponse struct {
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	Summary      string   `json:"summary"`
+	Content      string   `json:"content,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	Sources      []string `json:"sources,omitempty"`
+	Scope        string   `json:"scope,omitempty"`
+	Deprecated   bool     `json:"deprecated,omitempty"`
+	SupersededBy string   `json:"superseded_by,omitempty"`
+	ValidFrom    string   `json:"valid_from,omitempty"`
+	ValidUntil   string   `json:"valid_until,omitempty"`
+	CreatedAt    string   `json:"created_at,omitempty"`
+	UpdatedAt    string   `json:"updated_at,omitempty"`
 }
 
 // BrainArtifactInfo represents a brain artifact entry.
@@ -105,4 +164,222 @@ type BrainArtifactInfo struct {
 	Name    string `json:"name"`
 	Size    int64  `json:"size"`
 	ModTime string `json:"mod_time"`
+}
+
+type RuntimeHandoffInfo struct {
+	TargetRunID string `json:"target_run_id"`
+	TargetNode  string `json:"target_node,omitempty"`
+	Kind        string `json:"kind"`
+	PayloadJSON string `json:"payload_json,omitempty"`
+}
+
+type RuntimeBarrierMemberInfo struct {
+	RunID    string `json:"run_id"`
+	TaskName string `json:"task_name,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Output   string `json:"output,omitempty"`
+	Error    string `json:"error,omitempty"`
+	DoneAt   string `json:"done_at,omitempty"`
+}
+
+type RuntimeBarrierInfo struct {
+	ID             string                     `json:"id"`
+	TotalCount     int                        `json:"total_count"`
+	PendingCount   int                        `json:"pending_count"`
+	CompletedCount int                        `json:"completed_count"`
+	Finalized      bool                       `json:"finalized"`
+	Members        []RuntimeBarrierMemberInfo `json:"members,omitempty"`
+}
+
+type RuntimeEventInfo struct {
+	Type      string `json:"type"`
+	RunID     string `json:"run_id,omitempty"`
+	SourceRun string `json:"source_run,omitempty"`
+	BarrierID string `json:"barrier_id,omitempty"`
+	At        string `json:"at,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+}
+
+type RuntimeEdgeInfo struct {
+	Kind        string `json:"kind"`
+	SourceRunID string `json:"source_run_id"`
+	TargetRunID string `json:"target_run_id,omitempty"`
+	BarrierID   string `json:"barrier_id,omitempty"`
+	Summary     string `json:"summary,omitempty"`
+}
+
+type RuntimeDecisionInfo struct {
+	Kind         string `json:"kind"`
+	Schema       string `json:"schema,omitempty"`
+	Decision     string `json:"decision,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	Feedback     string `json:"feedback,omitempty"`
+	AppliedAt    string `json:"applied_at,omitempty"`
+	ResumeAction string `json:"resume_action,omitempty"`
+}
+
+type RuntimeRunInfo struct {
+	RunID           string               `json:"run_id"`
+	ParentRunID     string               `json:"parent_run_id,omitempty"`
+	Status          string               `json:"status"`
+	CurrentNode     string               `json:"current_node,omitempty"`
+	CurrentRoute    string               `json:"current_route,omitempty"`
+	WaitReason      string               `json:"wait_reason,omitempty"`
+	UpdatedAt       string               `json:"updated_at,omitempty"`
+	PendingMerge    bool                 `json:"pending_merge"`
+	LastWakeSource  string               `json:"last_wake_source,omitempty"`
+	ChildRunIDs     []string             `json:"child_run_ids,omitempty"`
+	ActiveBarrier   *RuntimeBarrierInfo  `json:"active_barrier,omitempty"`
+	PendingDecision *RuntimeDecisionInfo `json:"pending_decision,omitempty"`
+	LastDecision    *RuntimeDecisionInfo `json:"last_decision,omitempty"`
+	Handoffs        []RuntimeHandoffInfo `json:"handoffs,omitempty"`
+	Events          []RuntimeEventInfo   `json:"events,omitempty"`
+}
+
+type OrchestrationGraphInfo struct {
+	SessionID  string            `json:"session_id"`
+	RootRunIDs []string          `json:"root_run_ids,omitempty"`
+	Nodes      []RuntimeRunInfo  `json:"nodes"`
+	Edges      []RuntimeEdgeInfo `json:"edges,omitempty"`
+}
+
+type RuntimeRunListResponse struct {
+	Runs []RuntimeRunInfo `json:"runs"`
+}
+
+type RuntimeRunTarget struct {
+	RunID string `json:"run_id,omitempty"`
+}
+
+type RuntimeResumeRequest struct {
+	SessionID string           `json:"session_id"`
+	Run       RuntimeRunTarget `json:"run,omitempty"`
+	RunID     string           `json:"run_id,omitempty"`
+}
+
+type RuntimeResumeResponse struct {
+	Status    string           `json:"status"`
+	SessionID string           `json:"session_id"`
+	Run       RuntimeRunTarget `json:"run,omitempty"`
+}
+
+type RuntimeDecisionContractInput struct {
+	Kind     string `json:"kind,omitempty"`
+	Decision string `json:"decision,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Feedback string `json:"feedback,omitempty"`
+}
+
+type RuntimeDecisionApplyRequest struct {
+	SessionID string                       `json:"session_id"`
+	Decision  RuntimeDecisionContractInput `json:"decision"`
+}
+
+type RuntimeDecisionApplyResponse struct {
+	Status    string                       `json:"status"`
+	SessionID string                       `json:"session_id"`
+	Decision  RuntimeDecisionContractInput `json:"decision"`
+}
+
+type RuntimeIngressInput struct {
+	Kind     string                       `json:"kind"`
+	Source   string                       `json:"source,omitempty"`
+	Trigger  string                       `json:"trigger,omitempty"`
+	Message  string                       `json:"message,omitempty"`
+	Mode     string                       `json:"mode,omitempty"`
+	Run      RuntimeRunTarget             `json:"run,omitempty"`
+	RunID    string                       `json:"run_id,omitempty"`
+	Decision RuntimeDecisionContractInput `json:"decision,omitempty"`
+}
+
+type RuntimeIngressRequest struct {
+	SessionID string              `json:"session_id"`
+	Ingress   RuntimeIngressInput `json:"ingress"`
+}
+
+type RuntimeIngressResponse struct {
+	Status    string              `json:"status"`
+	SessionID string              `json:"session_id"`
+	Ingress   RuntimeIngressInput `json:"ingress"`
+}
+
+type StatusResponse struct {
+	Status string `json:"status"`
+}
+
+type StatusIDResponse struct {
+	Status string `json:"status"`
+	ID     string `json:"id,omitempty"`
+}
+
+type StatusNameResponse struct {
+	Status string `json:"status"`
+	Name   string `json:"name,omitempty"`
+}
+
+type StatusToolResponse struct {
+	Status string `json:"status"`
+	Tool   string `json:"tool,omitempty"`
+}
+
+type StatusProviderResponse struct {
+	Status   string `json:"status"`
+	Provider string `json:"provider,omitempty"`
+}
+
+type StatusMCPServerResponse struct {
+	Status    string `json:"status"`
+	MCPServer string `json:"mcp_server,omitempty"`
+}
+
+type StatusKeyValueResponse struct {
+	Status string `json:"status,omitempty"`
+	Key    string `json:"key,omitempty"`
+	Value  any    `json:"value,omitempty"`
+}
+
+type MessageListResponse struct {
+	Messages []HistoryMessage `json:"messages"`
+}
+
+type ToolListResponse struct {
+	Tools []ToolInfoResponse `json:"tools"`
+}
+
+type SkillListResponse struct {
+	Skills []SkillInfoResponse `json:"skills"`
+}
+
+type SkillContentResponse struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+type ServerListResponse struct {
+	Servers []MCPServerInfo `json:"servers"`
+}
+
+type MCPToolListResponse struct {
+	Tools []MCPToolInfo `json:"tools"`
+}
+
+type ArtifactListResponse struct {
+	Artifacts []BrainArtifactInfo `json:"artifacts"`
+}
+
+type KIItemListResponse struct {
+	Items []KIInfo `json:"items"`
+}
+
+type CronJobListResponse struct {
+	Jobs []CronJobInfo `json:"jobs"`
+}
+
+type CronLogListResponse struct {
+	Logs []CronLogInfo `json:"logs"`
+}
+
+type FileContentResponse struct {
+	File    string `json:"file"`
+	Content string `json:"content"`
 }
