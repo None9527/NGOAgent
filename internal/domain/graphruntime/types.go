@@ -9,13 +9,22 @@ import (
 type NodeKind string
 
 const (
-	NodeKindPrepare  NodeKind = "prepare"
-	NodeKindGenerate NodeKind = "generate"
-	NodeKindToolExec NodeKind = "tool_exec"
-	NodeKindGuard    NodeKind = "guard"
-	NodeKindCompact  NodeKind = "compact"
-	NodeKindDone     NodeKind = "done"
-	NodeKindCustom   NodeKind = "custom"
+	NodeKindPrepare     NodeKind = "prepare"
+	NodeKindOrchestrate NodeKind = "orchestrate"
+	NodeKindSpawn       NodeKind = "spawn"
+	NodeKindBarrierWait NodeKind = "barrier_wait"
+	NodeKindMerge       NodeKind = "merge"
+	NodeKindGenerate    NodeKind = "generate"
+	NodeKindToolExec    NodeKind = "tool_exec"
+	NodeKindGuard       NodeKind = "guard"
+	NodeKindReflect     NodeKind = "reflect"
+	NodeKindPlan        NodeKind = "plan"
+	NodeKindEvaluate    NodeKind = "evaluate"
+	NodeKindRepair      NodeKind = "repair"
+	NodeKindCompact     NodeKind = "compact"
+	NodeKindDone        NodeKind = "done"
+	NodeKindComplete    NodeKind = "complete"
+	NodeKindCustom      NodeKind = "custom"
 )
 
 type NodeStatus string
@@ -60,6 +69,7 @@ type ExecutionCursor struct {
 type NodeResult struct {
 	RouteKey         string
 	Status           NodeStatus
+	ObservedState    string
 	StateMutations   []StateMutation
 	NeedsCheckpoint  bool
 	WaitReason       WaitReason
@@ -124,14 +134,17 @@ type SessionState struct {
 }
 
 type TaskState struct {
+	YieldRequested   bool
 	Name             string
+	Mode             string
 	Status           string
 	Summary          string
-	YieldRequested   bool
-	BoundaryTaskName string
-	BoundaryStatus   string
-	BoundarySummary  string
 	StepsSinceUpdate int
+	PlanModified     bool
+	CurrentStep      int
+	ArtifactLastStep map[string]int
+	SkillLoaded      string
+	SkillPath        string
 }
 
 type CompactState struct {
@@ -145,11 +158,130 @@ type ReflectionState struct {
 	Required   bool
 }
 
+type ReviewDecisionState struct {
+	SchemaName string
+	Decision   string
+	Reason     string
+	RawJSON    string
+	Valid      bool
+}
+
+type PlanningState struct {
+	Required         bool
+	ReviewRequired   bool
+	ReviewDecision   string
+	ReviewFeedback   string
+	ReviewedAt       time.Time
+	Trigger          string
+	BoundaryMode     string
+	PlanExists       bool
+	TaskExists       bool
+	ContextTight     bool
+	MissingArtifacts []string
+}
+
+type HandoffState struct {
+	TargetRunID string
+	TargetNode  string
+	PayloadJSON string
+	Kind        string
+}
+
+type OrchestrationEventState struct {
+	Type      string
+	RunID     string
+	SourceRun string
+	BarrierID string
+	At        time.Time
+	Summary   string
+}
+
+type IngressState struct {
+	Kind         string
+	Source       string
+	Trigger      string
+	RunID        string
+	DecisionKind string
+	Decision     string
+	At           time.Time
+}
+
+type OrchestrationState struct {
+	ParentRunID    string
+	ChildRunIDs    []string
+	ActiveBarrier  *BarrierState
+	PendingMerge   bool
+	LastWakeSource string
+	Ingress        IngressState
+	Handoffs       []HandoffState
+	Events         []OrchestrationEventState
+}
+
+type EvaluationIssueState struct {
+	Severity    string
+	Description string
+}
+
+type EvaluationState struct {
+	SchemaName string
+	Score      float64
+	Passed     bool
+	ErrorType  string
+	Issues     []EvaluationIssueState
+	RawJSON    string
+	Valid      bool
+}
+
+type RepairStrategy string
+
+type RepairState struct {
+	Strategy    RepairStrategy
+	Description string
+	Ephemeral   string
+	Allowed     bool
+	Attempted   bool
+	Success     bool
+	BlockReason string
+}
+
+type DecisionKind string
+
+const (
+	DecisionKindNone       DecisionKind = ""
+	DecisionKindPlanReview DecisionKind = "plan_review"
+	DecisionKindReflection DecisionKind = "reflection"
+	DecisionKindEvaluation DecisionKind = "evaluation"
+)
+
+type DecisionContractState struct {
+	Kind         DecisionKind
+	SchemaName   string
+	Decision     string
+	Reason       string
+	Feedback     string
+	AppliedAt    time.Time
+	ResumeAction string
+	Valid        bool
+}
+
+type IntelligenceState struct {
+	Planning   PlanningState
+	Review     ReviewDecisionState
+	Evaluation EvaluationState
+	Repair     RepairState
+}
+
 type LLMResponseState struct {
 	Content    string
 	Reasoning  string
 	StopReason string
 	Provider   string
+}
+
+type StructuredOutputState struct {
+	SchemaName string
+	RawJSON    string
+	Valid      bool
 }
 
 type ToolCallState struct {
@@ -166,24 +298,30 @@ type ToolResultState struct {
 }
 
 type TurnState struct {
-	RunID           string
-	UserMessage     string
-	Attachments     []string
-	Ephemerals      []string
-	Task            TaskState
-	Mode            string
-	CurrentPlan     string
-	LastLLMResponse LLMResponseState
-	ToolCalls       []ToolCallState
-	ToolResults     []ToolResultState
-	OutputDraft     string
-	Compact         CompactState
-	Reflection      ReflectionState
+	RunID            string
+	UserMessage      string
+	Attachments      []string
+	Ephemerals       []string
+	PendingMedia     []map[string]string
+	Task             TaskState
+	Mode             string
+	LastLLMResponse  LLMResponseState
+	ToolCalls        []ToolCallState
+	ToolResults      []ToolResultState
+	OutputDraft      string
+	StructuredOutput StructuredOutputState
+	ForceNextTool    string
+	ActiveSkills     map[string]string
+	Compact          CompactState
+	Reflection       ReflectionState
+	Intelligence     IntelligenceState
+	Orchestration    OrchestrationState
 }
 
 type ApprovalState struct {
 	ID          string
 	ToolName    string
+	Args        map[string]any
 	Reason      string
 	RequestedAt time.Time
 }
@@ -217,16 +355,22 @@ type ContinuationState struct {
 }
 
 type ExecutionState struct {
-	Cursor          ExecutionCursor
-	StartedAt       time.Time
-	UpdatedAt       time.Time
-	Status          NodeStatus
-	PendingApproval *ApprovalState
-	PendingBarrier  *BarrierState
-	PendingWake     bool
-	Retry           RetryState
-	Continuation    ContinuationState
-	LastError       string
+	Cursor            ExecutionCursor
+	StartedAt         time.Time
+	UpdatedAt         time.Time
+	Status            NodeStatus
+	WaitReason        WaitReason
+	ObservedState     string
+	TurnSteps         int
+	MaxTokens         int
+	ExcludedProviders []string
+	PendingApproval   *ApprovalState
+	PendingBarrier    *BarrierState
+	PendingWake       bool
+	Retry             RetryState
+	Continuation      ContinuationState
+	OutputSchemaName  string
+	LastError         string
 }
 
 type RuntimeContext struct {

@@ -98,6 +98,60 @@ func (s *stubSessionRepo) UpdateTitle(id, title string) error { return nil }
 func (s *stubSessionRepo) Touch(id string) error              { return nil }
 func (s *stubSessionRepo) DeleteConversation(id string) error { return nil }
 
+func newTestLegacyAPI(
+	loop *service.AgentLoop,
+	loopPool *service.LoopPool,
+	chatEngine *service.ChatEngine,
+	sessMgr *service.SessionManager,
+	modelMgr *service.ModelManager,
+	toolAdmin *service.ToolAdmin,
+	secHook *security.Hook,
+	histQuery HistoryQuerier,
+	brainDir string,
+	router *llm.Router,
+) LegacyAPI {
+	return NewLegacyAPI(ApplicationDeps{
+		Loop:       loop,
+		LoopPool:   loopPool,
+		ChatEngine: chatEngine,
+		SessionMgr: sessMgr,
+		ModelMgr:   modelMgr,
+		ToolAdmin:  toolAdmin,
+		SecHook:    secHook,
+		HistQuery:  histQuery,
+		BrainDir:   brainDir,
+		Router:     router,
+	})
+}
+
+func newTestLegacyAPIWithWiring(
+	loop *service.AgentLoop,
+	loopPool *service.LoopPool,
+	chatEngine *service.ChatEngine,
+	sessMgr *service.SessionManager,
+	modelMgr *service.ModelManager,
+	toolAdmin *service.ToolAdmin,
+	secHook *security.Hook,
+	histQuery HistoryQuerier,
+	brainDir string,
+	router *llm.Router,
+	wiring ServiceWiring,
+) LegacyAPI {
+	return NewLegacyAPI(ApplicationDeps{
+		Loop:       loop,
+		LoopPool:   loopPool,
+		ChatEngine: chatEngine,
+		SessionMgr: sessMgr,
+		ModelMgr:   modelMgr,
+		ToolAdmin:  toolAdmin,
+		SecHook:    secHook,
+		HistQuery:  histQuery,
+		BrainDir:   brainDir,
+		Router:     router,
+		Wiring:     wiring,
+	})
+}
+
 func TestAgentAPIApprove_RestoresPendingApprovalFromSnapshot(t *testing.T) {
 	store := graphruntime.NewInMemorySnapshotStore()
 	secHook := security.NewHook(&config.SecurityConfig{})
@@ -139,7 +193,7 @@ func TestAgentAPIApprove_RestoresPendingApprovalFromSnapshot(t *testing.T) {
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
 
-	api := NewAgentAPI(factory("__default__"), loopPool, nil, sessMgr, nil, nil, secHook, nil, nil, nil, nil, nil, nil, brainDir, nil, nil)
+	api := newTestLegacyAPI(factory("__default__"), loopPool, nil, sessMgr, nil, nil, secHook, nil, brainDir, nil)
 
 	if err := api.Approve("approval-1", true); err != nil {
 		t.Fatalf("approve should restore from snapshot: %v", err)
@@ -204,7 +258,7 @@ func TestChatStream_ReplaysPendingApprovalOnReconnect(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := NewAgentAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, secHook, nil, nil, nil, nil, nil, nil, brainDir, nil, nil)
+	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, secHook, nil, brainDir, nil)
 
 	var approvalID, toolName, reason string
 	var args map[string]any
@@ -260,7 +314,7 @@ func TestChatStream_DoesNotReplayClearedApprovalSnapshot(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := NewAgentAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, secHook, nil, nil, nil, nil, nil, nil, brainDir, nil, nil)
+	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, secHook, nil, brainDir, nil)
 
 	delta := &service.Delta{
 		OnApprovalRequestFunc: func(id, tool string, approvalArgs map[string]any, approvalReason string) {
@@ -329,7 +383,7 @@ func TestReviewPlan_RejectsAndResumesPlanningLoop(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := NewAgentAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, nil, nil, nil, nil, history, brainDir, nil, nil)
+	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, history, brainDir, nil)
 
 	if err := api.ReviewPlan(context.Background(), sessionID, false, "split rollout into phases"); err != nil {
 		t.Fatalf("ReviewPlan should resume planning loop: %v", err)
@@ -405,7 +459,7 @@ func TestApplyDecision_DelegatesPlanReview(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := NewAgentAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, nil, nil, nil, nil, nil, brainDir, nil, nil)
+	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, brainDir, nil)
 
 	if err := api.ApplyDecision(context.Background(), sessionID, "plan_review", "revise", "needs phasing"); err != nil {
 		t.Fatalf("ApplyDecision: %v", err)
@@ -481,8 +535,19 @@ func TestApplyDecision_InferKindFromPendingDecision(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := NewAgentAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, nil, nil, nil, nil, nil, brainDir, nil, nil)
-	api.SetRuntimeStore(store)
+	api := newTestLegacyAPIWithWiring(
+		factory("__default__"),
+		service.NewLoopPool(factory, brainDir),
+		nil,
+		sessMgr,
+		nil,
+		nil,
+		nil,
+		nil,
+		brainDir,
+		nil,
+		ServiceWiring{RuntimeStore: store},
+	)
 
 	runs, err := api.ListPendingRuns(context.Background(), sessionID)
 	if err != nil {
@@ -502,6 +567,17 @@ func TestApplyDecision_InferKindFromPendingDecision(t *testing.T) {
 
 	if err := api.ApplyDecision(context.Background(), sessionID, "", "revise", "narrow scope"); err != nil {
 		t.Fatalf("ApplyDecision infer kind: %v", err)
+	}
+
+	loaded, err := store.LoadLatestBySession(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("load snapshot after inferred decision: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected snapshot after inferred decision")
+	}
+	if loaded.TurnState.Orchestration.Ingress.DecisionKind != "plan_review" {
+		t.Fatalf("expected inferred ingress decision kind, got %#v", loaded.TurnState.Orchestration.Ingress)
 	}
 }
 
@@ -556,7 +632,7 @@ func TestResumeRun_ResumesNamedWaitingRun(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := NewAgentAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, nil, nil, nil, nil, nil, brainDir, nil, nil)
+	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, brainDir, nil)
 
 	if err := api.ResumeRun(context.Background(), sessionID, "run-resume-explicit"); err != nil {
 		t.Fatalf("ResumeRun: %v", err)
@@ -625,7 +701,7 @@ func TestApplyRuntimeIngress_RoutesResumeAndValidatesDecision(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := NewAgentAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, nil, nil, nil, nil, nil, brainDir, nil, nil)
+	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, brainDir, nil)
 
 	_, err := api.ApplyRuntimeIngress(context.Background(), apitype.RuntimeIngressRequest{
 		SessionID: sessionID,
@@ -640,15 +716,257 @@ func TestApplyRuntimeIngress_RoutesResumeAndValidatesDecision(t *testing.T) {
 	resumeResp, err := api.ApplyRuntimeIngress(context.Background(), apitype.RuntimeIngressRequest{
 		SessionID: sessionID,
 		Ingress: apitype.RuntimeIngressInput{
-			Kind:  "resume",
-			RunID: "run-ingress",
+			Kind:    "resume",
+			Source:  "runtime_ingress",
+			Trigger: "manual_resume",
+			RunID:   "run-ingress",
 		},
 	})
 	if err != nil {
 		t.Fatalf("ApplyRuntimeIngress resume: %v", err)
 	}
-	if resumeResp.Status != "accepted" || resumeResp.Ingress.RunID != "run-ingress" {
+	if resumeResp.Status != "resumed" || resumeResp.Ingress.RunID != "run-ingress" {
 		t.Fatalf("unexpected resume ingress response: %#v", resumeResp)
+	}
+
+	loaded, err := store.LoadLatest(context.Background(), "run-ingress")
+	if err != nil {
+		t.Fatalf("load ingress snapshot: %v", err)
+	}
+	if loaded == nil || loaded.TurnState.Orchestration.Ingress.Kind != "resume" {
+		t.Fatalf("expected resume ingress persisted to snapshot, got %#v", loaded)
+	}
+	if loaded.TurnState.Orchestration.Ingress.Source != "runtime_ingress" || loaded.TurnState.Orchestration.Ingress.Trigger != "manual_resume" {
+		t.Fatalf("unexpected persisted ingress metadata: %#v", loaded.TurnState.Orchestration.Ingress)
+	}
+}
+
+func TestApplyRuntimeIngress_AcceptsDecisionReasonFallback(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := persistence.RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	store := persistence.NewRunSnapshotStore(db)
+	brainDir := t.TempDir()
+	sessionID := "session-runtime-ingress-reason"
+
+	factory := func(sessionID string) *service.AgentLoop {
+		loop := service.NewAgentLoop(service.Deps{
+			Brain:         brain.NewArtifactStore(brainDir, sessionID),
+			SnapshotStore: store,
+			LLMRouter:     fakeModelRouter{},
+		})
+		loop.SetPlanMode("plan")
+		return loop
+	}
+
+	waiting := &graphruntime.RunSnapshot{
+		RunID:        "run-ingress-reason",
+		SessionID:    sessionID,
+		GraphID:      "agent_loop",
+		GraphVersion: "v1alpha1",
+		Status:       graphruntime.NodeStatusWait,
+		TurnState: graphruntime.TurnState{
+			RunID: "run-ingress-reason",
+			Intelligence: graphruntime.IntelligenceState{
+				Planning: graphruntime.PlanningState{
+					Required:       true,
+					ReviewRequired: true,
+					Trigger:        "mode_force_plan",
+				},
+			},
+		},
+		ExecutionState: graphruntime.ExecutionState{
+			Status:     graphruntime.NodeStatusWait,
+			WaitReason: graphruntime.WaitReasonUserInput,
+			Cursor: graphruntime.ExecutionCursor{
+				GraphID:      "agent_loop",
+				GraphVersion: "v1alpha1",
+				CurrentNode:  "plan",
+				Step:         1,
+				RouteKey:     "plan",
+			},
+		},
+		UpdatedAt: time.Now(),
+	}
+	if err := store.Save(context.Background(), waiting); err != nil {
+		t.Fatalf("save waiting snapshot: %v", err)
+	}
+
+	sessMgr := service.NewSessionManager(&stubSessionRepo{
+		sessions: []service.ConversationInfo{{ID: sessionID}},
+	})
+	api := newTestLegacyAPIWithWiring(
+		factory("__default__"),
+		service.NewLoopPool(factory, brainDir),
+		nil,
+		sessMgr,
+		nil,
+		nil,
+		nil,
+		nil,
+		brainDir,
+		nil,
+		ServiceWiring{RuntimeStore: store},
+	)
+
+	resp, err := api.ApplyRuntimeIngress(context.Background(), apitype.RuntimeIngressRequest{
+		SessionID: sessionID,
+		Ingress: apitype.RuntimeIngressInput{
+			Kind: "decision",
+			Decision: apitype.RuntimeDecisionContractInput{
+				Kind:     "plan_review",
+				Decision: "revise",
+				Reason:   "reason-only fallback",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyRuntimeIngress decision: %v", err)
+	}
+	if resp.Ingress.Decision.Kind != "plan_review" || resp.Ingress.Decision.Feedback != "reason-only fallback" {
+		t.Fatalf("expected normalized decision contract in ingress response, got %#v", resp.Ingress.Decision)
+	}
+
+	loaded, err := store.LoadLatestBySession(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("load snapshot after decision ingress: %v", err)
+	}
+	if loaded == nil || loaded.ExecutionState.WaitReason != graphruntime.WaitReasonUserInput {
+		t.Fatalf("expected decision ingress to continue through planning wait, got %#v", loaded)
+	}
+}
+
+func TestApplyRuntimeIngress_DecisionTargetsExplicitRun(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := persistence.RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	store := persistence.NewRunSnapshotStore(db)
+	brainDir := t.TempDir()
+	sessionID := "session-runtime-ingress-targeted"
+
+	factory := func(sessionID string) *service.AgentLoop {
+		loop := service.NewAgentLoop(service.Deps{
+			Brain:         brain.NewArtifactStore(brainDir, sessionID),
+			SnapshotStore: store,
+			LLMRouter:     fakeModelRouter{},
+		})
+		loop.SetPlanMode("plan")
+		return loop
+	}
+
+	makeWaiting := func(runID string, updatedAt time.Time) *graphruntime.RunSnapshot {
+		return &graphruntime.RunSnapshot{
+			RunID:        runID,
+			SessionID:    sessionID,
+			GraphID:      "agent_loop",
+			GraphVersion: "v1alpha1",
+			Status:       graphruntime.NodeStatusWait,
+			TurnState: graphruntime.TurnState{
+				RunID: runID,
+				Intelligence: graphruntime.IntelligenceState{
+					Planning: graphruntime.PlanningState{
+						Required:       true,
+						ReviewRequired: true,
+						Trigger:        "mode_force_plan",
+					},
+				},
+			},
+			ExecutionState: graphruntime.ExecutionState{
+				Status:     graphruntime.NodeStatusWait,
+				WaitReason: graphruntime.WaitReasonUserInput,
+				Cursor: graphruntime.ExecutionCursor{
+					GraphID:      "agent_loop",
+					GraphVersion: "v1alpha1",
+					CurrentNode:  "plan",
+					Step:         1,
+					RouteKey:     "plan",
+				},
+			},
+			UpdatedAt: updatedAt,
+		}
+	}
+
+	targetRunID := "run-ingress-target"
+	latestRunID := "run-ingress-latest"
+	targetUpdatedAt := time.Now().Add(-time.Minute)
+	latestUpdatedAt := time.Now()
+	if err := store.Save(context.Background(), makeWaiting(targetRunID, targetUpdatedAt)); err != nil {
+		t.Fatalf("save target waiting snapshot: %v", err)
+	}
+	if err := store.Save(context.Background(), makeWaiting(latestRunID, latestUpdatedAt)); err != nil {
+		t.Fatalf("save latest waiting snapshot: %v", err)
+	}
+
+	sessMgr := service.NewSessionManager(&stubSessionRepo{
+		sessions: []service.ConversationInfo{{ID: sessionID}},
+	})
+	api := newTestLegacyAPIWithWiring(
+		factory("__default__"),
+		service.NewLoopPool(factory, brainDir),
+		nil,
+		sessMgr,
+		nil,
+		nil,
+		nil,
+		nil,
+		brainDir,
+		nil,
+		ServiceWiring{RuntimeStore: store},
+	)
+
+	resp, err := api.ApplyRuntimeIngress(context.Background(), apitype.RuntimeIngressRequest{
+		SessionID: sessionID,
+		Ingress: apitype.RuntimeIngressInput{
+			Kind: "decision",
+			Run:  apitype.RuntimeRunTarget{RunID: targetRunID},
+			Decision: apitype.RuntimeDecisionContractInput{
+				Kind:     "plan_review",
+				Decision: "revise",
+				Feedback: "target this run",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyRuntimeIngress targeted decision: %v", err)
+	}
+	if resp.Status != "applied" || resp.Ingress.Run.RunID != targetRunID {
+		t.Fatalf("unexpected targeted decision response: %#v", resp)
+	}
+
+	targetSnap, err := store.LoadLatest(context.Background(), targetRunID)
+	if err != nil {
+		t.Fatalf("load target snapshot: %v", err)
+	}
+	if targetSnap == nil {
+		t.Fatal("expected target snapshot")
+	}
+	if targetSnap.TurnState.Orchestration.Ingress.RunID != targetRunID {
+		t.Fatalf("expected targeted ingress metadata on target run, got %#v", targetSnap.TurnState.Orchestration.Ingress)
+	}
+	if !targetSnap.UpdatedAt.After(targetUpdatedAt) {
+		t.Fatalf("expected target run to be updated by targeted decision, got updated_at=%v", targetSnap.UpdatedAt)
+	}
+
+	latestSnap, err := store.LoadLatest(context.Background(), latestRunID)
+	if err != nil {
+		t.Fatalf("load latest snapshot: %v", err)
+	}
+	if latestSnap == nil {
+		t.Fatal("expected latest snapshot")
+	}
+	if latestSnap.TurnState.Orchestration.Ingress != (graphruntime.IngressState{}) {
+		t.Fatalf("expected untargeted pending run to remain untouched, got ingress %#v", latestSnap.TurnState.Orchestration.Ingress)
+	}
+	if !latestSnap.UpdatedAt.Equal(latestUpdatedAt) {
+		t.Fatalf("expected untargeted pending run updated_at to remain unchanged, got %v", latestSnap.UpdatedAt)
 	}
 }
 
@@ -662,16 +980,11 @@ func TestRetryRun_RestoresPersistedHistoryWithoutCreatingGhostLoop(t *testing.T)
 	pool := service.NewLoopPool(func(sid string) *service.AgentLoop {
 		return service.NewAgentLoop(service.Deps{})
 	}, t.TempDir())
-	api := NewAgentAPI(
+	api := newTestLegacyAPI(
 		defaultLoop,
 		pool,
 		nil,
 		service.NewSessionManager(&stubSessionRepo{sessions: []service.ConversationInfo{{ID: sessionID}}}),
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
 		nil,
 		nil,
 		nil,
@@ -682,7 +995,6 @@ func TestRetryRun_RestoresPersistedHistoryWithoutCreatingGhostLoop(t *testing.T)
 			},
 		}},
 		"",
-		nil,
 		nil,
 	)
 
@@ -708,7 +1020,7 @@ func TestStopRun_DoesNotStopDefaultLoopForMissingSession(t *testing.T) {
 		return service.NewAgentLoop(service.Deps{})
 	}, t.TempDir())
 
-	api := NewAgentAPI(
+	api := newTestLegacyAPI(
 		defaultLoop,
 		pool,
 		nil,
@@ -717,14 +1029,8 @@ func TestStopRun_DoesNotStopDefaultLoopForMissingSession(t *testing.T) {
 		nil,
 		nil,
 		nil,
-		nil,
-		nil,
-		nil,
-		llm.NewRouter(nil),
-		nil,
 		"",
-		nil,
-		nil,
+		llm.NewRouter(nil),
 	)
 
 	api.StopRun("missing-session")
@@ -750,7 +1056,7 @@ func TestGetContextStats_UsesActiveSessionLoop(t *testing.T) {
 	})
 	sessMgr.Activate(sessionID)
 
-	api := NewAgentAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, nil, nil, nil, llm.NewRouter(nil), nil, "", nil, nil)
+	api := newTestLegacyAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
 
 	stats := api.GetContextStats()
 	if stats.HistoryCount != 1 {
@@ -774,7 +1080,7 @@ func TestGetContextStats_DoesNotCreateGhostLoopForMissingActiveSession(t *testin
 	})
 	sessMgr.Activate(sessionID)
 
-	api := NewAgentAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, nil, nil, nil, llm.NewRouter(nil), nil, "", nil, nil)
+	api := newTestLegacyAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
 
 	stats := api.GetContextStats()
 	if stats.HistoryCount != 1 || stats.TokenEstimate != len("default only")/4 {
@@ -798,7 +1104,7 @@ func TestClearHistory_DoesNotMutateDefaultLoopForMissingActiveSession(t *testing
 	})
 	sessMgr.Activate(sessionID)
 
-	api := NewAgentAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, nil, nil, nil, llm.NewRouter(nil), nil, "", nil, nil)
+	api := newTestLegacyAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
 	api.ClearHistory()
 
 	history := defaultLoop.GetHistory()
@@ -823,7 +1129,7 @@ func TestCompactContext_DoesNotCreateGhostLoopForMissingActiveSession(t *testing
 	})
 	sessMgr.Activate(sessionID)
 
-	api := NewAgentAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, nil, nil, nil, llm.NewRouter(nil), nil, "", nil, nil)
+	api := newTestLegacyAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
 	api.CompactContext()
 
 	if got := pool.GetIfExists(sessionID); got != nil {
@@ -840,7 +1146,7 @@ func TestGetHistory_PrefersResidentLoopWithoutCreatingGhostLoop(t *testing.T) {
 	resident := pool.Get(sessionID)
 	resident.SetHistory([]llm.Message{{Role: "user", Content: "resident history"}})
 
-	api := NewAgentAPI(
+	api := newTestLegacyAPI(
 		defaultLoop,
 		pool,
 		nil,
@@ -848,17 +1154,11 @@ func TestGetHistory_PrefersResidentLoopWithoutCreatingGhostLoop(t *testing.T) {
 		nil,
 		nil,
 		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		llm.NewRouter(nil),
 		&stubHistoryQuery{exports: map[string][]service.HistoryExport{
 			sessionID: {{Role: "user", Content: "persisted history"}},
 		}},
 		"",
-		nil,
-		nil,
+		llm.NewRouter(nil),
 	)
 
 	history, err := api.GetHistory(sessionID)
@@ -916,8 +1216,19 @@ func TestSaveSessionCost_UsesRequestedSessionInsteadOfActiveSession(t *testing.T
 	})
 	sessMgr.Activate(activeSession)
 
-	api := NewAgentAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, nil, nil, nil, llm.NewRouter(nil), nil, "", nil, nil)
-	api.SetTokenUsageStore(store)
+	api := newTestLegacyAPIWithWiring(
+		defaultLoop,
+		pool,
+		nil,
+		sessMgr,
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		llm.NewRouter(nil),
+		ServiceWiring{TokenUsageStore: store},
+	)
 
 	if err := api.SaveSessionCost(targetSession); err != nil {
 		t.Fatalf("SaveSessionCost: %v", err)
@@ -956,6 +1267,13 @@ func TestListRuntimeRunsAndChildRuns(t *testing.T) {
 		TurnState: graphruntime.TurnState{
 			RunID: "run-parent",
 			Orchestration: graphruntime.OrchestrationState{
+				Ingress: graphruntime.IngressState{
+					Kind:    "resume",
+					Source:  "runtime_ingress",
+					Trigger: "barrier_resume",
+					RunID:   "run-parent",
+					At:      now,
+				},
 				ChildRunIDs: []string{"run-child"},
 				Handoffs: []graphruntime.HandoffState{{
 					TargetRunID: "run-child",
@@ -1002,8 +1320,19 @@ func TestListRuntimeRunsAndChildRuns(t *testing.T) {
 		t.Fatalf("save child snapshot: %v", err)
 	}
 
-	api := NewAgentAPI(service.NewAgentLoop(service.Deps{}), nil, nil, service.NewSessionManager(&stubSessionRepo{}), nil, nil, nil, nil, nil, nil, nil, llm.NewRouter(nil), nil, "", nil, nil)
-	api.SetRuntimeStore(store)
+	api := newTestLegacyAPIWithWiring(
+		service.NewAgentLoop(service.Deps{}),
+		nil,
+		nil,
+		service.NewSessionManager(&stubSessionRepo{}),
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		llm.NewRouter(nil),
+		ServiceWiring{RuntimeStore: store},
+	)
 
 	runs, err := api.ListRuntimeRuns(context.Background(), "session-runtime")
 	if err != nil {
@@ -1023,6 +1352,12 @@ func TestListRuntimeRunsAndChildRuns(t *testing.T) {
 	if len(pending) != 1 || pending[0].RunID != "run-parent" || pending[0].WaitReason != string(graphruntime.WaitReasonBarrier) {
 		t.Fatalf("expected only pending parent run, got %#v", pending)
 	}
+	if pending[0].Ingress == nil || pending[0].Ingress.Kind != "resume" || pending[0].Ingress.Source != "runtime_ingress" {
+		t.Fatalf("expected runtime ingress on pending run, got %#v", pending[0].Ingress)
+	}
+	if pending[0].Ingress.Category != "runtime_control" || pending[0].Ingress.Phase != "resume" {
+		t.Fatalf("expected ingress taxonomy on pending run, got %#v", pending[0].Ingress)
+	}
 
 	children, err := api.ListChildRuns(context.Background(), "run-parent")
 	if err != nil {
@@ -1039,13 +1374,40 @@ func TestListRuntimeRunsAndChildRuns(t *testing.T) {
 	if len(graph.Nodes) != 2 || len(graph.RootRunIDs) != 1 || graph.RootRunIDs[0] != "run-parent" {
 		t.Fatalf("expected orchestration graph roots/nodes, got %#v", graph)
 	}
-	if len(graph.Edges) != 2 {
-		t.Fatalf("expected parent-child and handoff edges, got %#v", graph.Edges)
+	if len(graph.PendingRunIDs) != 1 || graph.PendingRunIDs[0] != "run-parent" {
+		t.Fatalf("expected pending run grouping, got %#v", graph.PendingRunIDs)
 	}
-	if graph.Edges[0].Kind != "parent_child" || graph.Edges[0].SourceRunID != "run-parent" || graph.Edges[0].TargetRunID != "run-child" {
+	if len(graph.PendingRuntimeControlRuns) != 1 || graph.PendingRuntimeControlRuns[0] != "run-parent" {
+		t.Fatalf("expected runtime-control pending grouping, got %#v", graph.PendingRuntimeControlRuns)
+	}
+	if len(graph.PendingDecisionRunIDs) != 0 {
+		t.Fatalf("expected no pending decision grouping for barrier wait, got %#v", graph.PendingDecisionRunIDs)
+	}
+	if len(graph.UserTurnRootRunIDs) != 0 {
+		t.Fatalf("expected no user-turn roots for runtime-control root, got %#v", graph.UserTurnRootRunIDs)
+	}
+	if graph.Summary.RunCount != 2 || graph.Summary.IngressNodeCount != 1 || graph.Summary.EdgeCount != 3 {
+		t.Fatalf("expected graph summary counts, got %#v", graph.Summary)
+	}
+	if len(graph.Summary.PendingRuntimeControlRuns) != 1 || graph.Summary.PendingRuntimeControlRuns[0] != "run-parent" {
+		t.Fatalf("expected summary pending runtime-control grouping, got %#v", graph.Summary)
+	}
+	if len(graph.IngressNodes) != 1 || graph.IngressNodes[0].ID != "ingress:resume:runtime_ingress:barrier_resume" {
+		t.Fatalf("expected ingress node layer, got %#v", graph.IngressNodes)
+	}
+	if graph.IngressNodes[0].Category != "runtime_control" || graph.IngressNodes[0].Phase != "resume" {
+		t.Fatalf("expected ingress taxonomy on graph node, got %#v", graph.IngressNodes[0])
+	}
+	if len(graph.Edges) != 3 {
+		t.Fatalf("expected ingress, parent-child and handoff edges, got %#v", graph.Edges)
+	}
+	if graph.Edges[0].Kind != "ingress" || graph.Edges[0].SourceRunID != "ingress:resume:runtime_ingress:barrier_resume" || graph.Edges[0].TargetRunID != "run-parent" {
+		t.Fatalf("expected ingress edge, got %#v", graph.Edges)
+	}
+	if graph.Edges[1].Kind != "parent_child" || graph.Edges[1].SourceRunID != "run-parent" || graph.Edges[1].TargetRunID != "run-child" {
 		t.Fatalf("expected parent-child edge, got %#v", graph.Edges)
 	}
-	if graph.Edges[1].Kind != "subagent_task" || graph.Edges[1].SourceRunID != "run-parent" || graph.Edges[1].TargetRunID != "run-child" {
+	if graph.Edges[2].Kind != "subagent_task" || graph.Edges[2].SourceRunID != "run-parent" || graph.Edges[2].TargetRunID != "run-child" {
 		t.Fatalf("expected handoff edge, got %#v", graph.Edges)
 	}
 
@@ -1121,8 +1483,19 @@ func TestListRuntimeRuns_MapsLastDecisionContracts(t *testing.T) {
 		t.Fatalf("save evaluation snapshot: %v", err)
 	}
 
-	api := NewAgentAPI(service.NewAgentLoop(service.Deps{}), nil, nil, service.NewSessionManager(&stubSessionRepo{}), nil, nil, nil, nil, nil, nil, nil, llm.NewRouter(nil), nil, "", nil, nil)
-	api.SetRuntimeStore(store)
+	api := newTestLegacyAPIWithWiring(
+		service.NewAgentLoop(service.Deps{}),
+		nil,
+		nil,
+		service.NewSessionManager(&stubSessionRepo{}),
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		llm.NewRouter(nil),
+		ServiceWiring{RuntimeStore: store},
+	)
 
 	runs, err := api.ListRuntimeRuns(context.Background(), "session-decisions")
 	if err != nil {

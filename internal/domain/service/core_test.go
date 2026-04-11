@@ -1,10 +1,12 @@
 package service
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 
 	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
+	"github.com/ngoclaw/ngoagent/internal/domain/model"
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 )
@@ -209,6 +211,99 @@ func TestBarrierSnapshotReflectsMembers(t *testing.T) {
 	}
 	if snap.Members[0].RunID == "" && snap.Members[1].RunID == "" {
 		t.Fatalf("expected member run ids in snapshot: %#v", snap.Members)
+	}
+	events := loop.orchestrationSnapshot().Events
+	if len(events) != 1 || events[0].Type != "barrier.member_completed" || events[0].RunID != "run-a" {
+		t.Fatalf("expected barrier completion event recorded, got %#v", events)
+	}
+}
+
+func TestBarrierTimeoutRecordsOrchestrationEvent(t *testing.T) {
+	loop := &AgentLoop{}
+	b := NewSubagentBarrier(loop, nil)
+	if err := b.Add("run-a", "task a"); err != nil {
+		t.Fatalf("Add run-a error: %v", err)
+	}
+
+	b.onTimeout()
+
+	events := loop.orchestrationSnapshot().Events
+	if len(events) != 1 || events[0].Type != "barrier.timeout" {
+		t.Fatalf("expected barrier timeout event recorded, got %#v", events)
+	}
+	if events[0].BarrierID == "" {
+		t.Fatalf("expected timeout event to carry barrier id, got %#v", events[0])
+	}
+}
+
+func TestRegisterSpawnedChildRecordsTopology(t *testing.T) {
+	loop := &AgentLoop{}
+
+	loop.BindParentRun("run-parent")
+	loop.RegisterSpawnedChild("run-parent", "run-child", "research task", "researcher")
+
+	state := loop.orchestrationSnapshot()
+	if state.ParentRunID != "run-parent" {
+		t.Fatalf("expected parent run binding, got %#v", state)
+	}
+	if len(state.ChildRunIDs) != 1 || state.ChildRunIDs[0] != "run-child" {
+		t.Fatalf("expected child run registration, got %#v", state.ChildRunIDs)
+	}
+	if len(state.Handoffs) != 1 || state.Handoffs[0].TargetRunID != "run-child" || state.Handoffs[0].Kind != "subagent_task" {
+		t.Fatalf("expected handoff registration, got %#v", state.Handoffs)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(state.Handoffs[0].PayloadJSON), &payload); err != nil {
+		t.Fatalf("unmarshal handoff payload: %v", err)
+	}
+	if payload["task_name"] != "research task" || payload["agent_type"] != "researcher" {
+		t.Fatalf("unexpected handoff payload: %#v", payload)
+	}
+	if len(state.Events) != 1 || state.Events[0].Type != "child.spawned" || state.Events[0].RunID != "run-child" {
+		t.Fatalf("expected child spawn event, got %#v", state.Events)
+	}
+}
+
+type stubAgentResolver struct{}
+
+func (stubAgentResolver) Resolve(agentType string) (*model.AgentDefinition, error) {
+	return &model.AgentDefinition{AgentType: agentType}, nil
+}
+
+func TestSubagentOrchestratorCreatesAndReusesBarrier(t *testing.T) {
+	factory := NewLoopFactory(Deps{}, 1)
+	parent := NewAgentLoop(Deps{})
+	orchestrator := NewSubagentOrchestrator(factory, parent, func(string) *AgentLoop { return parent }, stubAgentResolver{})
+
+	first := orchestrator.getOrCreateBarrier("session-orch", "run-parent", parent, &model.AgentDefinition{AgentType: "researcher"})
+	if first == nil {
+		t.Fatal("expected orchestrator barrier")
+	}
+	if parent.activeBarrierSnapshot() == nil {
+		t.Fatal("expected parent active barrier to be set")
+	}
+	if err := first.Add("run-child-1", "research"); err != nil {
+		t.Fatalf("barrier add: %v", err)
+	}
+	second := orchestrator.getOrCreateBarrier("session-orch", "run-parent", parent, &model.AgentDefinition{AgentType: "researcher"})
+	if second != first {
+		t.Fatal("expected active barrier to be reused for same parent run while pending")
+	}
+}
+
+func TestSubagentOrchestratorSeparatesBarriersByParentRun(t *testing.T) {
+	factory := NewLoopFactory(Deps{}, 1)
+	parent := NewAgentLoop(Deps{})
+	orchestrator := NewSubagentOrchestrator(factory, parent, func(string) *AgentLoop { return parent }, stubAgentResolver{})
+
+	first := orchestrator.getOrCreateBarrier("session-orch", "run-parent-a", parent, &model.AgentDefinition{AgentType: "researcher"})
+	if err := first.Add("run-child-1", "research-a"); err != nil {
+		t.Fatalf("barrier add: %v", err)
+	}
+
+	second := orchestrator.getOrCreateBarrier("session-orch", "run-parent-b", parent, &model.AgentDefinition{AgentType: "researcher"})
+	if second == first {
+		t.Fatal("expected distinct barriers for different parent runs in the same session")
 	}
 }
 

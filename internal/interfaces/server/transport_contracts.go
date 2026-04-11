@@ -34,18 +34,24 @@ func decodeRuntimeDecisionApplyRequest(r *http.Request) (apitype.RuntimeDecision
 	}
 
 	type runtimeDecisionEnvelope struct {
-		SessionID string          `json:"session_id"`
-		Decision  json.RawMessage `json:"decision"`
-		Kind      string          `json:"kind"`
-		Reason    string          `json:"reason"`
-		Feedback  string          `json:"feedback"`
+		SessionID string                   `json:"session_id"`
+		Run       apitype.RuntimeRunTarget `json:"run"`
+		RunID     string                   `json:"run_id"`
+		Decision  json.RawMessage          `json:"decision"`
+		Kind      string                   `json:"kind"`
+		Reason    string                   `json:"reason"`
+		Feedback  string                   `json:"feedback"`
 	}
 
 	var envelope runtimeDecisionEnvelope
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return apitype.RuntimeDecisionApplyRequest{}, err
 	}
-	req := apitype.RuntimeDecisionApplyRequest{SessionID: envelope.SessionID}
+	req := apitype.RuntimeDecisionApplyRequest{
+		SessionID: envelope.SessionID,
+		Run:       envelope.Run,
+		RunID:     envelope.RunID,
+	}
 	if len(envelope.Decision) > 0 && string(envelope.Decision) != "null" {
 		if envelope.Decision[0] == '{' {
 			if err := json.Unmarshal(envelope.Decision, &req.Decision); err != nil {

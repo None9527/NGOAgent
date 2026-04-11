@@ -11,39 +11,19 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// RunSnapshotRecord stores the latest persisted execution snapshot for a run.
-// It is intentionally separated from HistoryMessage so execution resume does not
-// depend on chat transcript storage semantics.
-type RunSnapshotRecord struct {
-	RunID              string `gorm:"primaryKey"`
-	SessionID          string `gorm:"index"`
-	GraphID            string `gorm:"index"`
-	GraphVersion       string
-	Status             string `gorm:"index"`
-	CursorJSON         string `gorm:"type:text"`
-	TurnStateJSON      string `gorm:"type:text"`
-	ExecutionStateJSON string `gorm:"type:text"`
-	CreatedAt          time.Time
-	UpdatedAt          time.Time `gorm:"index"`
-}
-
-// RunSnapshotStore persists graph runtime checkpoints.
+// RunSnapshotStore persists graph runtime checkpoints in the normalized runtime tables.
 type RunSnapshotStore struct {
 	db *gorm.DB
 }
 
-// NewRunSnapshotStore creates a snapshot store and migrates the table.
 func NewRunSnapshotStore(db *gorm.DB) *RunSnapshotStore {
-	db.AutoMigrate(&RunSnapshotRecord{})
 	return &RunSnapshotStore{db: db}
 }
 
-// Save upserts the latest snapshot for a run.
 func (s *RunSnapshotStore) Save(_ context.Context, snap *graphruntime.RunSnapshot) error {
 	if snap == nil {
 		return fmt.Errorf("run snapshot is nil")
 	}
-
 	cursorJSON, err := json.Marshal(snap.Cursor)
 	if err != nil {
 		return fmt.Errorf("marshal cursor: %w", err)
@@ -57,89 +37,325 @@ func (s *RunSnapshotStore) Save(_ context.Context, snap *graphruntime.RunSnapsho
 		return fmt.Errorf("marshal execution state: %w", err)
 	}
 
-	record := RunSnapshotRecord{
-		RunID:              snap.RunID,
-		SessionID:          snap.SessionID,
-		GraphID:            snap.GraphID,
-		GraphVersion:       snap.GraphVersion,
-		Status:             string(snap.Status),
-		CursorJSON:         string(cursorJSON),
-		TurnStateJSON:      string(turnStateJSON),
-		ExecutionStateJSON: string(execStateJSON),
-		CreatedAt:          snap.CreatedAt,
-		UpdatedAt:          snap.UpdatedAt,
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		return saveRuntimeSnapshot(tx, snap, string(cursorJSON), string(turnStateJSON), string(execStateJSON))
+	})
+}
+
+func (s *RunSnapshotStore) LoadLatest(_ context.Context, runID string) (*graphruntime.RunSnapshot, error) {
+	return s.loadLatestRuntime(runID)
+}
+
+func (s *RunSnapshotStore) LoadLatestBySession(_ context.Context, sessionID string) (*graphruntime.RunSnapshot, error) {
+	if snap, err := s.loadLatestWaitingRuntimeBySession(sessionID); err != nil {
+		return nil, err
+	} else if snap != nil {
+		return snap, nil
+	}
+	return s.loadLatestRuntimeBySession(sessionID)
+}
+
+func (s *RunSnapshotStore) ListBySession(_ context.Context, sessionID string) ([]*graphruntime.RunSnapshot, error) {
+	var runs []AgentRunRecord
+	if err := s.db.Where("conversation_id = ?", sessionID).Order("updated_at DESC").Find(&runs).Error; err != nil {
+		return nil, err
+	}
+	return s.loadSnapshotsForRuns(runs)
+}
+
+func (s *RunSnapshotStore) ListByParentRun(_ context.Context, parentRunID string) ([]*graphruntime.RunSnapshot, error) {
+	var runs []AgentRunRecord
+	if err := s.db.Where("parent_run_id = ?", parentRunID).Order("updated_at DESC").Find(&runs).Error; err != nil {
+		return nil, err
+	}
+	return s.loadSnapshotsForRuns(runs)
+}
+
+func (s *RunSnapshotStore) Delete(_ context.Context, runID string) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("run_id = ?", runID).Delete(&RunWaitRecord{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("run_id = ?", runID).Delete(&RunEventRecord{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("run_id = ?", runID).Delete(&RunCheckpointRecord{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&AgentRunRecord{}, "id = ?", runID).Error
+	})
+}
+
+func (s *RunSnapshotStore) loadLatestRuntime(runID string) (*graphruntime.RunSnapshot, error) {
+	var run AgentRunRecord
+	if err := s.db.First(&run, "id = ?", runID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
 	}
 
-	return s.db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "run_id"}},
+	checkpoint, err := s.latestCheckpoint(runID)
+	if err != nil {
+		return nil, err
+	}
+	if checkpoint == nil {
+		return nil, nil
+	}
+	return runtimeRecordsToSnapshot(run, *checkpoint)
+}
+
+func (s *RunSnapshotStore) loadLatestRuntimeBySession(sessionID string) (*graphruntime.RunSnapshot, error) {
+	var run AgentRunRecord
+	if err := s.db.Where("conversation_id = ?", sessionID).Order("updated_at DESC").First(&run).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	checkpoint, err := s.latestCheckpoint(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if checkpoint == nil {
+		return nil, nil
+	}
+	return runtimeRecordsToSnapshot(run, *checkpoint)
+}
+
+func (s *RunSnapshotStore) loadLatestWaitingRuntimeBySession(sessionID string) (*graphruntime.RunSnapshot, error) {
+	var run AgentRunRecord
+	err := s.db.Table("agent_runs").
+		Joins("JOIN run_waits ON run_waits.run_id = agent_runs.id").
+		Where("agent_runs.conversation_id = ? AND run_waits.status = ?", sessionID, "pending").
+		Order("run_waits.created_at DESC").
+		Select("agent_runs.*").
+		First(&run).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	checkpoint, err := s.latestCheckpoint(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if checkpoint == nil {
+		return nil, nil
+	}
+	return runtimeRecordsToSnapshot(run, *checkpoint)
+}
+
+func (s *RunSnapshotStore) latestCheckpoint(runID string) (*RunCheckpointRecord, error) {
+	var checkpoint RunCheckpointRecord
+	if err := s.db.Where("run_id = ?", runID).Order("checkpoint_no DESC").First(&checkpoint).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &checkpoint, nil
+}
+
+func (s *RunSnapshotStore) loadSnapshotsForRuns(runs []AgentRunRecord) ([]*graphruntime.RunSnapshot, error) {
+	snaps := make([]*graphruntime.RunSnapshot, 0, len(runs))
+	for _, run := range runs {
+		checkpoint, err := s.latestCheckpoint(run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if checkpoint == nil {
+			continue
+		}
+		snap, err := runtimeRecordsToSnapshot(run, *checkpoint)
+		if err != nil {
+			return nil, err
+		}
+		snaps = append(snaps, snap)
+	}
+	return snaps, nil
+}
+
+func saveRuntimeSnapshot(tx *gorm.DB, snap *graphruntime.RunSnapshot, cursorJSON, turnStateJSON, execStateJSON string) error {
+	updatedAt := snap.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	createdAt := snap.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = updatedAt
+	}
+	startedAt := snap.ExecutionState.StartedAt
+	if startedAt.IsZero() {
+		startedAt = createdAt
+	}
+
+	runRecord := AgentRunRecord{
+		ID:                   snap.RunID,
+		ConversationID:       snap.SessionID,
+		EntryType:            "graph_runtime",
+		Status:               string(snap.Status),
+		CurrentNode:          snap.Cursor.CurrentNode,
+		CurrentRoute:         snap.Cursor.RouteKey,
+		WaitReason:           string(snap.ExecutionState.WaitReason),
+		GraphID:              snap.GraphID,
+		GraphVersion:         snap.GraphVersion,
+		RuntimeSchemaVersion: 1,
+		StartedAt:            startedAt,
+		UpdatedAt:            updatedAt,
+	}
+	if parentRunID := snap.TurnState.Orchestration.ParentRunID; parentRunID != "" {
+		runRecord.ParentRunID = &parentRunID
+	}
+	if snap.Status == graphruntime.NodeStatusComplete || snap.Status == graphruntime.NodeStatusFatal {
+		finishedAt := updatedAt
+		runRecord.FinishedAt = &finishedAt
+	}
+	if err := tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
-			"session_id",
+			"conversation_id",
+			"parent_run_id",
+			"entry_type",
+			"status",
+			"current_node",
+			"current_route",
+			"wait_reason",
 			"graph_id",
 			"graph_version",
-			"status",
-			"cursor_json",
-			"turn_state_json",
-			"execution_state_json",
+			"runtime_schema_version",
+			"started_at",
 			"updated_at",
+			"finished_at",
 		}),
-	}).Create(&record).Error
-}
-
-// LoadLatest loads the latest snapshot for a run.
-func (s *RunSnapshotStore) LoadLatest(_ context.Context, runID string) (*graphruntime.RunSnapshot, error) {
-	var record RunSnapshotRecord
-	if err := s.db.First(&record, "run_id = ?", runID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, nil
-		}
-		return nil, err
+	}).Create(&runRecord).Error; err != nil {
+		return err
 	}
-	return s.recordToSnapshot(record)
-}
 
-// LoadLatestBySession loads the most recently updated snapshot for a session.
-func (s *RunSnapshotStore) LoadLatestBySession(_ context.Context, sessionID string) (*graphruntime.RunSnapshot, error) {
-	var record RunSnapshotRecord
-	if err := s.db.Where("session_id = ?", sessionID).Order("updated_at DESC").First(&record).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, nil
-		}
-		return nil, err
+	var lastCheckpoint RunCheckpointRecord
+	checkpointNo := int64(1)
+	err := tx.Where("run_id = ?", snap.RunID).Order("checkpoint_no DESC").First(&lastCheckpoint).Error
+	if err == nil {
+		checkpointNo = lastCheckpoint.CheckpointNo + 1
+	} else if err != nil && err != gorm.ErrRecordNotFound {
+		return err
 	}
-	return s.recordToSnapshot(record)
+
+	checkpoint := RunCheckpointRecord{
+		ID:                 fmt.Sprintf("%s:%d", snap.RunID, checkpointNo),
+		RunID:              snap.RunID,
+		CheckpointNo:       checkpointNo,
+		Status:             string(snap.Status),
+		SchemaVersion:      1,
+		CursorJSON:         cursorJSON,
+		TurnStateJSON:      turnStateJSON,
+		ExecutionStateJSON: execStateJSON,
+		CreatedAt:          updatedAt,
+	}
+	if err := tx.Create(&checkpoint).Error; err != nil {
+		return err
+	}
+
+	if snap.Status == graphruntime.NodeStatusWait {
+		wait := RunWaitRecord{
+			ID:          snap.RunID,
+			RunID:       snap.RunID,
+			WaitType:    string(snap.ExecutionState.WaitReason),
+			Status:      "pending",
+			PayloadJSON: execStateJSON,
+			CreatedAt:   updatedAt,
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"wait_type",
+				"status",
+				"payload_json",
+				"created_at",
+				"resolved_at",
+			}),
+		}).Create(&wait).Error; err != nil {
+			return err
+		}
+	} else {
+		resolvedAt := updatedAt
+		if err := tx.Model(&RunWaitRecord{}).
+			Where("run_id = ?", snap.RunID).
+			Updates(map[string]any{"status": "resolved", "resolved_at": resolvedAt}).Error; err != nil {
+			return err
+		}
+	}
+
+	if err := saveRuntimeEvents(tx, snap.RunID, snap.TurnState.Orchestration.Events, updatedAt); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-// Delete removes the latest snapshot for a run.
-func (s *RunSnapshotStore) Delete(_ context.Context, runID string) error {
-	return s.db.Delete(&RunSnapshotRecord{}, "run_id = ?", runID).Error
+func saveRuntimeEvents(tx *gorm.DB, runID string, events []graphruntime.OrchestrationEventState, defaultAt time.Time) error {
+	var lastSeq int64
+	if err := tx.Model(&RunEventRecord{}).
+		Where("run_id = ?", runID).
+		Select("COALESCE(MAX(seq), 0)").
+		Scan(&lastSeq).Error; err != nil {
+		return err
+	}
+
+	for idx, event := range events {
+		if int64(idx+1) <= lastSeq {
+			continue
+		}
+		createdAt := event.At
+		if createdAt.IsZero() {
+			createdAt = defaultAt
+		}
+		payloadJSON, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("marshal runtime event: %w", err)
+		}
+		record := RunEventRecord{
+			ID:          fmt.Sprintf("%s:%d", runID, idx+1),
+			RunID:       runID,
+			Seq:         int64(idx + 1),
+			EventType:   event.Type,
+			PayloadJSON: string(payloadJSON),
+			CreatedAt:   createdAt,
+		}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&record).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func (s *RunSnapshotStore) recordToSnapshot(record RunSnapshotRecord) (*graphruntime.RunSnapshot, error) {
+func runtimeRecordsToSnapshot(run AgentRunRecord, checkpoint RunCheckpointRecord) (*graphruntime.RunSnapshot, error) {
 	var cursor graphruntime.ExecutionCursor
-	if err := json.Unmarshal([]byte(record.CursorJSON), &cursor); err != nil {
+	if err := json.Unmarshal([]byte(checkpoint.CursorJSON), &cursor); err != nil {
 		return nil, fmt.Errorf("unmarshal cursor: %w", err)
 	}
-
 	var turnState graphruntime.TurnState
-	if err := json.Unmarshal([]byte(record.TurnStateJSON), &turnState); err != nil {
+	if err := json.Unmarshal([]byte(checkpoint.TurnStateJSON), &turnState); err != nil {
 		return nil, fmt.Errorf("unmarshal turn state: %w", err)
 	}
-
 	var execState graphruntime.ExecutionState
-	if err := json.Unmarshal([]byte(record.ExecutionStateJSON), &execState); err != nil {
+	if err := json.Unmarshal([]byte(checkpoint.ExecutionStateJSON), &execState); err != nil {
 		return nil, fmt.Errorf("unmarshal execution state: %w", err)
 	}
 
 	return &graphruntime.RunSnapshot{
-		RunID:          record.RunID,
-		SessionID:      record.SessionID,
-		GraphID:        record.GraphID,
-		GraphVersion:   record.GraphVersion,
-		Status:         graphruntime.NodeStatus(record.Status),
+		RunID:          run.ID,
+		SessionID:      run.ConversationID,
+		GraphID:        run.GraphID,
+		GraphVersion:   run.GraphVersion,
+		Status:         graphruntime.NodeStatus(run.Status),
 		Cursor:         cursor,
 		TurnState:      turnState,
 		ExecutionState: execState,
-		CreatedAt:      record.CreatedAt,
-		UpdatedAt:      record.UpdatedAt,
+		CreatedAt:      run.StartedAt,
+		UpdatedAt:      run.UpdatedAt,
 	}, nil
 }

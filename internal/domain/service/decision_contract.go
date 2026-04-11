@@ -65,6 +65,28 @@ func NewDecisionContract(kind, decision, feedback string) (*graphruntime.Decisio
 		default:
 			return nil, agenterr.NewValidation("decision", "unsupported plan review decision")
 		}
+	case graphruntime.DecisionKindReflection:
+		switch strings.TrimSpace(strings.ToLower(decision)) {
+		case "accept", "accepted", "approve", "approved":
+			contract.Decision = "accept"
+			contract.Valid = true
+		case "revise", "reject", "rejected":
+			contract.Decision = "revise"
+			contract.Valid = true
+		default:
+			return nil, agenterr.NewValidation("decision", "unsupported reflection decision")
+		}
+	case graphruntime.DecisionKindEvaluation:
+		switch strings.TrimSpace(strings.ToLower(decision)) {
+		case "pass", "passed":
+			contract.Decision = "passed"
+			contract.Valid = true
+		case "fail", "failed":
+			contract.Decision = "failed"
+			contract.Valid = true
+		default:
+			return nil, agenterr.NewValidation("decision", "unsupported evaluation decision")
+		}
 	default:
 		return nil, agenterr.NewValidation("kind", "unsupported decision kind")
 	}
@@ -155,6 +177,36 @@ func applyDecisionToSnapshot(snap *graphruntime.RunSnapshot, contract *graphrunt
 		snap.TurnState.Intelligence.Planning = planning
 		snap.UpdatedAt = contract.AppliedAt
 		return nil
+	case graphruntime.DecisionKindReflection:
+		review := snap.TurnState.Intelligence.Review
+		switch contract.Decision {
+		case "accept":
+			review.Decision = "accept"
+		case "revise":
+			review.Decision = "revise"
+		default:
+			return agenterr.NewValidation("decision", fmt.Sprintf("unsupported reflection decision %q", contract.Decision))
+		}
+		review.Reason = strings.TrimSpace(contract.Feedback)
+		review.Valid = true
+		snap.TurnState.Intelligence.Review = review
+		snap.UpdatedAt = contract.AppliedAt
+		return nil
+	case graphruntime.DecisionKindEvaluation:
+		eval := snap.TurnState.Intelligence.Evaluation
+		switch contract.Decision {
+		case "passed":
+			eval.Passed = true
+		case "failed":
+			eval.Passed = false
+			eval.ErrorType = strings.TrimSpace(contract.Feedback)
+		default:
+			return agenterr.NewValidation("decision", fmt.Sprintf("unsupported evaluation decision %q", contract.Decision))
+		}
+		eval.Valid = true
+		snap.TurnState.Intelligence.Evaluation = eval
+		snap.UpdatedAt = contract.AppliedAt
+		return nil
 	default:
 		return agenterr.NewValidation("kind", "unsupported decision kind")
 	}
@@ -183,7 +235,14 @@ func (w waitSnapshotView) pendingDecision() *graphruntime.DecisionContractState 
 }
 
 func (a *AgentLoop) PendingDecision(ctx context.Context) (*graphruntime.DecisionContractState, error) {
+	return a.PendingDecisionForRun(ctx, "")
+}
+
+func (a *AgentLoop) PendingDecisionForRun(ctx context.Context, runID string) (*graphruntime.DecisionContractState, error) {
 	wait, err := a.latestWaitSnapshotView(ctx)
+	if strings.TrimSpace(runID) != "" {
+		wait, err = a.waitSnapshotView(ctx, runID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -191,11 +250,15 @@ func (a *AgentLoop) PendingDecision(ctx context.Context) (*graphruntime.Decision
 }
 
 func (a *AgentLoop) ApplyPendingDecision(ctx context.Context, kind, decision, feedback string) (bool, error) {
+	return a.ApplyPendingDecisionToRun(ctx, "", kind, decision, feedback)
+}
+
+func (a *AgentLoop) ApplyPendingDecisionToRun(ctx context.Context, runID, kind, decision, feedback string) (bool, error) {
 	if a.deps.SnapshotStore == nil {
 		return false, nil
 	}
 
-	wait, err := a.latestWaitSnapshotView(ctx)
+	wait, err := a.waitSnapshotView(ctx, runID)
 	if err != nil {
 		return false, err
 	}

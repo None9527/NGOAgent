@@ -336,8 +336,30 @@ func (a *AgentLoop) latestWaitSnapshot(ctx context.Context) (*graphruntime.RunSn
 	return snap, nil
 }
 
+func (a *AgentLoop) waitSnapshot(ctx context.Context, runID string) (*graphruntime.RunSnapshot, error) {
+	if a.deps.SnapshotStore == nil {
+		return nil, nil
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return a.latestWaitSnapshot(ctx)
+	}
+	snap, err := a.deps.SnapshotStore.LoadLatest(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	if snap == nil || snap.SessionID != a.SessionID() || snap.Status != graphruntime.NodeStatusWait {
+		return nil, nil
+	}
+	return snap, nil
+}
+
 func (a *AgentLoop) latestWaitSnapshotView(ctx context.Context) (waitSnapshotView, error) {
-	snap, err := a.latestWaitSnapshot(ctx)
+	return a.waitSnapshotView(ctx, "")
+}
+
+func (a *AgentLoop) waitSnapshotView(ctx context.Context, runID string) (waitSnapshotView, error) {
+	snap, err := a.waitSnapshot(ctx, runID)
 	if err != nil {
 		return waitSnapshotView{}, err
 	}

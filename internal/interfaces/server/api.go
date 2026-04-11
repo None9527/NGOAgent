@@ -22,11 +22,11 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			Title string `json:"title"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		json.NewEncoder(w).Encode(s.api.NewSession(req.Title))
+		json.NewEncoder(w).Encode(s.session.NewSession(req.Title))
 	})
 
 	mux.HandleFunc("/api/v1/session/list", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(s.api.ListSessions())
+		json.NewEncoder(w).Encode(s.session.ListSessions())
 	})
 
 	mux.HandleFunc("/api/v1/session/title", func(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +42,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "id and title required", http.StatusBadRequest)
 			return
 		}
-		s.api.SetSessionTitle(req.ID, req.Title)
+		s.session.SetSessionTitle(req.ID, req.Title)
 		json.NewEncoder(w).Encode(apitype.StatusIDResponse{Status: "ok", ID: req.ID})
 	})
 
@@ -55,7 +55,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			ID string `json:"id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		if err := s.api.DeleteSession(req.ID); err != nil {
+		if err := s.session.DeleteSession(req.ID); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -66,7 +66,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("/api/v1/history", func(w http.ResponseWriter, r *http.Request) {
 		sid := r.URL.Query().Get("session_id")
-		msgs, err := s.api.GetHistory(sid)
+		msgs, err := s.session.GetHistory(sid)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -79,7 +79,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		s.api.ClearHistory()
+		s.session.ClearHistory()
 		json.NewEncoder(w).Encode(apitype.StatusResponse{Status: "cleared"})
 	})
 
@@ -88,7 +88,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		s.api.CompactContext()
+		s.session.CompactContext()
 		json.NewEncoder(w).Encode(apitype.StatusResponse{Status: "compacted"})
 	})
 
@@ -100,7 +100,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "session_id required", http.StatusBadRequest)
 			return
 		}
-		runs, err := s.api.ListRuntimeRuns(r.Context(), sessionID)
+		runs, err := s.runtime.ListRuntimeRuns(r.Context(), sessionID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -114,7 +114,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "session_id required", http.StatusBadRequest)
 			return
 		}
-		graph, err := s.api.ListRuntimeGraph(r.Context(), sessionID)
+		graph, err := s.runtime.ListRuntimeGraph(r.Context(), sessionID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -128,7 +128,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "session_id required", http.StatusBadRequest)
 			return
 		}
-		runs, err := s.api.ListPendingRuns(r.Context(), sessionID)
+		runs, err := s.runtime.ListPendingRuns(r.Context(), sessionID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -142,7 +142,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "session_id required", http.StatusBadRequest)
 			return
 		}
-		runs, err := s.api.ListPendingDecisions(r.Context(), sessionID)
+		runs, err := s.runtime.ListPendingDecisions(r.Context(), sessionID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -156,7 +156,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "parent_run_id required", http.StatusBadRequest)
 			return
 		}
-		runs, err := s.api.ListChildRuns(r.Context(), parentRunID)
+		runs, err := s.runtime.ListChildRuns(r.Context(), parentRunID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -178,7 +178,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "session_id required", http.StatusBadRequest)
 			return
 		}
-		if err := s.api.ResumeRun(r.Context(), req.SessionID, resolvedRuntimeRunID(req)); err != nil {
+		if err := s.chat.ResumeRun(r.Context(), req.SessionID, resolvedRuntimeRunID(req)); err != nil {
 			writeJSONError(w, err)
 			return
 		}
@@ -203,13 +203,16 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "session_id and decision required", http.StatusBadRequest)
 			return
 		}
-		if err := s.api.ApplyDecision(r.Context(), req.SessionID, req.Decision.Kind, req.Decision.Decision, req.Decision.Feedback); err != nil {
+		req.Decision = apitype.NormalizeRuntimeDecisionInput(req.Decision)
+		runID := apitype.ResolveRuntimeRunID(req.Run, req.RunID)
+		if err := s.chat.ApplyDecisionToRun(r.Context(), req.SessionID, runID, req.Decision.Kind, req.Decision.Decision, req.Decision.Feedback); err != nil {
 			writeJSONError(w, err)
 			return
 		}
 		json.NewEncoder(w).Encode(apitype.RuntimeDecisionApplyResponse{
 			Status:    "applied",
 			SessionID: req.SessionID,
+			Run:       apitype.RuntimeRunTarget{RunID: runID},
 			Decision:  req.Decision,
 		})
 	})
@@ -224,7 +227,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		resp, err := s.api.ApplyRuntimeIngress(r.Context(), req)
+		resp, err := s.chat.ApplyRuntimeIngress(r.Context(), req)
 		if err != nil {
 			writeJSONError(w, err)
 			return
@@ -235,7 +238,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	// ─── Tools ───
 
 	mux.HandleFunc("/api/v1/tools", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(apitype.ToolListResponse{Tools: s.api.ListTools()})
+		json.NewEncoder(w).Encode(apitype.ToolListResponse{Tools: s.admin.ListTools()})
 	})
 
 	mux.HandleFunc("/api/v1/tools/enable", func(w http.ResponseWriter, r *http.Request) {
@@ -247,7 +250,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			Name string `json:"name"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		if err := s.api.EnableTool(req.Name); err != nil {
+		if err := s.admin.EnableTool(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -263,7 +266,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			Name string `json:"name"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		if err := s.api.DisableTool(req.Name); err != nil {
+		if err := s.admin.DisableTool(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -271,7 +274,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/v1/skills/list", func(w http.ResponseWriter, r *http.Request) {
-		skills, err := s.api.ListSkills()
+		skills, err := s.admin.ListSkills()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -285,7 +288,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "name required", http.StatusBadRequest)
 			return
 		}
-		content, err := s.api.ReadSkillContent(name)
+		content, err := s.admin.ReadSkillContent(name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -298,7 +301,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		if err := s.api.RefreshSkills(); err != nil {
+		if err := s.admin.RefreshSkills(); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -317,7 +320,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "name required", http.StatusBadRequest)
 			return
 		}
-		if err := s.api.DeleteSkill(req.Name); err != nil {
+		if err := s.admin.DeleteSkill(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -327,7 +330,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	// ─── MCP ───
 
 	mux.HandleFunc("/api/v1/mcp/servers", func(w http.ResponseWriter, r *http.Request) {
-		servers, err := s.api.ListMCPServers()
+		servers, err := s.admin.ListMCPServers()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -336,7 +339,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/v1/mcp/tools", func(w http.ResponseWriter, r *http.Request) {
-		tools, err := s.api.ListMCPTools()
+		tools, err := s.admin.ListMCPTools()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -363,7 +366,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "key required", http.StatusBadRequest)
 			return
 		}
-		if err := s.api.SetConfig(req.Key, req.Value); err != nil {
+		if err := s.admin.SetConfig(req.Key, req.Value); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -382,7 +385,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if err := s.api.AddProvider(req); err != nil {
+		if err := s.admin.AddProvider(req); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
@@ -401,7 +404,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if err := s.api.RemoveProvider(req.Name); err != nil {
+		if err := s.admin.RemoveProvider(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -420,7 +423,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if err := s.api.AddMCPServer(req); err != nil {
+		if err := s.admin.AddMCPServer(req); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
@@ -439,7 +442,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if err := s.api.RemoveMCPServer(req.Name); err != nil {
+		if err := s.admin.RemoveMCPServer(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -449,24 +452,24 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	// ─── Security ───
 
 	mux.HandleFunc("/api/v1/security", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(s.api.GetSecurity())
+		json.NewEncoder(w).Encode(s.admin.GetSecurity())
 	})
 
 	// ─── Stats & System ───
 
 	mux.HandleFunc("/api/v1/stats", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(s.api.GetContextStats())
+		json.NewEncoder(w).Encode(s.admin.GetContextStats())
 	})
 
 	mux.HandleFunc("/api/v1/system", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(s.api.GetSystemInfo())
+		json.NewEncoder(w).Encode(s.admin.GetSystemInfo())
 	})
 
 	// ─── Brain artifacts ───
 
 	mux.HandleFunc("/api/v1/brain/list", func(w http.ResponseWriter, r *http.Request) {
 		sid := r.URL.Query().Get("session_id")
-		files, err := s.api.ListBrainArtifacts(sid)
+		files, err := s.admin.ListBrainArtifacts(sid)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -477,7 +480,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/brain/read", func(w http.ResponseWriter, r *http.Request) {
 		sid := r.URL.Query().Get("session_id")
 		name := r.URL.Query().Get("name")
-		content, err := s.api.ReadBrainArtifact(sid, name)
+		content, err := s.admin.ReadBrainArtifact(sid, name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -488,7 +491,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	// ─── KI (Knowledge Items) ───
 
 	mux.HandleFunc("/api/v1/ki/list", func(w http.ResponseWriter, r *http.Request) {
-		items, err := s.api.ListKI()
+		items, err := s.admin.ListKI()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -498,7 +501,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("/api/v1/ki/get", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("id")
-		item, err := s.api.GetKI(id)
+		item, err := s.admin.GetKI(id)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -515,7 +518,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			ID string `json:"id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		if err := s.api.DeleteKI(req.ID); err != nil {
+		if err := s.admin.DeleteKI(req.ID); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -524,7 +527,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("/api/v1/ki/artifacts", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("id")
-		files, err := s.api.ListKIArtifacts(id)
+		files, err := s.admin.ListKIArtifacts(id)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -535,7 +538,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/ki/artifact/read", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("id")
 		name := r.URL.Query().Get("name")
-		content, err := s.api.ReadKIArtifact(id, name)
+		content, err := s.admin.ReadKIArtifact(id, name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -546,7 +549,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	// ─── Cron management ───
 
 	mux.HandleFunc("/api/v1/cron/list", func(w http.ResponseWriter, r *http.Request) {
-		jobs, err := s.api.ListCronJobs()
+		jobs, err := s.admin.ListCronJobs()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -572,7 +575,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "name, schedule, prompt required", http.StatusBadRequest)
 			return
 		}
-		if err := s.api.CreateCronJob(req.Name, req.Schedule, req.Prompt); err != nil {
+		if err := s.admin.CreateCronJob(req.Name, req.Schedule, req.Prompt); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -588,7 +591,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			Name string `json:"name"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		if err := s.api.DeleteCronJob(req.Name); err != nil {
+		if err := s.admin.DeleteCronJob(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -604,7 +607,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			Name string `json:"name"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		if err := s.api.EnableCronJob(req.Name); err != nil {
+		if err := s.admin.EnableCronJob(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -620,7 +623,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			Name string `json:"name"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		if err := s.api.DisableCronJob(req.Name); err != nil {
+		if err := s.admin.DisableCronJob(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -636,7 +639,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			Name string `json:"name"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		if err := s.api.RunCronJobNow(req.Name); err != nil {
+		if err := s.admin.RunCronJobNow(req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -649,7 +652,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "name required", http.StatusBadRequest)
 			return
 		}
-		logs, err := s.api.ListCronLogs(name)
+		logs, err := s.admin.ListCronLogs(name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -664,7 +667,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "name and file required", http.StatusBadRequest)
 			return
 		}
-		content, err := s.api.ReadCronLog(name, file)
+		content, err := s.admin.ReadCronLog(name, file)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return

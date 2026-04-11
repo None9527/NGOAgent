@@ -13,7 +13,18 @@ const (
 	keyMode
 	keyWorkspaceDir
 	keyActiveForgeID
+	keyRunID
+	keyRuntimeIngress
 )
+
+type RuntimeIngressMetadata struct {
+	Kind         string
+	Source       string
+	Trigger      string
+	RunID        string
+	DecisionKind string
+	Decision     string
+}
 
 // --- Setters (Server layer entry point) ---
 
@@ -35,6 +46,14 @@ func WithMode(ctx context.Context, mode string) context.Context {
 
 func WithWorkspaceDir(ctx context.Context, dir string) context.Context {
 	return context.WithValue(ctx, keyWorkspaceDir, dir)
+}
+
+func WithRunID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, keyRunID, id)
+}
+
+func WithRuntimeIngress(ctx context.Context, meta RuntimeIngressMetadata) context.Context {
+	return context.WithValue(ctx, keyRuntimeIngress, meta)
 }
 
 // WithActiveForgeID sets the forge signal. Security uses this to route forge policy.
@@ -78,6 +97,20 @@ func WorkspaceDirFromContext(ctx context.Context) string {
 		return v
 	}
 	return ""
+}
+
+func RunIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(keyRunID).(string); ok {
+		return v
+	}
+	return ""
+}
+
+func RuntimeIngressFromContext(ctx context.Context) RuntimeIngressMetadata {
+	if v, ok := ctx.Value(keyRuntimeIngress).(RuntimeIngressMetadata); ok {
+		return v
+	}
+	return RuntimeIngressMetadata{}
 }
 
 // ActiveEvoIDFromContext returns the active evo ID. Empty means no evo in progress.

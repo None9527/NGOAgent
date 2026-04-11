@@ -12,6 +12,7 @@ import (
 func TestDecodeRuntimeDecisionApplyRequest_NewContractShape(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/runtime/decision/apply", strings.NewReader(`{
 		"session_id":"session-1",
+		"run":{"run_id":"run-1"},
 		"decision":{
 			"kind":"plan_review",
 			"decision":"revise",
@@ -27,6 +28,9 @@ func TestDecodeRuntimeDecisionApplyRequest_NewContractShape(t *testing.T) {
 	if decoded.SessionID != "session-1" {
 		t.Fatalf("expected session_id, got %#v", decoded)
 	}
+	if decoded.Run.RunID != "run-1" {
+		t.Fatalf("expected nested run target, got %#v", decoded)
+	}
 	if decoded.Decision.Kind != "plan_review" || decoded.Decision.Decision != "revise" {
 		t.Fatalf("expected nested decision contract, got %#v", decoded.Decision)
 	}
@@ -38,6 +42,7 @@ func TestDecodeRuntimeDecisionApplyRequest_NewContractShape(t *testing.T) {
 func TestDecodeRuntimeDecisionApplyRequest_LegacyFlatShape(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/runtime/decision/apply", strings.NewReader(`{
 		"session_id":"session-2",
+		"run_id":"run-flat",
 		"kind":"plan_review",
 		"decision":"approve",
 		"feedback":"ship it"
@@ -50,8 +55,22 @@ func TestDecodeRuntimeDecisionApplyRequest_LegacyFlatShape(t *testing.T) {
 	if decoded.Decision.Kind != "plan_review" || decoded.Decision.Decision != "approve" {
 		t.Fatalf("expected legacy shape normalization, got %#v", decoded.Decision)
 	}
+	if decoded.RunID != "run-flat" {
+		t.Fatalf("expected legacy run target passthrough, got %#v", decoded)
+	}
 	if decoded.Decision.Feedback != "ship it" {
 		t.Fatalf("expected feedback passthrough, got %#v", decoded.Decision)
+	}
+}
+
+func TestNormalizeRuntimeDecisionInput_UsesReasonAsFeedbackFallback(t *testing.T) {
+	normalized := apitype.NormalizeRuntimeDecisionInput(apitype.RuntimeDecisionContractInput{
+		Kind:     "plan_review",
+		Decision: "revise",
+		Reason:   "needs staging",
+	})
+	if normalized.Feedback != "needs staging" {
+		t.Fatalf("expected reason fallback to populate feedback, got %#v", normalized)
 	}
 }
 
@@ -106,16 +125,31 @@ func TestRuntimeRunsResponse_MarshalsRunsKey(t *testing.T) {
 
 func TestRuntimeGraphResponse_MarshalsTopologyKeys(t *testing.T) {
 	body, err := json.Marshal(apitype.OrchestrationGraphInfo{
-		SessionID:  "session-graph",
-		RootRunIDs: []string{"run-parent"},
-		Nodes:      []apitype.RuntimeRunInfo{{RunID: "run-parent"}},
-		Edges:      []apitype.RuntimeEdgeInfo{{Kind: "parent_child", SourceRunID: "run-parent", TargetRunID: "run-child"}},
+		SessionID:                 "session-graph",
+		RootRunIDs:                []string{"run-parent"},
+		PendingRunIDs:             []string{"run-parent"},
+		PendingRuntimeControlRuns: []string{"run-parent"},
+		Summary: apitype.OrchestrationGraphSummary{
+			RootRunIDs:                []string{"run-parent"},
+			PendingRunIDs:             []string{"run-parent"},
+			PendingRuntimeControlRuns: []string{"run-parent"},
+			RunCount:                  1,
+			IngressNodeCount:          1,
+			EdgeCount:                 1,
+		},
+		IngressNodes: []apitype.RuntimeIngressNodeInfo{{ID: "ingress:resume:web", Category: "runtime_control", Phase: "resume", Kind: "resume", Source: "web"}},
+		Nodes:        []apitype.RuntimeRunInfo{{RunID: "run-parent"}},
+		Edges:        []apitype.RuntimeEdgeInfo{{Kind: "parent_child", SourceRunID: "run-parent", TargetRunID: "run-child"}},
 	})
 	if err != nil {
 		t.Fatalf("marshal OrchestrationGraphInfo: %v", err)
 	}
 	if !strings.Contains(string(body), `"session_id":"session-graph"`) ||
 		!strings.Contains(string(body), `"root_run_ids":["run-parent"]`) ||
+		!strings.Contains(string(body), `"pending_run_ids":["run-parent"]`) ||
+		!strings.Contains(string(body), `"pending_runtime_control_run_ids":["run-parent"]`) ||
+		!strings.Contains(string(body), `"summary":{"root_run_ids":["run-parent"],"pending_run_ids":["run-parent"],"pending_runtime_control_run_ids":["run-parent"],"run_count":1,"ingress_node_count":1,"edge_count":1}`) ||
+		!strings.Contains(string(body), `"ingress_nodes":[{"id":"ingress:resume:web","category":"runtime_control","phase":"resume","kind":"resume","source":"web"}]`) ||
 		!strings.Contains(string(body), `"edges":[{"kind":"parent_child","source_run_id":"run-parent","target_run_id":"run-child"}]`) {
 		t.Fatalf("unexpected runtime graph response: %s", string(body))
 	}
@@ -137,6 +171,7 @@ func TestRuntimeDecisionResponses_MarshalNestedShapes(t *testing.T) {
 	decisionBody, err := json.Marshal(apitype.RuntimeDecisionApplyResponse{
 		Status:    "applied",
 		SessionID: "session-5",
+		Run:       apitype.RuntimeRunTarget{RunID: "run-5"},
 		Decision: apitype.RuntimeDecisionContractInput{
 			Kind:     "plan_review",
 			Decision: "revise",
@@ -150,9 +185,12 @@ func TestRuntimeDecisionResponses_MarshalNestedShapes(t *testing.T) {
 	if !strings.Contains(string(decisionBody), `"decision":{"kind":"plan_review","decision":"revise"`) {
 		t.Fatalf("unexpected decision response: %s", string(decisionBody))
 	}
+	if !strings.Contains(string(decisionBody), `"run":{"run_id":"run-5"}`) {
+		t.Fatalf("expected run target in decision response: %s", string(decisionBody))
+	}
 
 	ingressBody, err := json.Marshal(apitype.RuntimeIngressResponse{
-		Status:    "accepted",
+		Status:    "resumed",
 		SessionID: "session-6",
 		Ingress: apitype.RuntimeIngressInput{
 			Kind:    "resume",

@@ -211,6 +211,9 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 	}
 
 	slog.Info(fmt.Sprintf("[barrier] Subagent %s completed (%d/%d)", runID, done, total))
+	if b.parentLoop != nil {
+		b.parentLoop.recordBarrierProgress(runID, b.id, entry.Status)
+	}
 
 	// Push per-completion progress event (non-blocking)
 	if b.pushProgress != nil {
@@ -262,6 +265,9 @@ func (b *SubagentBarrier) OnComplete(runID, result string, err error) {
 	if shouldFinalize {
 		b.parentLoop.InjectEphemeral(summary)
 		b.parentLoop.SignalWake()
+		if b.parentLoop != nil {
+			b.parentLoop.recordBarrierFinalized(b.id, fmt.Sprintf("%d/%d complete", total, total))
+		}
 		slog.Info(fmt.Sprintf("[barrier] All %d subagents complete, waking parent", total))
 
 		if autoWake != nil {
@@ -292,6 +298,9 @@ func (b *SubagentBarrier) onTimeout() {
 	// S1: external calls OUTSIDE lock — prevents deadlock
 	b.parentLoop.InjectEphemeral(summary)
 	b.parentLoop.SignalWake()
+	if b.parentLoop != nil {
+		b.parentLoop.recordBarrierTimeout(b.id, fmt.Sprintf("timeout with %d members", len(b.members)))
+	}
 	slog.Info(fmt.Sprintf("[barrier] All %d subagents complete (timeout), waking parent", len(b.members)))
 
 	if autoWake != nil {

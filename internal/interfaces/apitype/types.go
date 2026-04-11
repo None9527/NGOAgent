@@ -218,6 +218,31 @@ type RuntimeDecisionInfo struct {
 	ResumeAction string `json:"resume_action,omitempty"`
 }
 
+type RuntimeIngressInfo struct {
+	Category     string `json:"category,omitempty"`
+	Phase        string `json:"phase,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	Source       string `json:"source,omitempty"`
+	Trigger      string `json:"trigger,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+	DecisionKind string `json:"decision_kind,omitempty"`
+	Decision     string `json:"decision,omitempty"`
+	At           string `json:"at,omitempty"`
+}
+
+type RuntimeIngressNodeInfo struct {
+	ID           string `json:"id"`
+	Category     string `json:"category,omitempty"`
+	Phase        string `json:"phase,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	Source       string `json:"source,omitempty"`
+	Trigger      string `json:"trigger,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+	DecisionKind string `json:"decision_kind,omitempty"`
+	Decision     string `json:"decision,omitempty"`
+	At           string `json:"at,omitempty"`
+}
+
 type RuntimeRunInfo struct {
 	RunID           string               `json:"run_id"`
 	ParentRunID     string               `json:"parent_run_id,omitempty"`
@@ -232,15 +257,33 @@ type RuntimeRunInfo struct {
 	ActiveBarrier   *RuntimeBarrierInfo  `json:"active_barrier,omitempty"`
 	PendingDecision *RuntimeDecisionInfo `json:"pending_decision,omitempty"`
 	LastDecision    *RuntimeDecisionInfo `json:"last_decision,omitempty"`
+	Ingress         *RuntimeIngressInfo  `json:"ingress,omitempty"`
 	Handoffs        []RuntimeHandoffInfo `json:"handoffs,omitempty"`
 	Events          []RuntimeEventInfo   `json:"events,omitempty"`
 }
 
+type OrchestrationGraphSummary struct {
+	RootRunIDs                []string `json:"root_run_ids,omitempty"`
+	UserTurnRootRunIDs        []string `json:"user_turn_root_run_ids,omitempty"`
+	PendingRunIDs             []string `json:"pending_run_ids,omitempty"`
+	PendingDecisionRunIDs     []string `json:"pending_decision_run_ids,omitempty"`
+	PendingRuntimeControlRuns []string `json:"pending_runtime_control_run_ids,omitempty"`
+	RunCount                  int      `json:"run_count"`
+	IngressNodeCount          int      `json:"ingress_node_count"`
+	EdgeCount                 int      `json:"edge_count"`
+}
+
 type OrchestrationGraphInfo struct {
-	SessionID  string            `json:"session_id"`
-	RootRunIDs []string          `json:"root_run_ids,omitempty"`
-	Nodes      []RuntimeRunInfo  `json:"nodes"`
-	Edges      []RuntimeEdgeInfo `json:"edges,omitempty"`
+	SessionID                 string                    `json:"session_id"`
+	RootRunIDs                []string                  `json:"root_run_ids,omitempty"`
+	UserTurnRootRunIDs        []string                  `json:"user_turn_root_run_ids,omitempty"`
+	PendingRunIDs             []string                  `json:"pending_run_ids,omitempty"`
+	PendingDecisionRunIDs     []string                  `json:"pending_decision_run_ids,omitempty"`
+	PendingRuntimeControlRuns []string                  `json:"pending_runtime_control_run_ids,omitempty"`
+	Summary                   OrchestrationGraphSummary `json:"summary"`
+	IngressNodes              []RuntimeIngressNodeInfo  `json:"ingress_nodes,omitempty"`
+	Nodes                     []RuntimeRunInfo          `json:"nodes"`
+	Edges                     []RuntimeEdgeInfo         `json:"edges,omitempty"`
 }
 
 type RuntimeRunListResponse struct {
@@ -272,12 +315,15 @@ type RuntimeDecisionContractInput struct {
 
 type RuntimeDecisionApplyRequest struct {
 	SessionID string                       `json:"session_id"`
+	Run       RuntimeRunTarget             `json:"run,omitempty"`
+	RunID     string                       `json:"run_id,omitempty"`
 	Decision  RuntimeDecisionContractInput `json:"decision"`
 }
 
 type RuntimeDecisionApplyResponse struct {
 	Status    string                       `json:"status"`
 	SessionID string                       `json:"session_id"`
+	Run       RuntimeRunTarget             `json:"run,omitempty"`
 	Decision  RuntimeDecisionContractInput `json:"decision"`
 }
 
