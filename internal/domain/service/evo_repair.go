@@ -5,12 +5,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
 )
 
 // RepairStrategy defines the type of repair to attempt.
-type RepairStrategy string
+type RepairStrategy = graphruntime.RepairStrategy
 
 const (
 	StrategyParamFix RepairStrategy = "param_fix" // Fix parameters, retry same tool
@@ -21,11 +22,7 @@ const (
 )
 
 // RepairPlan describes the repair action to take.
-type RepairPlan struct {
-	Strategy    RepairStrategy
-	Ephemeral   string // Ephemeral message to inject before re-run
-	Description string // Human-readable description
-}
+type RepairPlan = graphruntime.RepairState
 
 // RepairRouter selects a repair strategy based on the evaluation error type.
 type RepairRouter struct {
@@ -47,6 +44,7 @@ func (r *RepairRouter) Route(eval *EvalResult) RepairPlan {
 	case "param_wrong":
 		return RepairPlan{
 			Strategy:    StrategyParamFix,
+			Allowed:     true,
 			Description: "Parameters were incorrect. Adjusting and retrying.",
 			Ephemeral: fmt.Sprintf(
 				"[EVO REPAIR] Previous execution had parameter errors. Issues: %s\n"+
@@ -58,6 +56,7 @@ func (r *RepairRouter) Route(eval *EvalResult) RepairPlan {
 	case "tool_wrong":
 		return RepairPlan{
 			Strategy:    StrategyToolSwap,
+			Allowed:     true,
 			Description: "Wrong tool was used. Switching to correct tool.",
 			Ephemeral: fmt.Sprintf(
 				"[EVO REPAIR] Previous execution used the wrong tool. Issues: %s\n"+
@@ -69,6 +68,7 @@ func (r *RepairRouter) Route(eval *EvalResult) RepairPlan {
 	case "intent_mismatch":
 		return RepairPlan{
 			Strategy:    StrategyReRoute,
+			Allowed:     true,
 			Description: "User intent was misunderstood. Re-interpreting request.",
 			Ephemeral: fmt.Sprintf(
 				"[EVO REPAIR] You misunderstood the user's intent. Issues: %s\n"+
@@ -80,6 +80,7 @@ func (r *RepairRouter) Route(eval *EvalResult) RepairPlan {
 	case "quality_low":
 		return RepairPlan{
 			Strategy:    StrategyIterate,
+			Allowed:     true,
 			Description: "Output quality insufficient. Iterating to improve.",
 			Ephemeral: fmt.Sprintf(
 				"[EVO REPAIR] Output quality was below threshold (score: %.2f). Issues: %s\n"+
@@ -91,6 +92,7 @@ func (r *RepairRouter) Route(eval *EvalResult) RepairPlan {
 	case "capability_gap":
 		return RepairPlan{
 			Strategy:    StrategyEscalate,
+			Allowed:     true,
 			Description: "Task requires capabilities not available. Escalating to user.",
 			Ephemeral: fmt.Sprintf(
 				"[EVO ESCALATE] This task requires capabilities you don't have. Issues: %s\n"+
@@ -103,6 +105,7 @@ func (r *RepairRouter) Route(eval *EvalResult) RepairPlan {
 		// Unknown error type — try iteration as default
 		return RepairPlan{
 			Strategy:    StrategyIterate,
+			Allowed:     true,
 			Description: "Unclassified error. Attempting iterative improvement.",
 			Ephemeral: fmt.Sprintf(
 				"[EVO REPAIR] Previous execution did not pass quality evaluation (score: %.2f). Issues: %s\n"+

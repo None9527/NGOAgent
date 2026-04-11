@@ -14,6 +14,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
@@ -21,19 +22,10 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/tool"
 )
 
-// EvalResult holds the structured evaluation output from the sub-agent.
-type EvalResult struct {
-	Score     float64     `json:"score"`
-	Passed    bool        `json:"passed"`
-	ErrorType string      `json:"error_type"`
-	Issues    []EvalIssue `json:"issues"`
-}
+const graphEvaluationSchema = "evaluation.report.v1"
 
-// EvalIssue describes a single problem found during evaluation.
-type EvalIssue struct {
-	Severity    string `json:"severity"` // critical | warning | info
-	Description string `json:"description"`
-}
+type EvalResult = graphruntime.EvaluationState
+type EvalIssue = graphruntime.EvaluationIssueState
 
 // EvoEvaluator performs blind quality assessment on execution traces.
 type EvoEvaluator struct {
@@ -254,6 +246,9 @@ func parseEvalResult(raw string, threshold float64) (*EvalResult, error) {
 		return nil, fmt.Errorf("invalid eval JSON: %w\nraw: %s", err, content[:min(len(content), 200)])
 	}
 
+	result.SchemaName = graphEvaluationSchema
+	result.RawJSON = content
+	result.Valid = true
 	result.Passed = result.Score >= threshold
 	return &result, nil
 }

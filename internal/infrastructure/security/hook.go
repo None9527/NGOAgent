@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -154,19 +155,34 @@ func (h *Hook) BeforeRespond(ctx context.Context, resp *llm.Response) *llm.Respo
 // The caller should send an SSE event and then block on pending.Result.
 func (h *Hook) RequestApproval(toolName string, args map[string]any, reason string) *PendingApproval {
 	id := uuid.New().String()[:8]
-	pending := &PendingApproval{
+	return h.RestorePending(PendingApproval{
 		ID:       id,
 		ToolName: toolName,
 		Args:     args,
 		Reason:   reason,
-		Result:   make(chan bool, 1),
 		Created:  time.Now(),
+	})
+}
+
+// RestorePending re-registers a serialized approval into the in-memory registry.
+// If an approval with the same ID already exists, the existing entry wins.
+func (h *Hook) RestorePending(snapshot PendingApproval) *PendingApproval {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if existing, ok := h.pending[snapshot.ID]; ok {
+		return existing
 	}
 
-	h.mu.Lock()
-	h.pending[id] = pending
-	h.mu.Unlock()
-
+	pending := &PendingApproval{
+		ID:       snapshot.ID,
+		ToolName: snapshot.ToolName,
+		Args:     cloneArgs(snapshot.Args),
+		Reason:   snapshot.Reason,
+		Result:   make(chan bool, 1),
+		Created:  snapshot.Created,
+	}
+	h.pending[pending.ID] = pending
 	return pending
 }
 
@@ -214,8 +230,16 @@ func (h *Hook) ListPending() []*PendingApproval {
 	defer h.mu.RUnlock()
 	result := make([]*PendingApproval, 0, len(h.pending))
 	for _, p := range h.pending {
-		result = append(result, p)
+		clone := *p
+		clone.Args = cloneArgs(p.Args)
+		result = append(result, &clone)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Created.Equal(result[j].Created) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].Created.Before(result[j].Created)
+	})
 	return result
 }
 
@@ -247,6 +271,17 @@ func (h *Hook) CleanupExpired(maxAge time.Duration) int {
 		}
 	}
 	return removed
+}
+
+func cloneArgs(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // ═══════════════════════════════════════════

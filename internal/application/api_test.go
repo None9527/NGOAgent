@@ -564,6 +564,13 @@ func TestApplyDecision_InferKindFromPendingDecision(t *testing.T) {
 	if len(decisions) != 1 || decisions[0].PendingDecision == nil || decisions[0].PendingDecision.Kind != "plan_review" {
 		t.Fatalf("expected pending decision listing, got %#v", decisions)
 	}
+	targetedDecision, err := api.PendingDecision(context.Background(), sessionID, decisions[0].RunID)
+	if err != nil {
+		t.Fatalf("PendingDecision: %v", err)
+	}
+	if targetedDecision == nil || targetedDecision.RunID != decisions[0].RunID || targetedDecision.PendingDecision == nil {
+		t.Fatalf("expected targeted pending decision lookup, got %#v", targetedDecision)
+	}
 
 	if err := api.ApplyDecision(context.Background(), sessionID, "", "revise", "narrow scope"); err != nil {
 		t.Fatalf("ApplyDecision infer kind: %v", err)

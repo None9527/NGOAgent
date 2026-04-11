@@ -9,7 +9,7 @@ import (
 )
 
 // Bot is the main Telegram bot instance.
-// Uses HTTP+SSE to communicate with the AgentAPI backend.
+// Uses HTTP+SSE to communicate with the application transport backend.
 type Bot struct {
 	tg      *tgbotapi.BotAPI
 	handler *Handler

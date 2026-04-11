@@ -67,12 +67,27 @@ func (r *Repository) TouchConversation(id string) error {
 		Update("updated_at", time.Now()).Error
 }
 
-// DeleteConversation removes a conversation and ALL associated data.
-// Cascade: history_messages, worker_transcripts, session_token_usages, evo_*.
+// DeleteConversation removes a conversation and all associated persisted data.
+// Core message/artifact rows cascade through the conversation FK; runtime and analytics rows are cleaned explicitly.
 func (r *Repository) DeleteConversation(id string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		// 1. Conversation history
-		if err := tx.Where("session_id = ?", id).Delete(&HistoryMessage{}).Error; err != nil {
+		// 1. Runtime persistence
+		var runIDs []string
+		if err := tx.Model(&AgentRunRecord{}).Where("conversation_id = ?", id).Pluck("id", &runIDs).Error; err != nil {
+			return err
+		}
+		if len(runIDs) > 0 {
+			if err := tx.Where("run_id IN ?", runIDs).Delete(&RunWaitRecord{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("run_id IN ?", runIDs).Delete(&RunEventRecord{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("run_id IN ?", runIDs).Delete(&RunCheckpointRecord{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("conversation_id = ?", id).Delete(&AgentRunRecord{}).Error; err != nil {
 			return err
 		}
 		// 2. Subagent transcripts
@@ -97,7 +112,7 @@ func (r *Repository) DeleteConversation(id string) error {
 		if err := tx.Where("session_id = ?", id).Delete(&EvoTrace{}).Error; err != nil {
 			return err
 		}
-		// 5. Conversation metadata
+		// 5. Conversation metadata and FK-cascaded core data
 		return tx.Where("id = ?", id).Delete(&Conversation{}).Error
 	})
 }

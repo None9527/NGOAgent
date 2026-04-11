@@ -19,9 +19,9 @@ NGOAgent 采用 **DDD (Domain-Driven Design)** 四层架构：
 │    Builder (builder.go) — 7阶段依赖注入                  │
 ├─────────────────────────────────────────────────────────┤
 │                   domain/service/                        │
-│    AgentLoop │ StateMachine │ BehaviorGuard              │
+│    AgentLoop │ GraphRuntime │ BehaviorGuard              │
 │    ToolExec │ SecurityMiddleware │ Compact │ Hooks        │
-│    Barrier │ EvoController │ PersistenceOps │ RunHelpers  │
+│    Barrier │ RuntimeStateSync │ PersistenceOps │ RunHelpers│
 ├──────────────────────┬──────────────────────────────────┤
 │   domain/tool/       │     infrastructure/               │
 │   Protocol │ Meta    │  llm/ │ security/ │ sandbox/      │
@@ -81,32 +81,37 @@ type Deps struct {
 
 ## 3. ReAct 循环引擎
 
-### 3.1 状态机 (10 态)
+### 3.1 Graph Runtime 合同
+
+当前主执行语义不再由旧状态机定义，而是由 graph runtime 的四类合同定义：
+
+- `Node`: `prepare / generate / tool_exec / guard_check / compact / done`
+- `Route`: 节点返回的路由键，驱动边选择
+- `Wait`: 仅允许稳定的等待语义，例如 `approval / barrier`
+- `Checkpoint`: 运行现场快照，而不是仅保存历史消息
+
+核心图定义位于 `internal/domain/service/graph_runtime.go`，运行时位于 `internal/domain/graphruntime/runtime.go`。
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> Preparing : Run()
-    Preparing --> Generating : doGenerate
-    Generating --> ToolExec : resp.ToolCalls > 0
-    Generating --> Done : resp.StopReason == "stop"
-    Generating --> Compacting : context overflow
-    ToolExec --> Generating : tools complete
-    ToolExec --> WaitApproval : security.Ask
-    WaitApproval --> ToolExec : approved
-    WaitApproval --> Done : denied
-    Compacting --> Generating : compact done
-    Done --> Idle : run complete
-    Error --> Idle : recovery
-    Generating --> Error : LLM error
-    ToolExec --> Error : fatal error
+flowchart LR
+    prepare -->|ok| generate
+    generate -->|generate| generate
+    generate -->|tool_exec| tool_exec
+    generate -->|compact| compact
+    generate -->|done| done
+    tool_exec -->|guard_check| guard_check
+    tool_exec -->|done| done
+    guard_check -->|generate| generate
+    guard_check -->|compact| compact
+    compact -->|generate| generate
+    done -->|prepare| prepare
 ```
 
-状态转换在 `state.go` 中定义 16 条合法路径，`transition()` 方法在非法转换时 panic+recover。
+`state.go` 中的 `State` 仍然保留，但现在是 **observed state label**，用于观测、日志和测试断言，不再是最终执行控制源。
 
 ### 3.2 主循环 (run.go + 4 sub-files)
 
-`runInner()` 是核心 ReAct 循环。拆分后的文件结构：
+当前主入口通过 `run.go` 调用 graph runtime，再由节点处理器承载具体行为。拆分后的文件结构：
 
 ```
 run.go              (674L) — 主循环 + doPrepare/doGenerate

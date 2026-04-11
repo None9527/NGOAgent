@@ -16,105 +16,40 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ngoclaw/ngoagent/internal/capability"
+	"github.com/ngoclaw/ngoagent/internal/domain/a2a"
 	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
-	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
 )
 
-// API is the interface that the server requires from the application layer.
-// application.AgentAPI satisfies this interface implicitly.
-type API interface {
-	// Chat — unified streaming entry point
-	ChatStream(ctx context.Context, sessionID, message, mode string, delta *service.Delta) error
-	SessionID(sessionID string) string
-	StopRun(sessionID string)
-	RetryRun(ctx context.Context, sessionID string) (string, error)
-	Approve(approvalID string, approved bool) error
-	ApplyDecision(ctx context.Context, sessionID, kind, decision, feedback string) error
-	ResumeRun(ctx context.Context, sessionID, runID string) error
-	ApplyRuntimeIngress(ctx context.Context, req apitype.RuntimeIngressRequest) (apitype.RuntimeIngressResponse, error)
+type ChatAPI = capability.Chat
+type SessionAPI = capability.Session
+type AdminAPI = capability.Admin
+type RuntimeAPI = capability.Runtime
+type CostAPI = capability.Cost
 
-	// Session
-	NewSession(title string) apitype.SessionResponse
-	ListSessions() apitype.SessionListResponse
-	SetSessionTitle(id, title string)
-	DeleteSession(id string) error
+// API is the full HTTP transport contract. Deprecated: prefer capability.HTTP.
+type API = capability.HTTP
 
-	// History
-	GetHistory(sessionID string) ([]apitype.HistoryMessage, error)
-	ClearHistory()
-	CompactContext()
-
-	// Model
-	ListModels() apitype.ModelListResponse
-	SwitchModel(name string) error
-	CurrentModel() string
-
-	// Config
-	GetConfig() map[string]any
-	SetConfig(key string, value any) error
-	AddProvider(p config.ProviderDef) error
-	RemoveProvider(name string) error
-	AddMCPServer(s config.MCPServerDef) error
-	RemoveMCPServer(name string) error
-
-	// Tools & Skills
-	ListTools() []apitype.ToolInfoResponse
-	EnableTool(name string) error
-	DisableTool(name string) error
-	ListSkills() ([]apitype.SkillInfoResponse, error)
-	ReadSkillContent(name string) (string, error)
-	RefreshSkills() error
-	DeleteSkill(name string) error
-
-	// MCP
-	ListMCPServers() ([]apitype.MCPServerInfo, error)
-	ListMCPTools() ([]apitype.MCPToolInfo, error)
-
-	// Status
-	Health() apitype.HealthResponse
-	GetSecurity() apitype.SecurityResponse
-	GetContextStats() apitype.ContextStats
-	GetSystemInfo() apitype.SystemInfoResponse
-	CronStatus() map[string]any
-
-	// Cron management
-	ListCronJobs() ([]apitype.CronJobInfo, error)
-	CreateCronJob(name, schedule, prompt string) error
-	DeleteCronJob(name string) error
-	EnableCronJob(name string) error
-	DisableCronJob(name string) error
-	RunCronJobNow(name string) error
-	ListCronLogs(jobName string) ([]apitype.CronLogInfo, error)
-	ReadCronLog(jobName, logFile string) (string, error)
-
-	// Brain artifacts
-	ListBrainArtifacts(sessionID string) ([]apitype.BrainArtifactInfo, error)
-	ReadBrainArtifact(sessionID, name string) (string, error)
-
-	// KI management
-	ListKI() ([]apitype.KIInfo, error)
-	GetKI(id string) (apitype.KIDetailResponse, error)
-	DeleteKI(id string) error
-	ListKIArtifacts(id string) ([]apitype.BrainArtifactInfo, error)
-	ReadKIArtifact(id, name string) (string, error)
-
-	// Runtime / orchestration
-	ListRuntimeRuns(ctx context.Context, sessionID string) ([]apitype.RuntimeRunInfo, error)
-	ListPendingRuns(ctx context.Context, sessionID string) ([]apitype.RuntimeRunInfo, error)
-	ListPendingDecisions(ctx context.Context, sessionID string) ([]apitype.RuntimeRunInfo, error)
-	ListRuntimeGraph(ctx context.Context, sessionID string) (apitype.OrchestrationGraphInfo, error)
-	ListChildRuns(ctx context.Context, parentRunID string) ([]apitype.RuntimeRunInfo, error)
-
-	// P2 H2: Token usage persistence
-	GetSessionCost(sessionID string) (map[string]any, error)
-	SaveSessionCost(sessionID string) error
+// Capabilities groups the HTTP transport dependencies explicitly.
+// This keeps the construction boundary typed without collapsing back to a fat API object.
+type Capabilities struct {
+	Chat    ChatAPI
+	Session SessionAPI
+	Admin   AdminAPI
+	Runtime RuntimeAPI
+	Cost    CostAPI
+	A2A     *a2a.Handler // R3: nil = A2A disabled
 }
 
 // Server is the HTTP/SSE server for NGOAgent.
 type Server struct {
-	api        API
+	chat       ChatAPI
+	session    SessionAPI
+	admin      AdminAPI
+	runtime    RuntimeAPI
+	cost       CostAPI
+	a2a        *a2a.Handler // R3: Agent-to-Agent protocol
 	addr       string
 	authToken  string // Bearer token for API auth (empty = no auth)
 	mu         sync.Mutex
@@ -122,10 +57,15 @@ type Server struct {
 	wsTracker  sync.Map // sessionID → *wsConn (active WebSocket connections)
 }
 
-// NewServer creates an HTTP server with the unified API.
-func NewServer(api API, addr string, authToken string) *Server {
+// NewServer creates an HTTP server with explicit capability dependencies.
+func NewServer(capabilities Capabilities, addr string, authToken string) *Server {
 	return &Server{
-		api:        api,
+		chat:       capabilities.Chat,
+		session:    capabilities.Session,
+		admin:      capabilities.Admin,
+		runtime:    capabilities.Runtime,
+		cost:       capabilities.Cost,
+		a2a:        capabilities.A2A,
 		addr:       addr,
 		authToken:  authToken,
 		runTracker: service.NewRunTracker(),
@@ -153,8 +93,8 @@ func (s *Server) PushEvent(sessionID, eventType string, data any) {
 // authMiddleware validates Bearer token on all requests except exempted paths.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Exempt paths: health check (for connectivity detection)
-		if r.URL.Path == "/v1/health" {
+		// Exempt paths: health check, A2A agent card discovery
+		if r.URL.Path == "/v1/health" || r.URL.Path == "/.well-known/agent.json" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -200,13 +140,13 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// ─── Health / Models / Config (read) ───
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(s.api.Health())
+		json.NewEncoder(w).Encode(s.admin.Health())
 	})
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(s.api.ListModels())
+		json.NewEncoder(w).Encode(s.admin.ListModels())
 	})
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(s.api.GetConfig())
+		json.NewEncoder(w).Encode(s.admin.GetConfig())
 	})
 
 	// ─── Slash commands (backward compat) ───
@@ -225,7 +165,7 @@ func (s *Server) Start(ctx context.Context) error {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if err := s.api.SwitchModel(req.Model); err != nil {
+		if err := s.admin.SwitchModel(req.Model); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -237,6 +177,17 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// ─── File upload (user attaches files to chat) ───
 	mux.HandleFunc("/v1/upload", s.handleUpload)
+
+	// ─── A2A Protocol ───
+	if s.a2a != nil {
+		mux.HandleFunc("/.well-known/agent.json", s.a2a.HandleAgentCard)
+		mux.HandleFunc("/a2a/tasks", s.a2a.HandleTaskSubmit)
+		mux.HandleFunc("/a2a/tasks/status", s.a2a.HandleTaskStatus)
+		mux.HandleFunc("/a2a/tasks/stream", s.a2a.HandleTaskStream)
+		mux.HandleFunc("/a2a/tasks/cancel", s.a2a.HandleTaskCancel)
+		mux.HandleFunc("/a2a/tasks/history", s.a2a.HandleTaskHistory)
+		mux.HandleFunc("/a2a/tasks/list", s.a2a.HandleTaskList)
+	}
 
 	// ─── REST API routes ───
 	s.registerAPIRoutes(mux)
@@ -371,7 +322,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := s.api.ChatStream(runCtx, req.SessionID, req.Message, req.Mode, delta); err != nil {
+		if err := s.chat.ChatStream(runCtx, req.SessionID, req.Message, req.Mode, delta); err != nil {
 			if err.Error() == "agent is busy" {
 				data, _ := json.Marshal(map[string]string{"type": "error", "message": "agent is busy"})
 				buf.MakeDelta().OnError(fmt.Errorf("%s", string(data)))
@@ -581,7 +532,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "approval_id required", http.StatusBadRequest)
 		return
 	}
-	if err := s.api.Approve(req.ApprovalID, req.Approved); err != nil {
+	if err := s.chat.Approve(req.ApprovalID, req.Approved); err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
@@ -601,7 +552,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		SessionID string `json:"session_id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req) // best-effort parse, empty body is ok
-	s.api.StopRun(req.SessionID)
+	s.chat.StopRun(req.SessionID)
 	json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
 }
 
@@ -619,7 +570,7 @@ func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"session_id required"}`, http.StatusBadRequest)
 		return
 	}
-	lastMsg, err := s.api.RetryRun(context.Background(), req.SessionID)
+	lastMsg, err := s.chat.RetryRun(context.Background(), req.SessionID)
 	if err != nil {
 		errJSON, _ := json.Marshal(map[string]string{"error": err.Error()})
 		http.Error(w, string(errJSON), http.StatusBadRequest)
@@ -645,21 +596,21 @@ type slashHandler func(s *Server, args []string) string
 var slashRoutes = map[string]slashHandler{
 	"/model": func(s *Server, args []string) string {
 		if len(args) == 0 {
-			return "Current model: " + s.api.CurrentModel()
+			return "Current model: " + s.admin.CurrentModel()
 		}
-		if err := s.api.SwitchModel(args[0]); err != nil {
+		if err := s.admin.SwitchModel(args[0]); err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return "Switched to: " + args[0]
 	},
 	"/models": func(s *Server, _ []string) string {
-		return strings.Join(s.api.ListModels().Models, ", ")
+		return strings.Join(s.admin.ListModels().Models, ", ")
 	},
 	"/set": func(s *Server, args []string) string {
 		if len(args) < 2 {
 			return "Usage: /set <key> <value>"
 		}
-		if err := s.api.SetConfig(args[0], strings.Join(args[1:], " ")); err != nil {
+		if err := s.admin.SetConfig(args[0], strings.Join(args[1:], " ")); err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return fmt.Sprintf("Set %s = %s", args[0], strings.Join(args[1:], " "))
@@ -669,8 +620,8 @@ var slashRoutes = map[string]slashHandler{
 		return "请使用输入框旁的模式切换 pill（⭐ Auto / 📋 Plan / 🤖 Agentic）"
 	},
 	"/status": func(s *Server, _ []string) string {
-		stats := s.api.GetContextStats()
-		sec := s.api.GetSecurity()
+		stats := s.admin.GetContextStats()
+		sec := s.admin.GetSecurity()
 		return fmt.Sprintf("Model: %s | Security: %s | History: %d msgs",
 			stats.Model, sec.Mode, stats.HistoryCount)
 	},
@@ -678,7 +629,7 @@ var slashRoutes = map[string]slashHandler{
 		return "Commands: /model /models /set /evo /plan /skill /status /clear /compact /doctor /cost /memory /ki /tools /context /sessions /telemetry /help"
 	},
 	"/skill": func(s *Server, _ []string) string {
-		skillsRaw, err := s.api.ListSkills()
+		skillsRaw, err := s.admin.ListSkills()
 		if err != nil {
 			return "Error: " + err.Error()
 		}
@@ -699,8 +650,8 @@ var slashRoutes = map[string]slashHandler{
 		}
 		return "Skills:\n" + strings.Join(lines, "\n")
 	},
-	"/clear":     func(s *Server, _ []string) string { s.api.ClearHistory(); return "History cleared." },
-	"/compact":   func(s *Server, _ []string) string { s.api.CompactContext(); return "Context compacted." },
+	"/clear":     func(s *Server, _ []string) string { s.session.ClearHistory(); return "History cleared." },
+	"/compact":   func(s *Server, _ []string) string { s.session.CompactContext(); return "Context compacted." },
 	"/doctor":    func(s *Server, _ []string) string { return s.execDoctor() },
 	"/cost":      func(s *Server, _ []string) string { return s.execCost() },
 	"/memory":    func(s *Server, _ []string) string { return s.execMemory() },
@@ -730,14 +681,14 @@ func (s *Server) execSlash(input string) string {
 func (s *Server) execEvo(args []string) string {
 	if len(args) == 0 {
 		// Toggle evo mode — set plan mode to "evo" or back to "auto"
-		cfg := s.api.GetConfig()
+		cfg := s.admin.GetConfig()
 		agent, _ := cfg["agent"].(map[string]any)
 		currentMode, _ := agent["plan_mode"].(string)
 		if currentMode == "evo" {
-			_ = s.api.SetConfig("plan_mode", "auto")
+			_ = s.admin.SetConfig("plan_mode", "auto")
 			return "🔄 Evo mode OFF → auto"
 		}
-		_ = s.api.SetConfig("plan_mode", "evo")
+		_ = s.admin.SetConfig("plan_mode", "evo")
 		return "🧬 Evo mode ON — 自动评估 + 修复已启用"
 	}
 
@@ -813,7 +764,7 @@ func (s *Server) isAllowedFilePath(absPath string) bool {
 	}
 
 	// Get workspace from config
-	c := s.api.GetConfig()
+	c := s.admin.GetConfig()
 	if agent, ok := c["agent"].(map[string]any); ok {
 		if ws, ok := agent["workspace"].(string); ok && ws != "" {
 			wsClean := filepath.Clean(ws)
@@ -865,7 +816,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	// Determine upload directory: workspace/uploads/
-	c := s.api.GetConfig()
+	c := s.admin.GetConfig()
 	agent, _ := c["agent"].(map[string]any)
 	workspace, _ := agent["workspace"].(string)
 	if workspace == "" {

@@ -26,7 +26,6 @@ type TranscriptStore struct {
 
 // NewTranscriptStore creates a transcript store and migrates the table.
 func NewTranscriptStore(db *gorm.DB) *TranscriptStore {
-	db.AutoMigrate(&WorkerTranscript{})
 	return &TranscriptStore{db: db}
 }
 
@@ -92,4 +91,10 @@ func (ts *TranscriptStore) LoadTranscript(runID string) (*WorkerTranscript, erro
 // DeleteSessionTranscripts removes all transcripts for a session.
 func (ts *TranscriptStore) DeleteSessionTranscripts(sessionID string) error {
 	return ts.db.Where("session_id = ?", sessionID).Delete(&WorkerTranscript{}).Error
+}
+
+// CleanOld removes transcript rows older than the provided retention window.
+func (ts *TranscriptStore) CleanOld(days int) error {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	return ts.db.Where("created_at < ?", cutoff).Delete(&WorkerTranscript{}).Error
 }

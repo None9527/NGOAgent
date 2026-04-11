@@ -30,7 +30,7 @@ type Conversation struct {
 	UpdatedAt time.Time
 }
 
-// Open initializes the SQLite database and runs auto-migrations.
+// Open initializes the SQLite database and runs centralized schema migrations.
 func Open(dbPath string) (*gorm.DB, error) {
 	// Ensure directory exists
 	dir := filepath.Dir(dbPath)
@@ -56,10 +56,12 @@ func Open(dbPath string) (*gorm.DB, error) {
 	if _, err := sqlDB.Exec("PRAGMA synchronous=NORMAL"); err != nil {
 		slog.Info(fmt.Sprintf("[persistence] PRAGMA synchronous failed: %v", err))
 	}
+	if _, err := sqlDB.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		slog.Info(fmt.Sprintf("[persistence] PRAGMA foreign_keys failed: %v", err))
+	}
 
-	// Auto-migrate core table only; other tables self-migrate in their NewXxxStore()
-	if err := db.AutoMigrate(&Conversation{}); err != nil {
-		return nil, fmt.Errorf("migrate: %w", err)
+	if err := RunMigrations(db); err != nil {
+		return nil, fmt.Errorf("run migrations: %w", err)
 	}
 
 	return db, nil

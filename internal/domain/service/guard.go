@@ -332,6 +332,13 @@ func (g *BehaviorGuard) ConsumeForceToolName() string {
 	return name
 }
 
+// PeekForceToolName returns any pending force_tool_name without clearing it.
+func (g *BehaviorGuard) PeekForceToolName() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.forceToolName
+}
+
 // SetForceToolName sets the force tool for the next LLM call.
 // Used by the plan→notify_user deterministic enforcement chain.
 func (g *BehaviorGuard) SetForceToolName(name string) {

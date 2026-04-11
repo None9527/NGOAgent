@@ -32,10 +32,10 @@ import (
 var _ service.DeltaSink = (*service.Delta)(nil)
 
 // ═══════════════════════════════════════════
-// 2. State Machine Completeness
+// 2. Runtime Contract Completeness
 // ═══════════════════════════════════════════
 
-func TestStateMachineStates(t *testing.T) {
+func TestObservedStates(t *testing.T) {
 	required := []struct {
 		state service.State
 		name  string
@@ -61,27 +61,46 @@ func TestStateMachineStates(t *testing.T) {
 	}
 }
 
-func TestStateMachineTransitions(t *testing.T) {
+func TestGraphRuntimeTransitions(t *testing.T) {
+	graph := service.NewAgentLoopGraph(&service.AgentLoop{})
+	hasEdge := func(from, to, route string) bool {
+		for _, edge := range graph.Edges {
+			if edge.From == from && edge.To == to && edge.Condition == route {
+				return true
+			}
+		}
+		return false
+	}
+
 	critical := []struct {
-		from, to service.State
-		desc     string
+		from  string
+		to    string
+		route string
+		desc  string
 	}{
-		{service.StateIdle, service.StatePrepare, "start"},
-		{service.StatePrepare, service.StateGenerate, "prepare_to_generate"},
-		{service.StateGenerate, service.StateToolExec, "tool_calls"},
-		{service.StateGenerate, service.StateDone, "no_tools_done"},
-		{service.StateToolExec, service.StateGuardCheck, "post_tool_guard"},
-		{service.StateGuardCheck, service.StateGenerate, "loop_back"},
-		{service.StateError, service.StateGenerate, "retry"},
-		{service.StateError, service.StateFatal, "give_up"},
-		{service.StateFatal, service.StateIdle, "reset"},
-		{service.StateDone, service.StateIdle, "turn_complete"},
+		{"prepare", "orchestrate", "orchestrate", "prepare_to_orchestrate"},
+		{"orchestrate", "generate", "ok", "orchestrate_to_generate"},
+		{"orchestrate", "plan", "plan", "orchestrate_to_plan"},
+		{"orchestrate", "barrier_wait", "barrier_wait", "orchestrate_to_barrier_wait"},
+		{"barrier_wait", "merge", "merge", "barrier_wait_to_merge"},
+		{"merge", "complete", "complete", "merge_to_complete"},
+		{"generate", "generate", "generate", "generate_retry"},
+		{"generate", "tool_exec", "tool_exec", "tool_calls"},
+		{"tool_exec", "spawn", "spawn", "spawn_yield_routes_spawn"},
+		{"generate", "compact", "compact", "context_compact"},
+		{"generate", "done", "done", "no_tools_done"},
+		{"tool_exec", "guard_check", "guard_check", "post_tool_guard"},
+		{"tool_exec", "done", "done", "approval_denied_done"},
+		{"guard_check", "generate", "generate", "loop_back"},
+		{"guard_check", "compact", "compact", "guard_triggers_compact"},
+		{"compact", "generate", "generate", "resume_after_compact"},
+		{"done", "prepare", "prepare", "next_turn_reentry"},
 	}
 
 	for _, c := range critical {
 		t.Run(c.desc, func(t *testing.T) {
-			if !service.CanTransition(c.from, c.to) {
-				t.Errorf("Missing transition: %s → %s", c.from, c.to)
+			if !hasEdge(c.from, c.to, c.route) {
+				t.Errorf("Missing graph edge: %s -[%s]-> %s", c.from, c.route, c.to)
 			}
 		})
 	}

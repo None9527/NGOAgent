@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"regexp"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
 
@@ -175,11 +176,7 @@ type RunInfo struct {
 	Mode         string
 	History      []llm.Message // conversation history for distillation
 	Delta        DeltaSink     // SSE event sink for real-time push (e.g. title_updated)
-	// Evo mode fields
-	EvoTraceJSON     string      // Serialized trace steps (for evo runs)
-	EvoEval          *EvalResult // Evaluation result (nil if not evo)
-	EvoRepairSuccess bool        // Whether a repair succeeded
-	EvoRepairPlan    *RepairPlan // The repair plan that was used
+	Intelligence graphruntime.IntelligenceState
 }
 
 // PostRunHookChain executes multiple hooks in order.
@@ -226,7 +223,7 @@ type KIStore interface {
 	UpdateMerge(id, appendContent, newSummary string) error // Legacy append merge
 	ReplaceMerge(id, newContent, newSummary string) error   // Full replacement merge
 	GetContent(id string) (string, error)                   // Read existing content
-	MarkDeprecated(id, supersededBy string) error            // Phase 2: temporal deprecation
+	MarkDeprecated(id, supersededBy string) error           // Phase 2: temporal deprecation
 }
 
 // KIDuplicateChecker detects duplicate KIs using embedding similarity.
@@ -283,7 +280,7 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 		// Previously Steps<5 filtered too aggressively — most sessions have 1-3 steps.
 		if info.Steps < 2 || len(info.History) < 4 {
 			// Still check for evo repair distillation even on short sessions
-			if info.EvoRepairSuccess && info.EvoRepairPlan != nil {
+			if info.Intelligence.Repair.Success && info.Intelligence.Repair.Strategy != "" && info.Intelligence.Evaluation.Valid {
 				h.distillEvoRepair(store, info)
 			}
 			slog.Info(fmt.Sprintf("[hook] KI distill: skipped (steps=%d, history=%d) for session=%s",
@@ -389,29 +386,31 @@ func (h *KIDistillHook) OnRunComplete(ctx context.Context, info RunInfo) {
 
 // distillEvoRepair saves a successful repair strategy as a KI entry.
 func (h *KIDistillHook) distillEvoRepair(store KIStore, info RunInfo) {
-	if info.EvoRepairPlan == nil || info.EvoEval == nil {
+	if !info.Intelligence.Evaluation.Valid || !info.Intelligence.Repair.Success || info.Intelligence.Repair.Strategy == "" {
 		return
 	}
 
-	title := fmt.Sprintf("Evo Repair: %s → %s", info.EvoEval.ErrorType, info.EvoRepairPlan.Strategy)
+	eval := info.Intelligence.Evaluation
+	repair := info.Intelligence.Repair
+	title := fmt.Sprintf("Evo Repair: %s → %s", eval.ErrorType, repair.Strategy)
 	summary := fmt.Sprintf("Successful %s repair for %s error (score %.2f → improved)",
-		info.EvoRepairPlan.Strategy, info.EvoEval.ErrorType, info.EvoEval.Score)
+		repair.Strategy, eval.ErrorType, eval.Score)
 	content := fmt.Sprintf("# %s\n\n**Error Type:** %s\n**Strategy:** %s\n**Original Score:** %.2f\n**Description:** %s\n\n## Context\n\nUser request: %s\n\n## Issues Found\n\n%s\n\n## Repair Action\n\n%s",
 		title,
-		info.EvoEval.ErrorType,
-		info.EvoRepairPlan.Strategy,
-		info.EvoEval.Score,
-		info.EvoRepairPlan.Description,
+		eval.ErrorType,
+		repair.Strategy,
+		eval.Score,
+		repair.Description,
 		info.UserMessage,
-		formatIssues(info.EvoEval.Issues),
-		info.EvoRepairPlan.Ephemeral,
+		formatIssues(eval.Issues),
+		repair.Ephemeral,
 	)
 
-	tags := []string{"evo-repair", string(info.EvoRepairPlan.Strategy), info.EvoEval.ErrorType}
+	tags := []string{"evo-repair", string(repair.Strategy), eval.ErrorType}
 	if err := store.SaveDistilled(title, summary, content, tags, []string{info.SessionID}); err != nil {
 		slog.Info(fmt.Sprintf("[hook] evo repair KI save failed: %v", err))
 	} else {
-		slog.Info(fmt.Sprintf("[hook] evo repair KI distilled: strategy=%s error=%s", info.EvoRepairPlan.Strategy, info.EvoEval.ErrorType))
+		slog.Info(fmt.Sprintf("[hook] evo repair KI distilled: strategy=%s error=%s", repair.Strategy, eval.ErrorType))
 	}
 }
 

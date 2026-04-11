@@ -33,11 +33,11 @@ func (t *TaskTracker) RecordToolCall() {
 
 // RecordBoundary records a task_boundary tool call.
 func (t *TaskTracker) RecordBoundary(taskName, mode, status, summary string) {
-	t.PreviousMode = t.BoundaryMode
-	t.BoundaryTaskName = taskName
-	t.BoundaryMode = mode
-	t.BoundaryStatus = status
-	t.BoundarySummary = summary
+	t.PreviousMode = t.Mode
+	t.Name = taskName
+	t.Mode = mode
+	t.Status = status
+	t.Summary = summary
 	t.StepsSinceUpdate = 0
 }
 

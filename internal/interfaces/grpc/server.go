@@ -1,5 +1,4 @@
 // Package grpcserver provides the gRPC transport layer for NGOAgent.
-// It delegates all business logic to the unified AgentAPI facade.
 // This is a pure protocol adapter — no kernel operations (Loop/LoopPool/Delta) here.
 package grpcserver
 
@@ -14,98 +13,44 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/ngoclaw/ngoagent/internal/capability"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
-	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
 	pb "github.com/ngoclaw/ngoagent/internal/interfaces/grpc/agentpb"
 )
 
-// API is the interface the gRPC server requires from the application layer.
-// Mirrors server.API (HTTP) — both are satisfied by *application.AgentAPI.
-type API interface {
-	// Chat — unified streaming entry point
-	ChatStream(ctx context.Context, sessionID, message, mode string, delta *service.Delta) error
-	SessionID(sessionID string) string
-	StopRun(sessionID string)
-	Approve(approvalID string, approved bool) error
+type ChatAPI = capability.ChatControl
+type SessionAPI = capability.Session
+type AdminAPI = capability.Admin
 
-	// Session
-	NewSession(title string) apitype.SessionResponse
-	ListSessions() apitype.SessionListResponse
-	SetSessionTitle(id, title string)
-	DeleteSession(id string) error
+// API is the gRPC transport contract. Deprecated: prefer capability.GRPC.
+type API = capability.GRPC
 
-	// History
-	GetHistory(sessionID string) ([]apitype.HistoryMessage, error)
-	ClearHistory()
-	CompactContext()
-
-	// Model
-	ListModels() apitype.ModelListResponse
-	SwitchModel(name string) error
-	CurrentModel() string
-
-	// Config
-	GetConfig() map[string]any
-	SetConfig(key string, value any) error
-	AddProvider(p config.ProviderDef) error
-	RemoveProvider(name string) error
-	AddMCPServer(s config.MCPServerDef) error
-	RemoveMCPServer(name string) error
-
-	// Tools & Skills
-	ListTools() []apitype.ToolInfoResponse
-	EnableTool(name string) error
-	DisableTool(name string) error
-	ListSkills() ([]apitype.SkillInfoResponse, error)
-	ReadSkillContent(name string) (string, error)
-	RefreshSkills() error
-	DeleteSkill(name string) error
-
-	// MCP
-	ListMCPServers() ([]apitype.MCPServerInfo, error)
-	ListMCPTools() ([]apitype.MCPToolInfo, error)
-
-	// Status
-	Health() apitype.HealthResponse
-	GetSecurity() apitype.SecurityResponse
-	GetContextStats() apitype.ContextStats
-	GetSystemInfo() apitype.SystemInfoResponse
-	CronStatus() map[string]any
-
-	// Cron management
-	ListCronJobs() ([]apitype.CronJobInfo, error)
-	CreateCronJob(name, schedule, prompt string) error
-	DeleteCronJob(name string) error
-	EnableCronJob(name string) error
-	DisableCronJob(name string) error
-	RunCronJobNow(name string) error
-	ListCronLogs(jobName string) ([]apitype.CronLogInfo, error)
-	ReadCronLog(jobName, logFile string) (string, error)
-
-	// Brain artifacts
-	ListBrainArtifacts(sessionID string) ([]apitype.BrainArtifactInfo, error)
-	ReadBrainArtifact(sessionID, name string) (string, error)
-
-	// KI management
-	ListKI() ([]apitype.KIInfo, error)
-	GetKI(id string) (apitype.KIDetailResponse, error)
-	DeleteKI(id string) error
-	ListKIArtifacts(id string) ([]apitype.BrainArtifactInfo, error)
-	ReadKIArtifact(id, name string) (string, error)
+// Capabilities groups the gRPC transport dependencies explicitly.
+type Capabilities struct {
+	Chat    ChatAPI
+	Session SessionAPI
+	Admin   AdminAPI
 }
 
 // Server implements the gRPC AgentService.
 type Server struct {
 	pb.UnimplementedAgentServiceServer
-	api  API
-	addr string
-	gs   *grpc.Server
+	chat    ChatAPI
+	session SessionAPI
+	admin   AdminAPI
+	addr    string
+	gs      *grpc.Server
 }
 
-// NewServer creates a gRPC server bound to the AgentAPI.
-func NewServer(api API, addr string) *Server {
-	return &Server{api: api, addr: addr}
+// NewServer creates a gRPC server with explicit capability dependencies.
+func NewServer(capabilities Capabilities, addr string) *Server {
+	return &Server{
+		chat:    capabilities.Chat,
+		session: capabilities.Session,
+		admin:   capabilities.Admin,
+		addr:    addr,
+	}
 }
 
 // Start begins listening on the configured address.
@@ -183,7 +128,7 @@ func (s *Server) Chat(req *pb.AgentChatRequest, stream pb.AgentService_ChatServe
 	}
 
 	// Unified API call — all kernel operations handled by API layer
-	if err := s.api.ChatStream(stream.Context(), sessionID, req.GetMessage(), "", delta); err != nil {
+	if err := s.chat.ChatStream(stream.Context(), sessionID, req.GetMessage(), "", delta); err != nil {
 		if err.Error() == "agent is busy" {
 			return status.Error(codes.ResourceExhausted, "agent is busy")
 		}
@@ -200,12 +145,12 @@ func (s *Server) Chat(req *pb.AgentChatRequest, stream pb.AgentService_ChatServe
 // ═══════════════════════════════════════════
 
 func (s *Server) StopRun(_ context.Context, req *pb.SessionRequest) (*pb.CommandResponse, error) {
-	s.api.StopRun(req.GetSessionId())
+	s.chat.StopRun(req.GetSessionId())
 	return &pb.CommandResponse{Ok: true, Message: "stopped"}, nil
 }
 
 func (s *Server) ApproveToolCall(_ context.Context, req *pb.ApproveToolCallRequest) (*pb.CommandResponse, error) {
-	if err := s.api.Approve(req.GetCallId(), req.GetApproved()); err != nil {
+	if err := s.chat.Approve(req.GetCallId(), req.GetApproved()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "resolved"}, nil
@@ -216,7 +161,7 @@ func (s *Server) ApproveToolCall(_ context.Context, req *pb.ApproveToolCallReque
 // ═══════════════════════════════════════════
 
 func (s *Server) NewSession(_ context.Context, req *pb.NewSessionRequest) (*pb.CommandResponse, error) {
-	resp := s.api.NewSession(req.GetSessionId())
+	resp := s.session.NewSession(req.GetSessionId())
 	return &pb.CommandResponse{Ok: true, Message: resp.SessionID}, nil
 }
 
@@ -225,14 +170,14 @@ func (s *Server) NewSession(_ context.Context, req *pb.NewSessionRequest) (*pb.C
 // ═══════════════════════════════════════════
 
 func (s *Server) HealthCheck(_ context.Context, _ *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
-	h := s.api.Health()
+	h := s.admin.Health()
 	return &pb.HealthCheckResponse{
 		Healthy: true, Version: h.Version, Model: h.Model, Tools: int32(h.Tools),
 	}, nil
 }
 
 func (s *Server) GetSystemInfo(_ context.Context, _ *pb.EmptyRequest) (*pb.SystemInfoResponse, error) {
-	info := s.api.GetSystemInfo()
+	info := s.admin.GetSystemInfo()
 	return &pb.SystemInfoResponse{
 		Version: info.Version, GoVersion: info.GoVersion,
 		Os: info.OS, Arch: info.Arch, UptimeMs: info.UptimeMs,
@@ -241,7 +186,7 @@ func (s *Server) GetSystemInfo(_ context.Context, _ *pb.EmptyRequest) (*pb.Syste
 }
 
 func (s *Server) GetContextStats(_ context.Context, _ *pb.SessionRequest) (*pb.ContextStatsResponse, error) {
-	stats := s.api.GetContextStats()
+	stats := s.admin.GetContextStats()
 	return &pb.ContextStatsResponse{
 		MessageCount: int32(stats.HistoryCount), TokenCount: int32(stats.TokenEstimate), MaxTokens: 128000,
 	}, nil
@@ -252,7 +197,7 @@ func (s *Server) GetContextStats(_ context.Context, _ *pb.SessionRequest) (*pb.C
 // ═══════════════════════════════════════════
 
 func (s *Server) ListModels(_ context.Context, _ *pb.EmptyRequest) (*pb.ListModelsResponse, error) {
-	resp := s.api.ListModels()
+	resp := s.admin.ListModels()
 	models := make([]*pb.ModelInfo, len(resp.Models))
 	for i, m := range resp.Models {
 		models[i] = &pb.ModelInfo{Id: m, Alias: m}
@@ -261,7 +206,7 @@ func (s *Server) ListModels(_ context.Context, _ *pb.EmptyRequest) (*pb.ListMode
 }
 
 func (s *Server) SwitchModel(_ context.Context, req *pb.SwitchModelRequest) (*pb.CommandResponse, error) {
-	if err := s.api.SwitchModel(req.GetModel()); err != nil {
+	if err := s.admin.SwitchModel(req.GetModel()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "switched to " + req.GetModel()}, nil
@@ -272,7 +217,7 @@ func (s *Server) SwitchModel(_ context.Context, req *pb.SwitchModelRequest) (*pb
 // ═══════════════════════════════════════════
 
 func (s *Server) GetHistory(_ context.Context, req *pb.SessionRequest) (*pb.GetHistoryResponse, error) {
-	msgs, err := s.api.GetHistory(req.GetSessionId())
+	msgs, err := s.session.GetHistory(req.GetSessionId())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get history: %v", err)
 	}
@@ -284,12 +229,12 @@ func (s *Server) GetHistory(_ context.Context, req *pb.SessionRequest) (*pb.GetH
 }
 
 func (s *Server) ClearHistory(_ context.Context, _ *pb.SessionRequest) (*pb.CommandResponse, error) {
-	s.api.ClearHistory()
+	s.session.ClearHistory()
 	return &pb.CommandResponse{Ok: true, Message: "history cleared"}, nil
 }
 
 func (s *Server) CompactContext(_ context.Context, _ *pb.CompactRequest) (*pb.CommandResponse, error) {
-	s.api.CompactContext()
+	s.session.CompactContext()
 	return &pb.CommandResponse{Ok: true, Message: "context compacted"}, nil
 }
 
@@ -298,7 +243,7 @@ func (s *Server) CompactContext(_ context.Context, _ *pb.CompactRequest) (*pb.Co
 // ═══════════════════════════════════════════
 
 func (s *Server) GetSecurity(_ context.Context, _ *pb.EmptyRequest) (*pb.SecurityResponse, error) {
-	sec := s.api.GetSecurity()
+	sec := s.admin.GetSecurity()
 	return &pb.SecurityResponse{
 		ApprovalMode: sec.Mode, DangerousTools: sec.BlockList, TrustedCommands: sec.SafeCommands,
 	}, nil
@@ -309,7 +254,7 @@ func (s *Server) GetSecurity(_ context.Context, _ *pb.EmptyRequest) (*pb.Securit
 // ═══════════════════════════════════════════
 
 func (s *Server) ListTools(_ context.Context, _ *pb.EmptyRequest) (*pb.ListToolsInfoResponse, error) {
-	tools := s.api.ListTools()
+	tools := s.admin.ListTools()
 	items := make([]*pb.ToolInfoItem, len(tools))
 	for i, t := range tools {
 		items[i] = &pb.ToolInfoItem{Name: t.Name, Enabled: t.Enabled}
@@ -318,21 +263,21 @@ func (s *Server) ListTools(_ context.Context, _ *pb.EmptyRequest) (*pb.ListTools
 }
 
 func (s *Server) EnableTool(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.EnableTool(req.GetValue()); err != nil {
+	if err := s.admin.EnableTool(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "enabled"}, nil
 }
 
 func (s *Server) DisableTool(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.DisableTool(req.GetValue()); err != nil {
+	if err := s.admin.DisableTool(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "disabled"}, nil
 }
 
 func (s *Server) ListSkills(_ context.Context, _ *pb.EmptyRequest) (*pb.ListSkillsResponse, error) {
-	skills, err := s.api.ListSkills()
+	skills, err := s.admin.ListSkills()
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +293,7 @@ func (s *Server) ListSkills(_ context.Context, _ *pb.EmptyRequest) (*pb.ListSkil
 // ═══════════════════════════════════════════
 
 func (s *Server) ListSessions(_ context.Context, _ *pb.ListSessionsRequest) (*pb.ListSessionsResponse, error) {
-	resp := s.api.ListSessions()
+	resp := s.session.ListSessions()
 	items := make([]*pb.SessionSummaryItem, len(resp.Sessions))
 	for i, sess := range resp.Sessions {
 		items[i] = &pb.SessionSummaryItem{
@@ -360,14 +305,14 @@ func (s *Server) ListSessions(_ context.Context, _ *pb.ListSessionsRequest) (*pb
 }
 
 func (s *Server) DeleteSession(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.DeleteSession(req.GetValue()); err != nil {
+	if err := s.session.DeleteSession(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "deleted"}, nil
 }
 
 func (s *Server) RenameSession(_ context.Context, req *pb.RenameSessionRequest) (*pb.CommandResponse, error) {
-	s.api.SetSessionTitle(req.GetSessionId(), req.GetTitle())
+	s.session.SetSessionTitle(req.GetSessionId(), req.GetTitle())
 	return &pb.CommandResponse{Ok: true, Message: "renamed"}, nil
 }
 
@@ -376,7 +321,7 @@ func (s *Server) RenameSession(_ context.Context, req *pb.RenameSessionRequest) 
 // ═══════════════════════════════════════════
 
 func (s *Server) GetConfig(_ context.Context, _ *pb.EmptyRequest) (*pb.ConfigResponse, error) {
-	cfg := s.api.GetConfig()
+	cfg := s.admin.GetConfig()
 	data, _ := json.Marshal(cfg)
 	return &pb.ConfigResponse{JsonData: string(data)}, nil
 }
@@ -386,7 +331,7 @@ func (s *Server) SetConfigValue(_ context.Context, req *pb.SetConfigValueRequest
 	if err := json.Unmarshal([]byte(req.GetJsonValue()), &value); err != nil {
 		value = req.GetJsonValue() // treat as plain string
 	}
-	if err := s.api.SetConfig(req.GetPath(), value); err != nil {
+	if err := s.admin.SetConfig(req.GetPath(), value); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "set " + req.GetPath()}, nil
@@ -397,7 +342,7 @@ func (s *Server) SetConfigValue(_ context.Context, req *pb.SetConfigValueRequest
 // ═══════════════════════════════════════════
 
 func (s *Server) ListMCPServers(_ context.Context, _ *pb.EmptyRequest) (*pb.ListMCPServersResponse, error) {
-	servers, err := s.api.ListMCPServers()
+	servers, err := s.admin.ListMCPServers()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
@@ -414,21 +359,21 @@ func (s *Server) ListMCPServers(_ context.Context, _ *pb.EmptyRequest) (*pb.List
 
 func (s *Server) AddMCPServer(_ context.Context, req *pb.AddMCPServerRequest) (*pb.CommandResponse, error) {
 	def := config.MCPServerDef{Name: req.GetName(), Command: req.GetUrl()}
-	if err := s.api.AddMCPServer(def); err != nil {
+	if err := s.admin.AddMCPServer(def); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "added " + req.GetName()}, nil
 }
 
 func (s *Server) RemoveMCPServer(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.RemoveMCPServer(req.GetValue()); err != nil {
+	if err := s.admin.RemoveMCPServer(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "removed"}, nil
 }
 
 func (s *Server) GetMCPServerTools(_ context.Context, _ *pb.StringValueRequest) (*pb.ListToolsInfoResponse, error) {
-	tools, err := s.api.ListMCPTools()
+	tools, err := s.admin.ListMCPTools()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
@@ -444,7 +389,7 @@ func (s *Server) GetMCPServerTools(_ context.Context, _ *pb.StringValueRequest) 
 // ═══════════════════════════════════════════
 
 func (s *Server) ListCronJobs(_ context.Context, _ *pb.EmptyRequest) (*pb.CronJobsResponse, error) {
-	jobs, err := s.api.ListCronJobs()
+	jobs, err := s.admin.ListCronJobs()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
@@ -459,35 +404,35 @@ func (s *Server) ListCronJobs(_ context.Context, _ *pb.EmptyRequest) (*pb.CronJo
 }
 
 func (s *Server) CronAdd(_ context.Context, req *pb.CronAddRequest) (*pb.CommandResponse, error) {
-	if err := s.api.CreateCronJob(req.GetName(), req.GetSchedule(), req.GetCommand()); err != nil {
+	if err := s.admin.CreateCronJob(req.GetName(), req.GetSchedule(), req.GetCommand()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "created " + req.GetName()}, nil
 }
 
 func (s *Server) CronRemove(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.DeleteCronJob(req.GetValue()); err != nil {
+	if err := s.admin.DeleteCronJob(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "deleted"}, nil
 }
 
 func (s *Server) CronEnable(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.EnableCronJob(req.GetValue()); err != nil {
+	if err := s.admin.EnableCronJob(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "enabled"}, nil
 }
 
 func (s *Server) CronDisable(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.DisableCronJob(req.GetValue()); err != nil {
+	if err := s.admin.DisableCronJob(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "disabled"}, nil
 }
 
 func (s *Server) CronRunNow(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.RunCronJobNow(req.GetValue()); err != nil {
+	if err := s.admin.RunCronJobNow(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "triggered"}, nil
@@ -498,7 +443,7 @@ func (s *Server) CronRunNow(_ context.Context, req *pb.StringValueRequest) (*pb.
 // ═══════════════════════════════════════════
 
 func (s *Server) ListCronLogs(_ context.Context, req *pb.StringValueRequest) (*pb.CronLogsResponse, error) {
-	logs, err := s.api.ListCronLogs(req.GetValue())
+	logs, err := s.admin.ListCronLogs(req.GetValue())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
@@ -510,7 +455,7 @@ func (s *Server) ListCronLogs(_ context.Context, req *pb.StringValueRequest) (*p
 }
 
 func (s *Server) ReadCronLog(_ context.Context, req *pb.CronLogReadRequest) (*pb.BrainReadResponse, error) {
-	content, err := s.api.ReadCronLog(req.GetJobName(), req.GetLogFile())
+	content, err := s.admin.ReadCronLog(req.GetJobName(), req.GetLogFile())
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "%v", err)
 	}
@@ -522,7 +467,7 @@ func (s *Server) ReadCronLog(_ context.Context, req *pb.CronLogReadRequest) (*pb
 // ═══════════════════════════════════════════
 
 func (s *Server) ListBrainArtifacts(_ context.Context, req *pb.BrainListRequest) (*pb.BrainListResponse, error) {
-	artifacts, err := s.api.ListBrainArtifacts(req.GetSessionId())
+	artifacts, err := s.admin.ListBrainArtifacts(req.GetSessionId())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
@@ -534,7 +479,7 @@ func (s *Server) ListBrainArtifacts(_ context.Context, req *pb.BrainListRequest)
 }
 
 func (s *Server) ReadBrainArtifact(_ context.Context, req *pb.BrainReadRequest) (*pb.BrainReadResponse, error) {
-	content, err := s.api.ReadBrainArtifact(req.GetSessionId(), req.GetName())
+	content, err := s.admin.ReadBrainArtifact(req.GetSessionId(), req.GetName())
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "%v", err)
 	}
@@ -546,7 +491,7 @@ func (s *Server) ReadBrainArtifact(_ context.Context, req *pb.BrainReadRequest) 
 // ═══════════════════════════════════════════
 
 func (s *Server) ListKI(_ context.Context, _ *pb.EmptyRequest) (*pb.KIListResponse, error) {
-	items, err := s.api.ListKI()
+	items, err := s.admin.ListKI()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
@@ -561,7 +506,7 @@ func (s *Server) ListKI(_ context.Context, _ *pb.EmptyRequest) (*pb.KIListRespon
 }
 
 func (s *Server) GetKI(_ context.Context, req *pb.StringValueRequest) (*pb.KIDetailResponse, error) {
-	item, err := s.api.GetKI(req.GetValue())
+	item, err := s.admin.GetKI(req.GetValue())
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "%v", err)
 	}
@@ -570,14 +515,14 @@ func (s *Server) GetKI(_ context.Context, req *pb.StringValueRequest) (*pb.KIDet
 }
 
 func (s *Server) DeleteKI(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.DeleteKI(req.GetValue()); err != nil {
+	if err := s.admin.DeleteKI(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "deleted"}, nil
 }
 
 func (s *Server) ListKIArtifacts(_ context.Context, req *pb.StringValueRequest) (*pb.BrainListResponse, error) {
-	artifacts, err := s.api.ListKIArtifacts(req.GetValue())
+	artifacts, err := s.admin.ListKIArtifacts(req.GetValue())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
@@ -590,7 +535,7 @@ func (s *Server) ListKIArtifacts(_ context.Context, req *pb.StringValueRequest) 
 
 func (s *Server) ReadKIArtifact(_ context.Context, req *pb.BrainReadRequest) (*pb.BrainReadResponse, error) {
 	// For KI artifacts, session_id field is used as KI id
-	content, err := s.api.ReadKIArtifact(req.GetSessionId(), req.GetName())
+	content, err := s.admin.ReadKIArtifact(req.GetSessionId(), req.GetName())
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "%v", err)
 	}
@@ -602,7 +547,7 @@ func (s *Server) ReadKIArtifact(_ context.Context, req *pb.BrainReadRequest) (*p
 // ═══════════════════════════════════════════
 
 func (s *Server) ReadSkillContent(_ context.Context, req *pb.StringValueRequest) (*pb.BrainReadResponse, error) {
-	content, err := s.api.ReadSkillContent(req.GetValue())
+	content, err := s.admin.ReadSkillContent(req.GetValue())
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "%v", err)
 	}
@@ -610,14 +555,14 @@ func (s *Server) ReadSkillContent(_ context.Context, req *pb.StringValueRequest)
 }
 
 func (s *Server) RefreshSkills(_ context.Context, _ *pb.EmptyRequest) (*pb.CommandResponse, error) {
-	if err := s.api.RefreshSkills(); err != nil {
+	if err := s.admin.RefreshSkills(); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "refreshed"}, nil
 }
 
 func (s *Server) DeleteSkill(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.DeleteSkill(req.GetValue()); err != nil {
+	if err := s.admin.DeleteSkill(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "deleted"}, nil
@@ -635,14 +580,14 @@ func (s *Server) AddProvider(_ context.Context, req *pb.AddProviderRequest) (*pb
 		APIKey:  req.GetApiKey(),
 		Models:  req.GetModels(),
 	}
-	if err := s.api.AddProvider(def); err != nil {
+	if err := s.admin.AddProvider(def); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "added " + req.GetName()}, nil
 }
 
 func (s *Server) RemoveProvider(_ context.Context, req *pb.StringValueRequest) (*pb.CommandResponse, error) {
-	if err := s.api.RemoveProvider(req.GetValue()); err != nil {
+	if err := s.admin.RemoveProvider(req.GetValue()); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "removed"}, nil
@@ -666,7 +611,7 @@ func (s *Server) SendMessage(_ context.Context, req *pb.SendMessageRequest) (*pb
 		OnApprovalRequestFunc: func(string, string, map[string]any, string) {},
 		OnTitleUpdateFunc:     func(string, string) {},
 	}
-	if err := s.api.ChatStream(context.Background(), req.GetSessionId(), req.GetMessage(), "", delta); err != nil {
+	if err := s.chat.ChatStream(context.Background(), req.GetSessionId(), req.GetMessage(), "", delta); err != nil {
 		return &pb.CommandResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.CommandResponse{Ok: true, Message: "sent"}, nil

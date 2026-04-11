@@ -1,437 +1,401 @@
-# NGOAgent 系统级进化路线图 (System Evolution Roadmap)
+# NGOAgent 总路线图
 
-> **版本**: 3.0  
-> **更新时间**: 2026-04-08  
-> **定位**: 基于 GitNexus 与代码实态校验后的通用 Agent 演进路线图  
-> **目标**: 将 NGOAgent 从“强工程化的代码助手”演进为“可编排、可恢复、可扩展的通用 Agent Runtime”
-
----
-
-## 一、执行摘要
-
-当前 NGOAgent 的优势不在编排层，而在以下几个方向：
-
-- 记忆与知识治理已经形成体系化能力
-- 多模态输入链路已经具备生产可用基础
-- Prompt 组装、上下文裁剪、行为 Overlay 已经较成熟
-- Evo 异步评估与修复闭环已经具备雏形
-- MCP 与内建工具注册机制已经具备较好的扩展基础
-
-但从通用 Agent 框架视角看，当前系统的核心短板也非常明确：
-
-- 运行时内核仍然是线性 10-state FSM，而不是图执行引擎
-- Session 恢复目前只恢复历史消息，不恢复执行中的运行态
-- 尚未形成贯穿运行时的 Typed State Schema
-- 结构化输出能力没有上升为统一 runtime 能力
-- 编排层、领域能力、工具包边界仍然混合在同一装配层
-
-结论很直接：
-
-> NGOAgent 现在更接近“具备记忆、自修复和工具生态的高级 Agent 产品”，还不是“通用 Agent Runtime”。  
-> 下一阶段唯一的一级阻塞项不是再加工具，而是补齐 Graph Runtime + Checkpoint Persistence。
-
-配套设计稿：
-
-- [graph_runtime_design.md](/home/none/ngoclaw/NGOAgent/docs/graph_runtime_design.md)
+> **Version**: 5.0  
+> **Updated**: 2026-04-09  
+> **Positioning**: NGOAgent 从“强编程助手”演进为“通用 Agent Runtime”的总路线  
+> **原则**: 只保留总路线，不展开局部任务树，不用功能清单替代架构方向
 
 ---
 
-## 二、代码实态校验
+## 一、核心判断
 
-本节结论基于 GitNexus 查询与源码交叉校验。
+NGOAgent 当前最重要的问题，不是功能不够多，也不是工具不够强。
 
-### 1. 当前内核不是 DAG Runtime，而是线性 FSM
+真正的问题是：
 
-证据：
+- runtime 还没有彻底成为唯一内核
+- intelligence 还没有成为统一合同
+- orchestration 还没有形成网络层
+- coding 能力还没有外化为插件层
 
-- [state.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/state.go) 定义了 `StatePrepare -> StateGenerate -> StateToolExec -> StateGuardCheck -> StateCompact -> StateDone` 等固定状态。
-- [run.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/run.go) 中 `runInner()` 通过 `switch a.CurrentState()` 驱动整个回合执行。
-- [run_states.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/run_states.go) 将各状态拆分为 handler，但本质仍是固定状态机，不是可声明图。
+所以 NGOAgent 的主任务，不应再被描述成“继续补若干功能点”，而应被定义为一条系统级演进路线：
 
-这意味着当前系统支持的是：
+> **先完成内核，再完成合同，再完成编排，再完成外化，最后完成生产化。**
 
-- 单回合循环
-- 有限回退
-- 工具批处理并发
-- 结束后异步后处理
+这条路线压缩为五段：
 
-而不原生支持：
+- `R1 内核成形`
+- `R2 智能合同化`
+- `R3 编排网络化`
+- `R4 域能力外化`
+- `R5 生产化`
 
-- 显式条件分支图
-- 子图复用
-- 图级中断恢复
-- 并行分支 join
-- 节点级 checkpoint
-
-### 2. 当前 Session 恢复不是执行恢复，只是 History 恢复
-
-证据：
-
-- [api.go](/home/none/ngoclaw/NGOAgent/internal/application/api.go) 的 `ChatStream()` 在 loop 内 history 为空时调用 `LoadAll -> RestoreHistory -> SetHistory`。
-- [persistence_ops.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/persistence_ops.go) 只做 history append/full replace。
-- [history.go](/home/none/ngoclaw/NGOAgent/internal/infrastructure/persistence/history.go) 持久化的核心对象仍是 `HistoryMessage`。
-
-这意味着当前恢复能力只覆盖：
-
-- 用户消息
-- assistant 消息
-- tool call 文本记录
-- reasoning 文本
-- multimodal attachment 引用
-
-但不会恢复：
-
-- 当前执行到哪个节点
-- pending approval / waiting gate
-- subagent barrier 状态
-- pending ephemerals
-- 运行模式与图游标
-- 中间产物依赖关系
-
-因此，当前系统具备 `chat resume`，不具备 `execution resume`。
-
-### 3. Typed State Schema 尚未形成
-
-证据：
-
-- [loop.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/loop.go) 中运行态分散在 `AgentLoop` 的多个字段里。
-- [run_states.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/run_states.go) 另有局部 `runState`。
-- `TaskTracker`、ephemerals、history、mode、token tracker 等状态由不同结构分别承载。
-
-当前并不是完全动态的 `map[string]any` 模式，但也不是可组合的 graph state schema。  
-它更接近“多组强类型字段并存”，而不是“统一的强类型状态流”。
-
-### 4. 结构化输出存在局部实现，但不是系统级能力
-
-证据：
-
-- [registry.go](/home/none/ngoclaw/NGOAgent/internal/infrastructure/tool/registry.go) 的 schema 主要服务于工具参数定义。
-- [evo_evaluator.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/evo_evaluator.go) 会要求模型输出 JSON，然后本地解析。
-- 主 loop 中没有统一的 `response_format + schema validation + retry` 机制。
-
-因此，“结构化输出已覆盖”这个判断不成立。  
-更准确的说法是：系统已有若干局部结构化输出实践，但尚未沉淀成统一 runtime contract。
-
-### 5. 自我反思能力已有异步雏形，但未进入主图执行
-
-证据：
-
-- [evo_controller.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/evo_controller.go) 在回合结束后异步触发评估与修复。
-- [evo_evaluator.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/evo_evaluator.go) 输出结构化评估结果。
-
-这说明系统已有“执行后评估”能力，但没有：
-
-- 统一的 reflection node
-- destructive action 前的同步审查点
-- final answer 前的可配置审校节点
-
-因此，`Self-Critique` 的表述应从“已有基础”调整为“已有异步后评估基础，缺同步图节点能力”。
-
-### 6. 领域边界仍然混杂在装配层
-
-证据：
-
-- [builder.go](/home/none/ngoclaw/NGOAgent/internal/application/builder.go) 中直接注册 read/write/edit/git/diff/tree/http/MCP/skill 等大量工具。
-- [coding.go](/home/none/ngoclaw/NGOAgent/internal/domain/profile/coding.go) 的 coding overlay 已经把软件开发行为规则显式化。
-- [engine.go](/home/none/ngoclaw/NGOAgent/internal/infrastructure/prompt/engine.go) 默认 overlays 仍以 CodingOverlay 为默认激活集的一部分。
-
-这说明 prompt 层已经开始做通用化，但 runtime 装配层仍明显偏向 coding assistant。
+这五段不是并列功能包，而是有明确依赖关系的总路线。
 
 ---
 
-## 三、当前能力分层
+## 二、总路线
 
-### Ring 0: 运行时内核
+### R1 内核成形
 
-当前具备：
+这是 NGOAgent 成为 Agent Runtime 的起点，也是当前唯一硬阻塞阶段。
 
-- 单回合 AgentLoop
-- 10-state FSM
-- 工具执行、紧凑化、有限错误恢复
-- 部分并发工具批处理
+这一阶段只解决四个问题：
 
-当前缺失：
+- Graph Runtime 成为唯一主执行内核
+- Typed State 成为唯一真相源
+- Checkpoint / Resume 成为稳定能力
+- Node / Route / Wait / Checkpoint 合同定型
 
-- Graph Runtime
-- Typed State Schema
-- 节点级 checkpoint
-- 图级恢复
+这一阶段完成之前，NGOAgent 仍然只是“带 graph 雏形的产品”，还不是完整意义上的 runtime。
 
-### Ring 1: 智能层
+一句话说，`R1` 要解决的是：
 
-当前具备：
+> 让 NGOAgent 先真正拥有“执行骨架”。
 
-- Overlay 驱动的行为差异化
-- 记忆 / KI / Diary / Recall
-- 异步 Evo 评估与 repair
-- 多模态输入构建
+### R2 智能合同化
 
-当前缺失：
+当内核稳定后，第二阶段不是继续堆功能，而是把智能行为变成 runtime 原生合同。
 
-- 统一结构化输出 contract
-- 同步 reflection node
-- 面向任务复杂度的推理模式切换框架
+这一阶段解决三类问题：
 
-### Ring 2: 编排层
+- Structured Output 成为统一能力
+- Reflection / Review 成为标准节点
+- Planner / Evaluator / Repair 进入统一合同
 
-当前具备：
+这一阶段的目标不是“更聪明”，而是：
 
-- subagent spawn
-- barrier / wake continuation
-- cron / MCP / webhook 等外围触点
+> 让 intelligence 不再散落在局部模块技巧里，而成为 runtime 可以承载的标准能力。
 
-当前缺失：
+### R3 编排网络化 ✅ P5 接线完成 (2026-04-11)
 
-- A2A 协议
-- 事件驱动 runtime 入口抽象
-- tool discovery as runtime capability
+第三阶段是把 NGOAgent 从单体运行时推向编排层。
 
-### Ring 3: 领域插件层
+这一阶段解决三类问题：
 
-当前事实上已经存在：
+- Event / Trigger 成为统一入口抽象 ✅ EventBus (channel-based, 256 buffer, 4 workers)
+- A2A 成为跨 Agent 协同协议 ✅ Handler + 7 HTTP 路由 (agent.json discovery 免 auth)
+- Tool Discovery 成为运行时能力路由的一部分 ✅ AggregatedToolDiscovery (builtin + MCP + skill)
 
-- coding overlay
-- git / diff / file / tree / browser-like tooling
-- skill / script / MCP tool adapters
+这一阶段完成后，NGOAgent 才不只是“单体 Agent”，而是一个可协同、可委托、可联网编排的系统。
 
-但还没有形成明确的 plugin packaging 与生命周期边界。
+### R4 域能力外化
 
----
+第四阶段要解决的是框架与产品的边界。
 
-## 四、下一步演进优先级
+这一阶段的核心动作不是“加插件目录”，而是：
 
-### P0. Graph Runtime 内核化
+- runtime 与 app/assembly 拆层
+- coding/browser/media/research 等能力从核心中外移
+- builder 不再承担总装配器角
+色
 
-这是唯一的一级阻塞项。
+这一阶段完成后，NGOAgent 才能从“编程助手本体”转为“runtime + plugins”。
 
-目标：
+### R5 生产化
 
-- 将当前 `runInner()` 的固定状态机重构为 Graph Runtime
-- 保留现有状态处理逻辑，但迁移为 graph node
-- 让执行流程从硬编码 switch 过渡为“图定义 + 执行器”
+最后一阶段才是生产化。
 
-建议交付物：
+包括但不限于：
 
-- `Node` 接口
-- `Edge` / `TransitionRule`
-- `GraphDefinition`
-- `ExecutionCursor`
-- `GraphRuntime`
-- `NodeResult`
+- telemetry
+- health / readiness
+- rate limiting
+- deployment packaging
+- tenant isolation
 
-第一阶段不追求功能爆炸，只做“旧逻辑的图承载化”。
-
-### P1. Run Snapshot / Checkpoint Persistence
-
-目标：
-
-- 引入独立于 conversation history 的运行态持久化
-- 支持跨重启恢复 pending execution
-- 为 approval、barrier、auto-wake、tool continuation 提供统一恢复点
-
-建议至少持久化：
-
-- 当前 graph/node cursor
-- 当前 turn 的 typed state
-- pending approvals
-- pending wakes / barrier handles
-- mode / agent type / active overlays
-- intermediate artifacts references
-- token/context counters
-
-没有这一层，DAG 也只是“更复杂但不可恢复的线性循环”。
-
-### P2. Typed State Schema
-
-目标：
-
-- 将 `history + ephemerals + task + mode + runtime counters + orchestration state` 抽象为统一状态模型
-- 明确区分 durable state 与 ephemeral state
-- 为节点输入输出、schema 校验、checkpoint 序列化提供统一模型
-
-建议方向：
-
-- `TurnState`
-- `SessionState`
-- `ExecutionState`
-- `ArtifactRefs`
-- `ApprovalState`
-
-### P3. Core / Plugin 拆层
-
-目标：
-
-- 将通用 runtime 与 coding-specific toolpacks 拆开
-- 降低 `builder.go` 的装配耦合
-- 让 NGOAgent 从“产品总装配”演进成“runtime + plugins”
-
-建议结构：
-
-- `core/runtime`
-- `core/prompt`
-- `core/orchestration`
-- `plugins/coding`
-- `plugins/browser`
-- `plugins/media`
-- `plugins/research`
-
-### P4. 统一结构化输出
-
-目标：
-
-- 不再让 JSON parse 只存在于个别模块
-- 让 graph node 可以声明 output schema
-- 对输出失败自动重试、纠偏或降级
-
-适用范围：
-
-- planner node
-- eval node
-- repair node
-- route selection node
-- final report node
-
-### P5. Reflection Node
-
-目标：
-
-- 将异步 Evo 能力前移一部分到同步主流程
-- 在关键节点前增加审查点
-
-优先插入点：
-
-- destructive tool execution 前
-- final answer 前
-- plan commit 前
-
-### P6. 编排层增强
-
-在完成 P0-P5 后，再做下面这些才有意义：
-
-- event trigger runtime abstraction
-- A2A protocol
-- dynamic tool discovery
-- external agent delegation over RPC/gRPC
+这一步必须后置，因为在内核、合同、编排、插件边界都不稳定时，生产化只会放大混乱。
 
 ---
 
-## 五、推荐阶段规划
+## 三、阶段依赖关系
 
-### 阶段 α: Runtime 重构
+这五段的依赖关系是严格单向的：
 
-目标：
+`R1 -> R2 -> R3 -> R4 -> R5`
 
-- Graph Runtime 落地
-- Typed State 初版
-- Checkpoint Snapshot 初版
+含义如下：
 
-建议周期：
+- `R1` 没完成，`R2` 会失去承载面
+- `R2` 没完成，`R3` 只能编排脆弱行为
+- `R3` 没完成，`R4` 只会做出静态插件目录，而不是可编排插件体系
+- `R4` 没完成，`R5` 只能把一个边界混乱的系统包装上线
 
-- 4-8 周
+所以 NGOAgent 不适合再写成“多条路线同时推进的功能矩阵”。
 
-完成标志：
+更合理的表达只能是：
 
-- 现有 `Prepare/Generate/ToolExec/GuardCheck/Compact/Done` 均可由 graph node 表达
-- agent 可从 checkpoint 恢复到 pending execution
-
-### 阶段 β: 智能层统一化
-
-目标：
-
-- 统一结构化输出
-- Reflection node
-- 将 Evo 的部分能力前移到主流程
-
-建议周期：
-
-- 1-3 周
-
-完成标志：
-
-- 关键节点输出均可 schema 校验
-- destructive tool 前存在可配置审查节点
-
-### 阶段 γ: 插件边界化
-
-目标：
-
-- core/runtime 与 coding plugin 解耦
-- builder 从“全注册器”收缩为“runtime assembler”
-
-建议周期：
-
-- 1-2 周
-
-完成标志：
-
-- Git / Diff / 文件编辑等能力可以作为 plugin/toolpack 装载
-- 默认 runtime 不再天然绑定 coding 场景
-
-### 阶段 δ: 编排网络化
-
-目标：
-
-- A2A
-- 事件驱动 session 启动
-- 跨进程 agent delegation
-
-建议周期：
-
-- 2-4 周
-
-完成标志：
-
-- 外部 agent/runtime 可以发现、委托、回传结果
+> 这是一个由内向外展开的系统级演进序列。
 
 ---
 
-## 六、需要修正的旧判断
+## 四、当前所处位置
 
-以下旧路线图表述建议废弃或调整：
+当前 NGOAgent 不在 `R0`，也不在 `R2`。
 
-- “A1 Workflow/DAG 执行引擎 [开发中]”
-  - 应改为：尚未落地，仍处于架构级缺口
-- “A2 会话级持久化快照 [优先做]”
-  - 保留优先级，但应强调当前只有 history persistence，不是 runtime checkpoint
-- “B3 通用结构化输出约束 [已覆盖]”
-  - 应改为：仅局部存在，未统一为系统能力
-- “C1 自动化验证闭环 [优先做]”
-  - 可以保留，但它不应高于 Graph Runtime
-- “B2 无头浏览器集群 [优先做]”
-  - 对通用 Agent Runtime 不是一级优先项
+当前准确位置是：
 
----
+> **处于 `R1 内核成形` 的中后段。**
 
-## 七、最终判断
+原因是：
 
-NGOAgent 当前最值钱的积累不是“更多工具”，而是：
+- Graph Runtime 已经存在
+- Checkpoint 基础能力已经存在
+- Typed State 骨架已经存在
+- resume 主链路已经接上
 
-- Memory / KI / Diary 治理
-- Evo 异步评估与修复
-- Overlay 驱动的行为差异化
-- Prompt 装配与上下文预算能力
-- MCP 与工具生态兼容性
+但同时：
 
-但这些能力现在仍然挂载在一个线性 FSM 上。
+- graph 还没有彻底成为唯一执行所有者
+- typed state 还没有彻底成为唯一真相源
+- recovery 还没有达到稳定合同级别
+- node contract 还没有真正固化
 
-因此，未来路线图的核心句子应该是：
+所以当前不是“从 0 开始做 runtime”，而是：
 
-> 先把运行时做成 Graph Runtime，再谈 A2A、动态工具发现和通用插件生态。  
-> 没有 Graph Runtime 与 Checkpoint Persistence，其他增强都只是把当前产品能力继续堆厚，而不是把系统升维成通用 Agent 平台。
+> **把雏形内核收敛成可依赖内核。**
+
+这也是为什么现在最重要的事不是再补外围能力，而是先完成 `R1`。
 
 ---
 
-## 八、附录：高信号代码入口
+## 五、每一阶段的完成标志
 
-- 运行时主循环: [run.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/run.go)
-- 状态定义: [state.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/state.go)
-- 状态处理器: [run_states.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/run_states.go)
-- 会话恢复入口: [api.go](/home/none/ngoclaw/NGOAgent/internal/application/api.go)
-- 历史持久化: [persistence_ops.go](/home/none/ngoclaw/NGOAgent/internal/domain/service/persistence_ops.go)
-- History 存储: [history.go](/home/none/ngoclaw/NGOAgent/internal/infrastructure/persistence/history.go)
-- Prompt Overlay: [engine.go](/home/none/ngoclaw/NGOAgent/internal/infrastructure/prompt/engine.go)
-- Behavior Overlay: [profile.go](/home/none/ngoclaw/NGOAgent/internal/domain/profile/profile.go)
-- Coding Overlay: [coding.go](/home/none/ngoclaw/NGOAgent/internal/domain/profile/coding.go)
-- MCP 管理: [manager.go](/home/none/ngoclaw/NGOAgent/internal/infrastructure/mcp/manager.go)
-- MCP 工具适配: [mcp_adapter.go](/home/none/ngoclaw/NGOAgent/internal/infrastructure/tool/mcp_adapter.go)
-- 系统装配入口: [builder.go](/home/none/ngoclaw/NGOAgent/internal/application/builder.go)
+### R1 完成标志
+
+- graph runtime 成为唯一主执行路径
+- runtime state 成为执行语义唯一真相源
+- checkpoint/resume 可以稳定保留运行意图
+- node/route/wait/checkpoint 语义不再依赖旧 loop 心智
+
+### R2 完成标志
+
+- structured output 成为 runtime 标准能力
+- reflection 成为标准 graph node
+- planner/evaluator/repair 不再各写各的局部逻辑
+
+### R3 完成标志
+
+- event trigger 成为统一入口层
+- A2A 具备基础协议能力
+- tool discovery 成为编排层能力而不是手工拼装
+
+### R4 完成标志
+
+- coding 不再定义系统内核
+- plugin 成为明确边界，而不是目录概念
+- core/runtime 可以在不绑定 coding 假设下运行
+
+### R5 完成标志
+
+- 系统具备可观测、可部署、可隔离、可运维的生产形态
+
+---
+
+## 六、路线边界
+
+为了保持路线纯度，以下内容不应再主导总路线表达：
+
+- 单个工具能力增强
+- coding 专属功能项平铺
+- 局部模块优化
+- 孤立的 UX 改善
+- 不依附于阶段目标的点状能力扩充
+
+这些都可以做，但它们不应该再被写成 NGOAgent 的主路线。
+
+主路线只回答一个问题：
+
+> NGOAgent 如何从“强产品”进化为“强 runtime”。
+
+---
+
+## 七、一句话版本
+
+NGOAgent 的总路线不是“继续补功能”，而是：
+
+> **先把内核做实，再把智能合同化，再把编排做成网络层，再把域能力外化成插件，最后再做生产化。**
+
+如果只保留一句战略判断，那就是：
+
+> **当前全部工作的中心仍然是完成 `R1 内核成形`。**
+
+---
+
+## 八、为什么当前只能先做 R1
+
+很多看起来“也很重要”的方向，比如：
+
+- 更强的 planner
+- 更丰富的 tool discovery
+- 更完整的 A2A
+- 更彻底的 plugin 体系
+- 更成熟的 observability
+
+都不是现在的一级中心。
+
+原因不是这些方向不重要，而是它们都建立在同一个前提之上：
+
+> 系统必须先有稳定、统一、可恢复的执行内核。
+
+如果 `R1` 没有完成，那么：
+
+- planner 只能挂在不稳定的执行骨架上
+- evaluator / repair 只能继续散落在局部流程里
+- A2A 只能接到一个无法稳定恢复的单体 loop 上
+- plugin 只能接到边界还没定型的 assembly 上
+- telemetry 只能观察一个还没有固定语义的 runtime
+
+所以当前阶段最需要避免的，不是“少做”，而是：
+
+> **在执行骨架尚未定型前，过早把外围能力做重。**
+
+这会让 NGOAgent 看起来在变强，但实际会进一步加剧：
+
+- 心智分裂
+- 状态源分裂
+- 恢复语义分裂
+- 编排边界分裂
+
+因此，`R1` 不是诸多方向中的一个方向，而是当前所有方向的承载前提。
+
+---
+
+## 九、R1 的真正收口标准
+
+`R1` 完成，不等于“graph runtime 已经能跑”。
+
+`R1` 的真正完成，至少意味着以下判断同时成立：
+
+### 1. 执行归一
+
+系统不再同时维护“两套主执行心智”。
+
+换句话说：
+
+- graph 不是旁路能力
+- 旧 loop 不再定义最终执行语义
+- 节点推进、等待、恢复、结束，都由 runtime 合同统一表达
+
+### 2. 状态归一
+
+系统不再依赖“对象字段 + 临时局部变量 + 隐式上下文”的混合状态模式来维持运行。
+
+换句话说：
+
+- runtime state 能表达运行中的关键语义
+- resume 恢复的是执行现场，而不只是历史消息
+- 节点之间传递的是显式状态，而不是约定俗成的内存假设
+
+### 3. 恢复归一
+
+checkpoint / resume 不再只是“能继续”，而是“按相同语义继续”。
+
+这意味着恢复之后：
+
+- route 判断不漂移
+- wait reason 不漂移
+- approval / barrier / wake 语义不漂移
+- tool 选择约束与 continuation 意图不丢失
+
+### 4. 合同归一
+
+Node / Route / Wait / Checkpoint 必须成为稳定合同，而不是实现细节的投影。
+
+也就是说：
+
+- node result 不是随实现习惯不断变形的结构
+- route 不是旧状态机分支名的别名
+- wait 不是“先停一下”的临时描述
+- checkpoint 不是“顺手存一下现场”的副产品
+
+### 5. 认知归一
+
+团队在讨论系统时，已经自然使用 runtime 语言，而不再主要使用旧 loop 语言。
+
+当以下表达开始自然成立时，才说明 `R1` 真的收口：
+
+- “这个节点应该返回什么 route”
+- “这个 wait 由什么事件唤醒”
+- “这个状态是否应进入 checkpoint”
+- “这段逻辑属于 node contract 还是 runtime state”
+
+如果大家还主要在说：
+
+- “这个阶段切哪个 state”
+- “这个字段临时塞到 loop 上”
+- “先在 handler 里绕过去”
+
+那么说明 `R1` 还没有完成，只是在迁移过程中。
+
+---
+
+## 十、这份路线图如何指导日常决策
+
+这份文档不是需求池，也不是季度任务表。
+
+它的用途只有三个：
+
+### 1. 用来判断优先级
+
+当两个任务都看起来重要时，先问：
+
+> 它是在收敛 `R1`，还是在给未定型系统继续加重量？
+
+凡是前者，优先级更高。
+
+### 2. 用来判断是否偏题
+
+一个改动即使本身有价值，只要它：
+
+- 不推动当前阶段的完成标志
+- 反而增加新的耦合面
+- 提前固化后续阶段的边界
+
+那它就不属于当前主路线。
+
+### 3. 用来判断“完成”是什么意思
+
+NGOAgent 后续每完成一个阶段，都不应以“功能数量”宣布完成，而应以：
+
+- 是否完成本阶段的结构性目标
+- 是否减少系统核心歧义
+- 是否为下一阶段建立稳定承载面
+
+来判断是否真正完成。
+
+---
+
+## 十一、当前阶段的工作口径
+
+在 `R1` 完成之前，所有工作都应该尽量落到同一个口径上：
+
+> **凡是不能增强 runtime 统一性、状态统一性、恢复统一性、合同统一性的改动，都不应抢占主线。**
+
+这不意味着别的事完全不能做。
+
+更准确地说：
+
+- 可以做必要修复，但不要借修复扩张边界
+- 可以做局部增强，但不要让增强反向固化旧模型
+- 可以做外围能力，但不要让外围能力先于内核定型
+
+这就是当前阶段最重要的执行纪律。
+
+---
+
+## 十二、结论
+
+NGOAgent 已经不是一个从零开始的系统。
+
+它已经拥有足够多的能力、足够厚的产品表层、足够复杂的行为层。
+
+因此下一步不是“继续长更多东西”，而是：
+
+> **把已经出现的 runtime 雏形收敛成真正的 runtime。**
+
+只有完成这一步，后续的 intelligence、orchestration、plugins、production 才不会继续建立在混合心智和分裂边界之上。
+
+所以这份路线图最终只表达一个判断：
+
+> **现在不是继续向外扩的时候，现在是向内收口的时候。**

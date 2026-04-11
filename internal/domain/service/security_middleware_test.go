@@ -22,8 +22,12 @@ func (m *mockSecurityChecker) AfterToolCall(_ context.Context, _ string, _ strin
 func (m *mockSecurityChecker) RequestApproval(_ string, _ map[string]any, _ string) *ApprovalTicket {
 	return m.ticket
 }
-func (m *mockSecurityChecker) ListPendingApprovals() []ApprovalSnapshot { return nil }
-func (m *mockSecurityChecker) CleanupPending(_ string)                  {}
+func (m *mockSecurityChecker) RestorePendingApproval(snapshot ApprovalSnapshot) *ApprovalTicket {
+	return &ApprovalTicket{ID: snapshot.ID, Result: make(chan bool, 1)}
+}
+func (m *mockSecurityChecker) ResolvePendingApproval(_ string, _ bool) error { return nil }
+func (m *mockSecurityChecker) ListPendingApprovals() []ApprovalSnapshot      { return nil }
+func (m *mockSecurityChecker) CleanupPending(_ string)                       {}
 
 // ──────────────────────────────────────────────
 // SecurityGate unit tests

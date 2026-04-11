@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
@@ -14,10 +15,10 @@ import (
 // Uses the Ephemeral Budget System to prevent context bloat:
 // candidates are collected with priority and dimension tags, then
 // SelectWithBudget picks the best set within the token budget.
-func (a *AgentLoop) doPrepare(_ context.Context) {
+func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 	// Sub-agents skip all planning/boundary/agentic injections
 	if a.options.Mode == "subagent" {
-		return
+		return graphruntime.PlanningState{}
 	}
 
 	a.mu.Lock()
@@ -25,10 +26,10 @@ func (a *AgentLoop) doPrepare(_ context.Context) {
 	if len(a.history) > 0 {
 		lastMsg = a.history[len(a.history)-1].Content
 	}
-	boundaryName := a.task.BoundaryTaskName
-	boundaryMode := a.task.BoundaryMode
-	boundaryStatus := a.task.BoundaryStatus
-	boundarySummary := a.task.BoundarySummary
+	boundaryName := a.task.Name
+	boundaryMode := a.task.Mode
+	boundaryStatus := a.task.Status
+	boundarySummary := a.task.Summary
 	planMod := a.task.PlanModified
 	a.mu.Unlock()
 
@@ -47,18 +48,38 @@ func (a *AgentLoop) doPrepare(_ context.Context) {
 		}
 	}
 	a.guard.SetModeState(isPlanning, planExists, taskMdExists, boundaryMode)
+	mode := a.Mode()
 
 	// Context usage — computed once, reused for gating below
 	tokenEst := a.estimateTokens()
 	policy := llm.GetPolicy(a.deps.LLMRouter.CurrentModel())
 	pct := int(float64(tokenEst) / float64(policy.ContextWindow) * 100)
 	contextTight := pct > 80 // Skip low-priority ephemerals when context is tight
+	planning := graphruntime.PlanningState{
+		Required:       isPlanning || mode.ForcePlan,
+		BoundaryMode:   boundaryMode,
+		PlanExists:     planExists,
+		TaskExists:     taskMdExists,
+		ContextTight:   contextTight,
+		ReviewRequired: !a.Mode().SelfReview,
+	}
+	if mode.ForcePlan {
+		planning.Trigger = "mode_force_plan"
+	}
+	if isPlanning {
+		planning.Trigger = "user_plan_request"
+	}
+	if !planExists {
+		planning.MissingArtifacts = append(planning.MissingArtifacts, "plan.md")
+	}
+	if boundaryMode == "execution" && !taskMdExists {
+		planning.MissingArtifacts = append(planning.MissingArtifacts, "task.md")
+	}
 
 	// Collect candidates instead of direct injection
 	var candidates []EphemeralCandidate
 
 	// === Layer 1: Planning mode base template (inject when forced or user-triggered) ===
-	mode := a.Mode()
 	slog.Info(fmt.Sprintf("[prepare] mode=%s ForcePlan=%v isPlanning=%v", mode.String(), mode.ForcePlan, isPlanning))
 	if isPlanning || mode.ForcePlan {
 		candidates = append(candidates, EphemeralCandidate{
@@ -255,6 +276,8 @@ func (a *AgentLoop) doPrepare(_ context.Context) {
 	for _, msg := range selected {
 		a.InjectEphemeral(msg)
 	}
+	a.setPlanningDecision(planning)
+	return planning
 }
 
 // shouldInjectPlanning checks if planning mode should be triggered.

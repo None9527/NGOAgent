@@ -153,11 +153,11 @@ func TestEvolution_ProtocolDispatch(t *testing.T) {
 	}
 	dtool.Dispatch(result, sink, state)
 
-	if state.Boundary.BoundaryTaskName != "Testing" {
-		t.Fatalf("dispatch: task_name=%q, expected 'Testing'", state.Boundary.BoundaryTaskName)
+	if state.Boundary.Name != "Testing" {
+		t.Fatalf("dispatch: task_name=%q, expected 'Testing'", state.Boundary.Name)
 	}
-	if state.Boundary.BoundaryMode != "verification" {
-		t.Fatalf("dispatch: mode=%q, expected 'verification'", state.Boundary.BoundaryMode)
+	if state.Boundary.Mode != "verification" {
+		t.Fatalf("dispatch: mode=%q, expected 'verification'", state.Boundary.Mode)
 	}
 	if state.Boundary.StepsSinceUpdate != 0 {
 		t.Fatalf("dispatch: stepsSince=%d, expected 0", state.Boundary.StepsSinceUpdate)

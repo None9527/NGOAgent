@@ -80,5 +80,5 @@ func decodeRuntimeIngressRequest(r *http.Request) (apitype.RuntimeIngressRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return apitype.RuntimeIngressRequest{}, err
 	}
-	return req, nil
+	return apitype.NormalizeRuntimeIngressRequest(req), nil
 }

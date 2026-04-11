@@ -23,18 +23,18 @@ func (s *Server) execDoctor() string {
 
 	// 1. LLM connectivity
 	b.WriteString("📡 LLM Connectivity\n")
-	health := s.api.Health()
+	health := s.admin.Health()
 	if health.Status == "ok" && health.Model != "" {
 		b.WriteString(fmt.Sprintf("  ✅ %s — connected\n", health.Model))
 		pass++
 	} else {
-		b.WriteString(fmt.Sprintf("  ❌ %s — NOT connected (status: %s)\n", s.api.CurrentModel(), health.Status))
+		b.WriteString(fmt.Sprintf("  ❌ %s — NOT connected (status: %s)\n", s.admin.CurrentModel(), health.Status))
 		fail++
 	}
 
 	// 2. Configuration validation
 	b.WriteString("\n⚙️ Configuration\n")
-	cfg := s.api.GetConfig()
+	cfg := s.admin.GetConfig()
 	if agent, ok := cfg["agent"].(map[string]any); ok {
 		ws, _ := agent["workspace"].(string)
 		if ws != "" {
@@ -60,13 +60,13 @@ func (s *Server) execDoctor() string {
 		warn++
 	}
 
-	sec := s.api.GetSecurity()
+	sec := s.admin.GetSecurity()
 	b.WriteString(fmt.Sprintf("  ✅ Security mode: %s\n", sec.Mode))
 	pass++
 
 	// 3. Available models
 	b.WriteString("\n🤖 Models\n")
-	models := s.api.ListModels()
+	models := s.admin.ListModels()
 	if len(models.Models) > 0 {
 		b.WriteString(fmt.Sprintf("  ✅ %d models available: %s\n", len(models.Models), strings.Join(models.Models, ", ")))
 		pass++
@@ -113,7 +113,7 @@ func (s *Server) execDoctor() string {
 
 	// 6. P2 E2: Prompt cache hit rate
 	b.WriteString("\n📦 Prompt Cache\n")
-	ctxStats := s.api.GetContextStats()
+	ctxStats := s.admin.GetContextStats()
 	if ctxStats.TotalCalls > 1 {
 		b.WriteString(fmt.Sprintf("  ✅ Hit rate: %.0f%% (%d breaks / %d calls)\n",
 			ctxStats.CacheHitRate*100, ctxStats.CacheBreaks, ctxStats.TotalCalls))
@@ -138,7 +138,7 @@ func (s *Server) execDoctor() string {
 // P0-F #2: Reads from the TokenTracker via GetContextStats API.
 // P2: Enhanced with per-model input/output breakdown.
 func (s *Server) execCost() string {
-	stats := s.api.GetContextStats()
+	stats := s.admin.GetContextStats()
 
 	var b strings.Builder
 	b.WriteString("💰 Token Usage & Cost\n")
@@ -226,7 +226,7 @@ func formatBytes(b int64) string {
 
 // execMemory shows vector memory statistics.
 func (s *Server) execMemory() string {
-	stats := s.api.GetContextStats()
+	stats := s.admin.GetContextStats()
 	var b strings.Builder
 	b.WriteString("🧠 Memory Stats\n")
 	b.WriteString("═══════════════════════\n\n")
@@ -238,7 +238,7 @@ func (s *Server) execMemory() string {
 
 // execKI lists all Knowledge Items.
 func (s *Server) execKI() string {
-	items, err := s.api.ListKI()
+	items, err := s.admin.ListKI()
 	if err != nil {
 		return "Error: " + err.Error()
 	}
@@ -267,7 +267,7 @@ func kiSummariesFromItems(items []apitype.KIInfo) []apitype.KIInfo {
 
 // execTools lists all registered tools and their enabled status.
 func (s *Server) execTools() string {
-	tools := s.api.ListTools()
+	tools := s.admin.ListTools()
 	if len(tools) == 0 {
 		return "🔧 No tools registered."
 	}
@@ -287,7 +287,7 @@ func (s *Server) execTools() string {
 
 // execContext shows current context usage, token stats, and cache info.
 func (s *Server) execContext() string {
-	stats := s.api.GetContextStats()
+	stats := s.admin.GetContextStats()
 	var b strings.Builder
 	b.WriteString("📊 Context Stats\n")
 	b.WriteString("═══════════════════════\n\n")
@@ -305,7 +305,7 @@ func (s *Server) execContext() string {
 
 // execSessions lists recent sessions.
 func (s *Server) execSessions() string {
-	sessions := s.api.ListSessions()
+	sessions := s.session.ListSessions()
 	if len(sessions.Sessions) == 0 {
 		return "📋 No sessions."
 	}

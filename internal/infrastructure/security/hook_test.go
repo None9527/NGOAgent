@@ -3,6 +3,7 @@ package security
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 )
@@ -119,5 +120,58 @@ func TestReadOnlyAutoApproveInAskMode(t *testing.T) {
 		if dec != Ask {
 			t.Errorf("normalDecide(ask, %s): expected Ask, got %v", tool, dec)
 		}
+	}
+}
+
+func TestRestorePending_RehydratesApproval(t *testing.T) {
+	h := NewHook(&config.SecurityConfig{})
+	pending := h.RestorePending(PendingApproval{
+		ID:       "approval-1",
+		ToolName: "write_file",
+		Reason:   "needs confirmation",
+		Created:  time.Unix(123, 0),
+	})
+
+	if pending.ID != "approval-1" {
+		t.Fatalf("unexpected pending id: %q", pending.ID)
+	}
+	if err := h.Resolve("approval-1", true); err != nil {
+		t.Fatalf("resolve restored approval: %v", err)
+	}
+
+	select {
+	case approved := <-pending.Result:
+		if !approved {
+			t.Fatal("expected restored approval to receive resolution")
+		}
+	default:
+		t.Fatal("expected restored approval to be signalled")
+	}
+}
+
+func TestListPending_ReturnsDeterministicOrder(t *testing.T) {
+	h := NewHook(&config.SecurityConfig{})
+	h.RestorePending(PendingApproval{
+		ID:       "b-later",
+		ToolName: "edit_file",
+		Created:  time.Unix(200, 0),
+	})
+	h.RestorePending(PendingApproval{
+		ID:       "c-same-time",
+		ToolName: "edit_file",
+		Created:  time.Unix(200, 0),
+	})
+	h.RestorePending(PendingApproval{
+		ID:       "a-earlier",
+		ToolName: "write_file",
+		Created:  time.Unix(100, 0),
+	})
+
+	got := h.ListPending()
+	if len(got) != 3 {
+		t.Fatalf("expected 3 pending approvals, got %d", len(got))
+	}
+	if got[0].ID != "a-earlier" || got[1].ID != "b-later" || got[2].ID != "c-same-time" {
+		t.Fatalf("expected deterministic order by created/id, got %q, %q, %q", got[0].ID, got[1].ID, got[2].ID)
 	}
 }

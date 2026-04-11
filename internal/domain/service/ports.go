@@ -107,6 +107,8 @@ type SecurityChecker interface {
 	BeforeToolCall(ctx context.Context, toolName string, args map[string]any) (SecurityDecision, string)
 	AfterToolCall(ctx context.Context, toolName string, result string, err error)
 	RequestApproval(toolName string, args map[string]any, reason string) *ApprovalTicket
+	RestorePendingApproval(snapshot ApprovalSnapshot) *ApprovalTicket
+	ResolvePendingApproval(approvalID string, approved bool) error
 	ListPendingApprovals() []ApprovalSnapshot
 	CleanupPending(approvalID string)
 }

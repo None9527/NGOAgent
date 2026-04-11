@@ -10,7 +10,7 @@ import (
 type EvoTrace struct {
 	ID            uint   `gorm:"primarykey"`
 	SessionID     string `gorm:"index"`
-	RunIndex      int    `gorm:"index"` // Which run in this session (1, 2, 3...)
+	RunIndex      int    `gorm:"index"`     // Which run in this session (1, 2, 3...)
 	Steps         string `gorm:"type:text"` // JSON: []TraceStep (full args + full output)
 	Summary       string `gorm:"type:text"` // LLM-compressed summary (lazy-generated)
 	TokensIn      int    // Total input tokens
@@ -70,7 +70,6 @@ type EvoStore struct {
 
 // NewEvoStore creates an evolution data store.
 func NewEvoStore(db *gorm.DB) *EvoStore {
-	db.AutoMigrate(&EvoTrace{}, &EvoEvaluation{}, &EvoRepair{}, &EvoToolUsage{})
 	return &EvoStore{db: db}
 }
 

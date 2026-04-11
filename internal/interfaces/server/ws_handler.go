@@ -197,11 +197,11 @@ func (ws *wsConn) readLoop(ctx context.Context, s *Server) {
 				sid = ws.sessionID
 			}
 			if sid != "" {
-				s.api.StopRun(sid)
+				s.chat.StopRun(sid)
 			}
 		case "approve":
 			if msg.ApprovalID != "" {
-				if err := s.api.Approve(msg.ApprovalID, msg.Approved); err != nil {
+				if err := s.chat.Approve(msg.ApprovalID, msg.Approved); err != nil {
 					ws.writeJSON(map[string]string{"type": "error", "message": err.Error()})
 				}
 			}
@@ -271,7 +271,7 @@ func (ws *wsConn) onChat(s *Server, msg wsUpstream) {
 
 	go func() {
 		slog.Info(fmt.Sprintf("[ws] ChatStream: session=%s mode=%q msgLen=%d", sessionID, msg.Mode, len(message)))
-		err := s.api.ChatStream(context.Background(), sessionID, message, msg.Mode, delta)
+		err := s.chat.ChatStream(context.Background(), sessionID, message, msg.Mode, delta)
 		if err != nil {
 			if err.Error() == "agent is busy" {
 				ws.writeJSON(map[string]string{"type": "error", "message": "agent is busy"})
@@ -339,7 +339,7 @@ func (s *Server) saveInlineData(p wsContentPart) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("base64 decode: %w", err)
 	}
-	c := s.api.GetConfig()
+	c := s.admin.GetConfig()
 	agent, _ := c["agent"].(map[string]any)
 	workspace, _ := agent["workspace"].(string)
 	if workspace == "" {

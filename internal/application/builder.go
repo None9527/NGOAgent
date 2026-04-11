@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/google/uuid"
+	"github.com/ngoclaw/ngoagent/internal/domain/a2a"
 	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
@@ -33,7 +33,6 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
 	grpcserver "github.com/ngoclaw/ngoagent/internal/interfaces/grpc"
 	"github.com/ngoclaw/ngoagent/internal/interfaces/server"
-	"github.com/ngoclaw/ngoagent/pkg/ctxutil"
 	"gorm.io/gorm"
 )
 
@@ -42,6 +41,7 @@ type App struct {
 	Config       *config.Manager
 	DB           *gorm.DB
 	Repo         *persistence.Repository
+	Services     *ApplicationServices
 	Router       *llm.Router
 	Loop         *service.AgentLoop
 	Factory      *service.LoopFactory
@@ -56,6 +56,9 @@ type App struct {
 	SkillMgr     *skill.Manager
 	SecurityHook *security.Hook
 	SpawnTool    *tool.SpawnAgentTool // exposed for server-side EventPusher wiring
+	EventBus     *service.EventBus           // R3: event-driven orchestration
+	A2AHandler   *a2a.Handler                // R3: Agent-to-Agent protocol
+	Discovery    *service.AggregatedToolDiscovery // R3: dynamic tool capability
 	StopCh       chan struct{}
 }
 
@@ -375,175 +378,24 @@ func Build() (*App, error) {
 	// by reference. It must be assigned BEFORE any SpawnFunc call (which only happens at runtime).
 	var loopPool *service.LoopPool
 
-	var barrierMu sync.Mutex
-	barriers := make(map[string]*service.SubagentBarrier) // keyed by sessionID for correctness
-
-	spawnTool.SetSpawnFunc(func(ctx context.Context, task, taskName, agentType string) (string, error) {
-		// Resolve agent definition from registry
-		agentDef, defErr := agentRegistry.Resolve(agentType)
-		if defErr != nil {
-			return "", fmt.Errorf("agent type %q not found: %w", agentType, defErr)
-		}
-		// Get the RUNTIME session ID from context (injected by ChatStream)
-		// instead of the fixed builder-time sessionID variable.
-		runtimeSID := ctxutil.SessionIDFromContext(ctx)
-		if runtimeSID == "" {
-			runtimeSID = sessionID // fallback for backward compat (CLI mode)
-		}
-
-		// Get the correct parent loop: the session's loopPool loop, not the single main loop.
-		var parentLoop *service.AgentLoop
+	orchestrator := service.NewSubagentOrchestrator(factory, loop, func(runtimeSID string) *service.AgentLoop {
 		if loopPool != nil {
-			parentLoop = loopPool.GetIfExists(runtimeSID)
-		}
-		if parentLoop == nil {
-			parentLoop = loop // fallback for backward compat (CLI mode)
-		}
-
-		// SubAgent v2 P2: Enrich task with L1/L2/L3 parent context
-		if parentLoop != nil {
-			parentHistory := parentLoop.History()
-			task = service.BuildSubagentContext(task, parentHistory, agentDef)
-		}
-
-		// Get or create barrier for this parent session's turn (keyed by runtimeSID)
-		barrierMu.Lock()
-		b, exists := barriers[runtimeSID]
-		if !exists || b.Pending() == 0 {
-			// Create new barrier — captures parentLoop and runtimeSID at closure time
-			capturedLoop := parentLoop
-			capturedSID := runtimeSID
-			// Capture EventPusher for auto-wake done notification
-			var wakeEventPusher func(string, string, any)
-			if spawnTool.EventPusher != nil {
-				wakeEventPusher = spawnTool.EventPusher
-			}
-			b = service.NewSubagentBarrier(capturedLoop, func() {
-				// Auto-wake: re-run the parent loop to process subagent results.
-				// The loop's Delta is still the one set by the original ChatStream.
-				// For WS: wsWriter is still valid (no MarkDone), events flow through.
-				go func() {
-					slog.Info(fmt.Sprintf("[barrier] Auto-waking parent loop for session %s", capturedSID))
-					var wakeLoop *service.AgentLoop
-					if loopPool != nil {
-						wakeLoop = loopPool.GetIfExists(capturedSID)
-					}
-					if wakeLoop == nil {
-						wakeLoop = capturedLoop
-					}
-					if err := wakeLoop.Run(context.Background(), ""); err != nil {
-						slog.Info(fmt.Sprintf("[barrier] Auto-wake failed for session %s: %v (pendingWake likely handled it)", capturedSID, err))
-					} else {
-						// Only signal frontend if fallback Run actually succeeded.
-						// If Run failed ("agent is busy"), pendingWake already handled it
-						// and ChatStream's done event will clean up the frontend state.
-						if wakeEventPusher != nil {
-							wakeEventPusher(capturedSID, "auto_wake_done", map[string]string{"type": "auto_wake_done"})
-						}
-					}
-				}()
-				// Clean up barrier reference
-				if capturedLoop != nil {
-					capturedLoop.ClearActiveBarrier()
-				}
-				barrierMu.Lock()
-				delete(barriers, capturedSID)
-				barrierMu.Unlock()
-			})
-			if capturedLoop != nil {
-				capturedLoop.SetActiveBarrier(b)
-			}
-			// Wire SSE/WS progress push if server has configured it
-			if spawnTool.EventPusher != nil {
-				pusher := spawnTool.EventPusher // capture
-				capturedSID2 := runtimeSID
-				b.SetProgressPush(func(runID, taskName, status string, done, total int, errMsg, output string) {
-					pusher(capturedSID2, "subagent_progress", map[string]any{
-						"type":      "subagent_progress",
-						"run_id":    runID,
-						"task_name": taskName,
-						"status":    status,
-						"done":      done,
-						"total":     total,
-						"error":     errMsg,
-						"output":    output,
-					})
-				})
-			}
-			barriers[runtimeSID] = b
-			// Wire config-driven concurrency limit
-			if cfg.Agent.MaxSubagents > 0 {
-				b.SetMaxConcurrent(cfg.Agent.MaxSubagents)
-			}
-			// SubAgent v2: Wire per-definition timeout
-			if agentDef != nil && agentDef.MaxTimeout > 0 {
-				b.SetTimeout(agentDef.MaxTimeout)
-			}
-			// P2 F1: Wire transcript persistence via TranscriptStore.SaveSimple
-			if transcriptStore != nil {
-				ts := transcriptStore // capture for closure
-				b.SetTranscriptSaver(runtimeSID, func(sid, name, rid, status, output string) {
-					if err := ts.SaveSimple(sid, name, rid, status, output); err != nil {
-						slog.Info(fmt.Sprintf("[barrier] Transcript save failed for %s: %v", rid, err))
-					}
-				})
+			if parentLoop := loopPool.GetIfExists(runtimeSID); parentLoop != nil {
+				return parentLoop
 			}
 		}
-		barrierMu.Unlock()
-
-		// S7: taskName comes directly from spawn_agent tool — no need to re-extract
-		if taskName == "" {
-			taskName = "sub-agent"
-		}
-
-		ch := service.NewSubagentChannel(func(runID, result string, err error) {
-			// Route completion through barrier instead of direct ephemeral
-			b.OnComplete(runID, result, err)
+		return loop
+	}, agentRegistry)
+	orchestrator.SetEventPusher(spawnTool.EventPusher)
+	orchestrator.SetMaxSubagents(cfg.Agent.MaxSubagents)
+	if transcriptStore != nil {
+		orchestrator.SetTranscriptSaver(func(sessionID, taskName, runID, status, output string) error {
+			return transcriptStore.SaveSimple(sessionID, taskName, runID, status, output)
 		})
-		run := factory.Create(runtimeSID, ch, agentDef)
-		run.Loop.InjectEphemeral(prompttext.EphSubAgentContext)
-
-		// SubAgent v2 P2: Model routing — agentDef.Model overrides parent model
-		if agentDef != nil && agentDef.Model != "" {
-			run.Loop.SetModel(agentDef.Model)
-		}
-
-		// P1-B #54: Inject coordinator mode into the PARENT loop.
-		// This activates orchestrator-mode rules: synthesize research before delegating,
-		// write self-contained specs, never lazy-delegate. Mirrors CC's Coordinator Prompt.
-		if parentLoop != nil {
-			parentLoop.InjectEphemeral(prompttext.EphCoordinatorMode)
-		}
-
-		// (fast-completing subagent could call OnComplete before Add)
-		if err := b.Add(run.ID, taskName); err != nil {
-			// S5: concurrency limit reached
-			return "", fmt.Errorf("cannot spawn sub-agent: %v", err)
-		}
-
-		// Use Background context — subagent must survive parent loop completion.
-		// Parent context cancellation should NOT kill running subagents.
-		runID := factory.RunAsync(context.Background(), run, task)
-
-		// Wire per-tool step push so SubagentDock shows current activity
-		if spawnTool.EventPusher != nil {
-			capturedPusher := spawnTool.EventPusher
-			capturedSID3 := runtimeSID
-			capturedRunID := runID
-			capturedName := taskName
-			ch.Collector().StepPush = func(toolName string) {
-				capturedPusher(capturedSID3, "subagent_progress", map[string]any{
-					"type":         "subagent_progress",
-					"run_id":       capturedRunID,
-					"task_name":    capturedName,
-					"status":       "running",
-					"done":         0,
-					"total":        0,
-					"current_step": toolName,
-				})
-			}
-		}
-		return runID, nil
+	}
+	spawnTool.SetSpawnFunc(func(ctx context.Context, task, taskName, agentType string) (string, error) {
+		orchestrator.SetEventPusher(spawnTool.EventPusher)
+		return orchestrator.Spawn(ctx, sessionID, task, taskName, agentType)
 	})
 	// Wire same SpawnFunc to skillTool for fork-mode skill execution
 	skillTool.SetSpawnFunc(spawnTool.GetSpawnFunc())
@@ -731,41 +583,81 @@ func Build() (*App, error) {
 	slog.Info(fmt.Sprintf("[skill] %d skills discovered (pre-read, invoked via SkillTool)", len(skillMgr.List())))
 
 	// ═══════════════════════════════════════════
-	// Phase 8: Unified API + Server
+	// Phase 7.5: R3 Orchestration Wiring
 	// ═══════════════════════════════════════════
 	addr := ":19996"
 	if cfg.Server.HTTPPort != 0 {
 		addr = fmt.Sprintf(":%d", cfg.Server.HTTPPort)
 	}
 
-	agentAPI := NewAgentAPI(
-		loop, loopPool, chatEngine,
-		sessMgr, modelMgr, toolAdmin,
-		secHook, skillMgr, cronMgr, mcpMgr,
-		cfgMgr, router,
-		&historyAdapter{store: historyStore},
-		brainDir,
-		kiStore,
-		sbMgr,
+	eventBus := service.NewEventBus(
+		service.WithBufferSize(256),
+		service.WithWorkerCount(4),
 	)
+	slog.Info("[r3] EventBus started: buffer=256, workers=4")
 
-	// P2 H2: Wire persistent token usage store
-	tokenUsageStore := persistence.NewTokenUsageStore(db)
-	agentAPI.SetTokenUsageStore(tokenUsageStore)
+	toolDiscovery := service.NewAggregatedToolDiscovery(
+		&toolRegistryAdapter{reg: registry},
+		&mcpDiscoveryAdapter{mgr: mcpMgr},
+		&skillDiscoveryAdapter{mgr: skillMgr},
+	)
+	slog.Info(fmt.Sprintf("[r3] ToolDiscovery initialized: %d capabilities", len(toolDiscovery.Advertise(context.Background()))))
 
-	srv := server.NewServer(agentAPI, addr, cfg.Server.AuthToken)
+	agentCard := a2a.AgentCard{
+		Name:         "NGOAgent",
+		Description:  "Autonomous coding agent with graph-based execution engine",
+		Version:      Version,
+		URL:          "http://localhost" + addr,
+		Capabilities: toolDiscovery.Advertise(context.Background()),
+		InputModes:   []string{"text"},
+		OutputModes:  []string{"text", "sse"},
+	}
+	a2aHandler := a2a.NewHandler(agentCard, eventBus)
+	slog.Info(fmt.Sprintf("[r3] A2A handler ready: %s v%s", agentCard.Name, agentCard.Version))
+
+	// ═══════════════════════════════════════════
+	// Phase 8: Unified API + Server
+	// ═══════════════════════════════════════════
+
+	appServices := NewApplicationServices(ApplicationDeps{
+		Loop:       loop,
+		LoopPool:   loopPool,
+		ChatEngine: chatEngine,
+		SessionMgr: sessMgr,
+		ModelMgr:   modelMgr,
+		ToolAdmin:  toolAdmin,
+		SecHook:    secHook,
+		SkillMgr:   skillMgr,
+		CronMgr:    cronMgr,
+		MCPMgr:     mcpMgr,
+		Config:     cfgMgr,
+		Router:     router,
+		HistQuery:  &historyAdapter{store: historyStore},
+		BrainDir:   brainDir,
+		KIStore:    kiStore,
+		SandboxMgr: sbMgr,
+		Wiring: ServiceWiring{
+			TokenUsageStore: persistence.NewTokenUsageStore(db),
+			RuntimeStore:    snapshotStore,
+		},
+	})
+
+	httpCaps := appServices.HTTPTransport()
+	httpCaps.A2A = a2aHandler
+	srv := server.NewServer(httpCaps, addr, cfg.Server.AuthToken)
 
 	// gRPC server — defaults to :19998
 	grpcAddr := ":19998"
 	if cfg.Server.GRPCPort != 0 {
 		grpcAddr = fmt.Sprintf(":%d", cfg.Server.GRPCPort)
 	}
-	grpcSrv := grpcserver.NewServer(agentAPI, grpcAddr)
+	grpcSrv := grpcserver.NewServer(appServices.GRPCTransport(), grpcAddr)
 
 	return &App{
 		Config:       cfgMgr,
 		DB:           db,
 		Repo:         repo,
+		Services:     appServices,
 		Router:       router,
 		Loop:         loop,
 		Factory:      factory,
@@ -780,6 +672,9 @@ func Build() (*App, error) {
 		SkillMgr:     skillMgr,
 		SecurityHook: secHook,
 		SpawnTool:    spawnTool,
+		EventBus:     eventBus,
+		A2AHandler:   a2aHandler,
+		Discovery:    toolDiscovery,
 		StopCh:       stopCh,
 	}, nil
 }
@@ -788,6 +683,9 @@ func Build() (*App, error) {
 func (app *App) Shutdown() {
 	close(app.StopCh)
 	app.Config.StopWatching()
+	if app.EventBus != nil {
+		app.EventBus.Close()
+	}
 	if app.Factory != nil {
 		app.Factory.StopAll() // Cascade stop all active runs
 	}

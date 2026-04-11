@@ -63,10 +63,10 @@ type DeltaSink interface {
 // By passing a pointer, we eliminate the copy overhead in protoState/syncLoopState.
 type BoundaryState struct {
 	PreviousMode     string
-	BoundaryTaskName string
-	BoundaryMode     string
-	BoundaryStatus   string
-	BoundarySummary  string
+	Name             string
+	Mode             string
+	Status           string
+	Summary          string
 	StepsSinceUpdate int
 	YieldRequested   bool
 }
@@ -108,11 +108,11 @@ func handleProgress(result ToolResult, sink DeltaSink, state *LoopState) {
 
 	sink.OnProgress(taskName, status, summary, mode)
 
-	state.Boundary.PreviousMode = state.Boundary.BoundaryMode
-	state.Boundary.BoundaryTaskName = taskName
-	state.Boundary.BoundaryMode = mode
-	state.Boundary.BoundaryStatus = status
-	state.Boundary.BoundarySummary = summary
+	state.Boundary.PreviousMode = state.Boundary.Mode
+	state.Boundary.Name = taskName
+	state.Boundary.Mode = mode
+	state.Boundary.Status = status
+	state.Boundary.Summary = summary
 	state.Boundary.StepsSinceUpdate = 0
 
 	// Force next tool: deterministic plan→notify_user enforcement

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// StreamHandler provides an HTTP-based client for the AgentAPI.
+// StreamHandler provides an HTTP-based client for the application transport.
 // It handles SSE parsing, throttled text accumulation, and event routing.
 // Platform bots consume events via the OnEvent callback.
 type StreamHandler struct {

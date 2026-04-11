@@ -189,6 +189,24 @@ func (a *securityAdapter) RequestApproval(toolName string, args map[string]any, 
 	}
 }
 
+func (a *securityAdapter) RestorePendingApproval(snapshot service.ApprovalSnapshot) *service.ApprovalTicket {
+	pending := a.hook.RestorePending(security.PendingApproval{
+		ID:       snapshot.ID,
+		ToolName: snapshot.ToolName,
+		Args:     cloneApprovalArgs(snapshot.Args),
+		Reason:   snapshot.Reason,
+		Created:  snapshot.Requested,
+	})
+	return &service.ApprovalTicket{
+		ID:     pending.ID,
+		Result: pending.Result,
+	}
+}
+
+func (a *securityAdapter) ResolvePendingApproval(approvalID string, approved bool) error {
+	return a.hook.Resolve(approvalID, approved)
+}
+
 func (a *securityAdapter) ListPendingApprovals() []service.ApprovalSnapshot {
 	pending := a.hook.ListPending()
 	out := make([]service.ApprovalSnapshot, 0, len(pending))
@@ -196,7 +214,7 @@ func (a *securityAdapter) ListPendingApprovals() []service.ApprovalSnapshot {
 		out = append(out, service.ApprovalSnapshot{
 			ID:        p.ID,
 			ToolName:  p.ToolName,
-			Args:      p.Args,
+			Args:      cloneApprovalArgs(p.Args),
 			Reason:    p.Reason,
 			Requested: p.Created,
 		})
@@ -206,4 +224,15 @@ func (a *securityAdapter) ListPendingApprovals() []service.ApprovalSnapshot {
 
 func (a *securityAdapter) CleanupPending(approvalID string) {
 	a.hook.CleanupPending(approvalID)
+}
+
+func cloneApprovalArgs(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

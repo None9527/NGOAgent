@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ngoclaw/ngoagent/internal/domain/model"
+	"github.com/ngoclaw/ngoagent/pkg/ctxutil"
 )
 
 // ────────────────────────────────────────────
@@ -130,6 +131,7 @@ func (f *LoopFactory) Create(parentSID string, ch AgentChannel, def *model.Agent
 // When the run completes, it calls channel.OnComplete and unregisters.
 func (f *LoopFactory) RunAsync(ctx context.Context, run *AgentRun, message string) string {
 	runCtx, cancel := context.WithCancel(ctx)
+	runCtx = ctxutil.WithRunID(runCtx, run.ID)
 	run.cancel = cancel
 
 	go func() {

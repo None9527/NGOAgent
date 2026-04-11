@@ -74,6 +74,43 @@ func TestNormalizeRuntimeDecisionInput_UsesReasonAsFeedbackFallback(t *testing.T
 	}
 }
 
+func TestNewRuntimeDecisionIngressRequest_NormalizesDefaults(t *testing.T) {
+	req := apitype.NewRuntimeDecisionIngressRequest(apitype.RuntimeDecisionApplyRequest{
+		SessionID: " session-1 ",
+		RunID:     "run-1",
+		Decision: apitype.RuntimeDecisionContractInput{
+			Decision: "revise",
+			Reason:   "needs staging",
+		},
+	})
+	if req.SessionID != "session-1" {
+		t.Fatalf("expected trimmed session id, got %#v", req)
+	}
+	if req.Ingress.Kind != "decision" || req.Ingress.Source != "decision_apply" || req.Ingress.Trigger != "decision_apply" {
+		t.Fatalf("expected decision ingress defaults, got %#v", req.Ingress)
+	}
+	if req.Ingress.Run.RunID != "run-1" || req.Ingress.RunID != "run-1" {
+		t.Fatalf("expected normalized run target, got %#v", req.Ingress)
+	}
+	if req.Ingress.Decision.Feedback != "needs staging" {
+		t.Fatalf("expected normalized decision feedback, got %#v", req.Ingress.Decision)
+	}
+}
+
+func TestNewRuntimeResumeIngressRequest_NormalizesRunTarget(t *testing.T) {
+	req := apitype.NewRuntimeResumeIngressRequest(apitype.RuntimeResumeRequest{
+		SessionID: "session-2",
+		Run:       apitype.RuntimeRunTarget{RunID: "run-nested"},
+		RunID:     "run-flat",
+	})
+	if req.Ingress.Kind != "resume" || req.Ingress.Source != "resume_run" || req.Ingress.Trigger != "resume_run" {
+		t.Fatalf("expected resume ingress defaults, got %#v", req.Ingress)
+	}
+	if req.Ingress.Run.RunID != "run-nested" || req.Ingress.RunID != "run-nested" {
+		t.Fatalf("expected nested run target to win, got %#v", req.Ingress)
+	}
+}
+
 func TestDecodeRuntimeResumeRequest_PrefersNestedRun(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/runtime/runs/resume", strings.NewReader(`{
 		"session_id":"session-3",
@@ -108,7 +145,7 @@ func TestDecodeRuntimeIngressRequest_NestedContractShape(t *testing.T) {
 	if decoded.SessionID != "session-6" || decoded.Ingress.Kind != "decision" {
 		t.Fatalf("unexpected ingress envelope: %#v", decoded)
 	}
-	if decoded.Ingress.Run.RunID != "run-6" || decoded.Ingress.Decision.Decision != "approve" {
+	if decoded.Ingress.Run.RunID != "run-6" || decoded.Ingress.RunID != "run-6" || decoded.Ingress.Decision.Decision != "approve" {
 		t.Fatalf("unexpected ingress payload: %#v", decoded.Ingress)
 	}
 }

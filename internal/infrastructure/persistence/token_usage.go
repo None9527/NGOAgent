@@ -28,7 +28,6 @@ type TokenUsageStore struct {
 
 // NewTokenUsageStore creates and migrates the token usage table.
 func NewTokenUsageStore(db *gorm.DB) *TokenUsageStore {
-	db.AutoMigrate(&SessionTokenUsage{})
 	return &TokenUsageStore{db: db}
 }
 
@@ -78,4 +77,10 @@ func (ts *TokenUsageStore) ListRecentUsage(limit int) ([]SessionTokenUsage, erro
 	var usages []SessionTokenUsage
 	err := ts.db.Order("updated_at DESC").Limit(limit).Find(&usages).Error
 	return usages, err
+}
+
+// CleanOld removes token usage rows older than the provided retention window.
+func (ts *TokenUsageStore) CleanOld(days int) error {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	return ts.db.Where("updated_at < ?", cutoff).Delete(&SessionTokenUsage{}).Error
 }

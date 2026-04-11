@@ -1,5 +1,4 @@
-// Package service — Evo evaluation controller.
-// Extracted from run.go (Sprint 1-2): manages async evo evaluation and repair dispatch.
+// Package service — Evo evaluation orchestration integrated into the graph flow.
 package service
 
 import (
@@ -9,76 +8,144 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
 	"github.com/ngoclaw/ngoagent/internal/domain/model"
 )
 
-// fireHooks invokes all PostRunHooks asynchronously.
+// fireHooks invokes PostRunHooks asynchronously after the graph reaches terminal completion.
 func (a *AgentLoop) fireHooks(ctx context.Context, steps int) {
 	if a.deps.Hooks == nil {
 		return
 	}
 	a.mu.Lock()
 	finalContent := ""
-	userMsg := ""
-	for _, m := range a.history {
-		if m.Role == "user" && m.Content != "" {
-			userMsg = m.Content
-			break
-		}
-	}
+	userMsg := a.latestMeaningfulUserMessageLocked()
 	if len(a.history) > 0 {
 		finalContent = a.history[len(a.history)-1].Content
 	}
-	// Snapshot history for async hooks (KI distillation)
 	historySnapshot := make([]model.Message, len(a.history))
 	copy(historySnapshot, a.history)
-
-	// Capture evo state and clear it
-	evoEval := a.evoLastEval
-	evoPlan := a.evoLastPlan
-	evoSuccess := a.evoRepairSuccess
-	a.evoLastEval = nil
-	a.evoLastPlan = nil
-	a.evoRepairSuccess = false
 	a.mu.Unlock()
 
+	intelligence := a.consumeIntelligenceSnapshot()
 	a.deps.Hooks.OnRunComplete(ctx, RunInfo{
-		SessionID:        a.SessionID(),
-		UserMessage:      userMsg,
-		Steps:            steps,
-		Mode:             a.options.Mode,
-		FinalContent:     finalContent,
-		History:          historySnapshot,
-		Delta:            a.deps.Delta,
-		EvoEval:          evoEval,
-		EvoRepairSuccess: evoSuccess,
-		EvoRepairPlan:    evoPlan,
+		SessionID:    a.SessionID(),
+		UserMessage:  userMsg,
+		Steps:        steps,
+		Mode:         a.options.Mode,
+		FinalContent: finalContent,
+		History:      historySnapshot,
+		Delta:        a.deps.Delta,
+		Intelligence: intelligence,
 	})
-
-	// ── Evo Mode: async evaluation (dual-process) ──
-	// Runs AFTER hooks complete, in the same goroutine (already async from main loop).
-	// Main loop has already released runMu → user can send new messages.
-	if a.Mode().EvoEnabled && a.deps.EvoEvaluator != nil && a.traceCollector != nil {
-		a.runEvoEval(ctx, userMsg)
-	}
 }
 
-// runEvoEval performs async evo evaluation + repair after the main loop completes.
-// Called from fireHooks goroutine — does NOT hold runMu.
-// Uses independent context (not runCtx) to survive user's next message.
-func (a *AgentLoop) runEvoEval(_ context.Context, userMsg string) {
-	// Independent context: main loop is done, don't inherit cancellation
-	evalCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+func (a *AgentLoop) latestMeaningfulUserMessage() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.latestMeaningfulUserMessageLocked()
+}
 
-	// 1. Flush trace → persist to DB (includes full args, outputs, tokens, model, and user task)
-	traceID, err := a.traceCollector.Flush(a.SessionID(), 0, userMsg)
-	if err != nil {
-		slog.Info(fmt.Sprintf("[evo] trace flush failed: %v", err))
-		return
+func (a *AgentLoop) latestMeaningfulUserMessageLocked() string {
+	for i := len(a.history) - 1; i >= 0; i-- {
+		if a.history[i].Role == "user" && a.history[i].Content != "" {
+			return a.history[i].Content
+		}
+	}
+	return ""
+}
+
+func (a *AgentLoop) shouldRunEvoEvaluation() bool {
+	return a.Mode().EvoEnabled && a.deps.EvoEvaluator != nil && a.traceCollector != nil
+}
+
+func (a *AgentLoop) evaluateCurrentRun(ctx context.Context, previous graphruntime.EvaluationState) (bool, error) {
+	if !a.shouldRunEvoEvaluation() {
+		return false, nil
 	}
 
-	// 2. Read back flushed trace JSON from DB
+	userMsg := a.latestMeaningfulUserMessage()
+	evalState, repairState, actionableRepair, err := a.runInlineEvaluation(ctx, userMsg, previous)
+	if evalState.Valid {
+		a.setEvaluationDecision(evalState)
+	}
+	a.setRepairDecision(repairState)
+	if err != nil {
+		return false, err
+	}
+	return actionableRepair, nil
+}
+
+func (a *AgentLoop) runInlineEvaluation(ctx context.Context, userMsg string, previous graphruntime.EvaluationState) (graphruntime.EvaluationState, graphruntime.RepairState, bool, error) {
+	traceID, traceJSON, shouldEvaluate, err := a.flushTraceForEvaluation(userMsg)
+	if err != nil {
+		return graphruntime.EvaluationState{}, graphruntime.RepairState{}, false, err
+	}
+	if !shouldEvaluate {
+		return graphruntime.EvaluationState{}, a.intelligenceSnapshot().Repair, false, nil
+	}
+
+	var evoCtx *EvalContext
+	if previous.Valid && !previous.Passed {
+		var failures strings.Builder
+		fmt.Fprintf(&failures, "Previous score: %.1f, error_type: %s\n", previous.Score, previous.ErrorType)
+		for _, issue := range previous.Issues {
+			fmt.Fprintf(&failures, "- [%s] %s\n", issue.Severity, issue.Description)
+		}
+		evoCtx = &EvalContext{
+			PreviousFailures: failures.String(),
+			PreviousEval:     &previous,
+		}
+	}
+
+	a.pushEvo("evo_eval", map[string]any{"type": "evo_eval", "text": "evaluating...", "session_id": a.SessionID()})
+	evalResult, err := a.deps.EvoEvaluator.Evaluate(ctx, a.SessionID(), traceID, userMsg, traceJSON, "", evoCtx)
+	if err != nil {
+		return graphruntime.EvaluationState{}, graphruntime.RepairState{}, false, err
+	}
+
+	current := a.intelligenceSnapshot()
+	needsRepair := evaluationNeedsRepair(*evalResult)
+	if !needsRepair {
+		repair := graphruntime.RepairState{}
+		if current.Repair.Attempted && current.Repair.Strategy != "" {
+			repair = current.Repair
+			repair.Success = true
+		}
+		a.pushEvo("evo_eval", map[string]any{"type": "evo_eval", "text": fmt.Sprintf("passed (score=%.1f)", evalResult.Score), "session_id": a.SessionID()})
+		return *evalResult, repair, false, nil
+	}
+
+	if a.deps.EvoRepairRouter == nil {
+		return *evalResult, graphruntime.RepairState{}, false, nil
+	}
+
+	canRepair, reason := a.deps.EvoRepairRouter.CanRepair(a.SessionID())
+	if !canRepair {
+		repair := graphruntime.RepairState{
+			Allowed:     false,
+			BlockReason: reason,
+			Description: "circuit breaker: " + reason,
+		}
+		a.pushEvo("evo_repair", map[string]any{"type": "evo_repair", "text": repair.Description, "session_id": a.SessionID()})
+		return *evalResult, repair, false, nil
+	}
+
+	plan := a.deps.EvoRepairRouter.Route(evalResult)
+	a.pushEvo("evo_repair", map[string]any{"type": "evo_repair", "text": plan.Description, "session_id": a.SessionID()})
+	return *evalResult, plan, true, nil
+}
+
+func (a *AgentLoop) flushTraceForEvaluation(userMsg string) (uint, string, bool, error) {
+	if a.traceCollector == nil {
+		return 0, "", false, nil
+	}
+
+	traceID, err := a.traceCollector.Flush(a.SessionID(), 0, userMsg)
+	if err != nil {
+		return 0, "", false, fmt.Errorf("trace flush failed: %w", err)
+	}
+
 	var traceJSON string
 	if a.deps.EvoStore != nil && traceID > 0 {
 		if trace, err := a.deps.EvoStore.GetTraceByID(traceID); err == nil {
@@ -86,102 +153,74 @@ func (a *AgentLoop) runEvoEval(_ context.Context, userMsg string) {
 		}
 	}
 	if traceJSON == "" || traceJSON == "[]" {
-		slog.Info(fmt.Sprintf("[evo] skipping evaluation: no tool calls recorded (traceID=%d)", traceID))
-		return
+		return traceID, "", false, nil
 	}
 
-	// 2.5 Filter: skip if trace only has meta-tools (no substantive work)
 	metaTools := map[string]bool{"task_boundary": true, "notify_user": true, "task_plan": true}
-	effectiveSteps := countEffectiveSteps(traceJSON, metaTools)
-	if effectiveSteps < 2 {
-		slog.Info(fmt.Sprintf("[evo] skipping evaluation: only %d effective tool calls (traceID=%d)", effectiveSteps, traceID))
-		return
+	if countEffectiveSteps(traceJSON, metaTools) < 2 {
+		return traceID, "", false, nil
 	}
-
-	// 3. Build evaluation context from previous rounds
-	var evoCtx *EvalContext
-	a.mu.Lock()
-	lastEval := a.evoLastEval
-	a.mu.Unlock()
-	if lastEval != nil && !lastEval.Passed {
-		var failures strings.Builder
-		fmt.Fprintf(&failures, "Previous score: %.1f, error_type: %s\n", lastEval.Score, lastEval.ErrorType)
-		for _, issue := range lastEval.Issues {
-			fmt.Fprintf(&failures, "- [%s] %s\n", issue.Severity, issue.Description)
-		}
-		evoCtx = &EvalContext{
-			PreviousFailures: failures.String(),
-			PreviousEval:     lastEval,
-		}
-	}
-
-	// 4. Evaluate — push status via WS (SSE handler already exited after OnComplete)
-	a.pushEvo("evo_eval", map[string]any{"type": "evo_eval", "text": "evaluating...", "session_id": a.SessionID()})
-	evalResult, err := a.deps.EvoEvaluator.Evaluate(
-		evalCtx, a.SessionID(), 0, userMsg, traceJSON, "", evoCtx,
-	)
-	if err != nil {
-		slog.Info(fmt.Sprintf("[evo] evaluation failed: %v", err))
-		return
-	}
-
-	// 4. Decide: repair needed?
-	// Repair triggers when:
-	//   (a) score < threshold (evalResult.Passed == false), OR
-	//   (b) score >= threshold but has actionable issues (severity != "info")
-	needsRepair := !evalResult.Passed
-	if evalResult.Passed && len(evalResult.Issues) > 0 {
-		for _, issue := range evalResult.Issues {
-			if issue.Severity != "info" {
-				needsRepair = true
-				break
-			}
-		}
-	}
-
-	if !needsRepair {
-		slog.Info(fmt.Sprintf("[evo] evaluation passed: score=%.2f issues=%d (traceID=%d)", evalResult.Score, len(evalResult.Issues), traceID))
-		a.pushEvo("evo_eval", map[string]any{"type": "evo_eval", "text": fmt.Sprintf("passed (score=%.1f)", evalResult.Score), "session_id": a.SessionID()})
-		return
-	}
-
-	// 5. Route repair
-	slog.Info(fmt.Sprintf("[evo] needs repair: score=%.2f issues=%v", evalResult.Score, evalResult.Issues))
-	if a.deps.EvoRepairRouter == nil {
-		return
-	}
-
-	canRepair, reason := a.deps.EvoRepairRouter.CanRepair(a.SessionID())
-	if !canRepair {
-		slog.Info(fmt.Sprintf("[evo] circuit breaker tripped: %s", reason))
-		a.pushEvo("evo_repair", map[string]any{"type": "evo_repair", "text": "circuit breaker: " + reason, "session_id": a.SessionID()})
-		return
-	}
-
-	plan := a.deps.EvoRepairRouter.Route(evalResult)
-	slog.Info(fmt.Sprintf("[evo] repair: strategy=%s desc=%s", plan.Strategy, plan.Description))
-	a.pushEvo("evo_repair", map[string]any{"type": "evo_repair", "text": plan.Description, "session_id": a.SessionID()})
-
-	// 6. Store evo context for next round's hooks
-	a.mu.Lock()
-	a.evoLastEval = evalResult
-	a.evoLastPlan = &plan
-	a.mu.Unlock()
-
-	// 7. Inject repair instructions + re-run (acquires runMu)
-	// Signal frontend: new round starting via WS push
-	a.pushEvo("auto_wake_start", map[string]string{"type": "auto_wake_start", "session_id": a.SessionID()})
-	a.InjectEphemeral(plan.Ephemeral)
-	repairCtx, repairCancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer repairCancel()
-	if err := a.Run(repairCtx, ""); err != nil {
-		slog.Info(fmt.Sprintf("[evo] repair re-run failed: %v", err))
-	}
+	return traceID, traceJSON, true, nil
 }
 
-// pushEvo sends an evo event via WS push (survives SSE handler exit).
+func evaluationNeedsRepair(eval graphruntime.EvaluationState) bool {
+	if !eval.Passed {
+		return true
+	}
+	for _, issue := range eval.Issues {
+		if issue.Severity != "info" {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *AgentLoop) continueWithRepair(rs *runState) graphruntime.NodeResult {
+	intelligence := a.intelligenceSnapshot()
+	repair := intelligence.Repair
+	if !repair.Allowed || repair.Strategy == "" {
+		return a.transitionTo(StateIdle, graphRouteComplete)
+	}
+
+	repair.Attempted = true
+	a.setRepairDecision(repair)
+	if a.deps.EvoRepairRouter != nil {
+		_ = a.deps.EvoRepairRouter.RecordRepair(a.SessionID(), 0, repair, false, 0, 0, 0)
+	}
+	a.pushEvo("auto_wake_start", map[string]string{"type": "auto_wake_start", "session_id": a.SessionID()})
+	if a.deps.Delta != nil {
+		a.deps.Delta.OnAutoWakeStart()
+	}
+	if repair.Ephemeral != "" {
+		a.InjectEphemeral(repair.Ephemeral)
+	}
+	rs.setStepCount(0)
+	rs.setRetryCount(0)
+	func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		a.history = append(a.history, a.buildUserMessage(""))
+	}()
+	return a.transitionTo(StatePrepare, graphRoutePrepare)
+}
+
+// pushEvo sends an evo event via WS push.
 func (a *AgentLoop) pushEvo(eventType string, data any) {
 	if a.deps.EventPusher != nil {
 		a.deps.EventPusher(a.SessionID(), eventType, data)
+	}
+}
+
+func (a *AgentLoop) evaluationContextTimeout() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 60*time.Second)
+}
+
+func (a *AgentLoop) repairContextTimeout() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 120*time.Second)
+}
+
+func (a *AgentLoop) logInlineEvaluationFailure(err error) {
+	if err != nil {
+		slog.Info(fmt.Sprintf("[evo] inline evaluation failed: %v", err))
 	}
 }

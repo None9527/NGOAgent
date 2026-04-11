@@ -1,47 +1,8 @@
 package service
 
 import (
-	"sync"
-	"time"
-
 	"github.com/ngoclaw/ngoagent/internal/domain/model"
 )
-
-// RunState tracks the independent per-run execution state.
-// Separated from AgentLoop to support concurrent sessions.
-type RunState struct {
-	mu           sync.Mutex
-	SessionID    string
-	State        State
-	Step         int
-	ToolCalls    int
-	TokensUsed   int
-	StartedAt    time.Time
-	LastToolName string
-	Error        error
-}
-
-// NewRunState creates a fresh run state.
-func NewRunState(sessionID string) *RunState {
-	return &RunState{
-		SessionID: sessionID,
-		State:     StateIdle,
-		StartedAt: time.Now(),
-	}
-}
-
-// Transition updates the observed run phase.
-func (rs *RunState) Transition(to State) bool {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	rs.State = to
-	return true
-}
-
-// IsTerminal returns true if the run is in a terminal state.
-func (rs *RunState) IsTerminal() bool {
-	return rs.State == StateDone || rs.State == StateFatal
-}
 
 // ═══════════════════════════════════════════
 // DeltaEvent — typed event stream

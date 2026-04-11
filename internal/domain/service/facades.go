@@ -28,22 +28,191 @@ func NewChatEngine(pool *LoopPool, sessMgr *SessionManager, history HistoryPersi
 	return &ChatEngine{pool: pool, sessMgr: sessMgr, history: history}
 }
 
+type HistoryLoader interface {
+	LoadAll(sessionID string) ([]HistoryExport, error)
+}
+
+type LoopHandler func(loop *AgentLoop) (bool, error)
+
+type LoopContextStats struct {
+	HistoryCount  int
+	TokenEstimate int
+	TotalCostUSD  float64
+	TotalCalls    int
+	ByModel       map[string]ModelUsage
+	CacheHitRate  float64
+	CacheBreaks   int
+}
+
+func ResolveSessionLoop(defaultLoop *AgentLoop, pool *LoopPool, sessionID string, create bool) *AgentLoop {
+	if sessionID == "" || pool == nil {
+		return defaultLoop
+	}
+	if create {
+		return pool.Get(sessionID)
+	}
+	if existing := pool.GetIfExists(sessionID); existing != nil {
+		return existing
+	}
+	return defaultLoop
+}
+
+func FindSessionLoop(defaultLoop *AgentLoop, pool *LoopPool, sessionID string) *AgentLoop {
+	if sessionID == "" {
+		return defaultLoop
+	}
+	if pool != nil {
+		if existing := pool.GetIfExists(sessionID); existing != nil {
+			return existing
+		}
+	}
+	if defaultLoop != nil && defaultLoop.SessionID() == sessionID {
+		return defaultLoop
+	}
+	return nil
+}
+
+func ResidentSessionLoop(defaultLoop *AgentLoop, pool *LoopPool, sessionID string) *AgentLoop {
+	if sessionID == "" || pool == nil {
+		return defaultLoop
+	}
+	return pool.GetIfExists(sessionID)
+}
+
+func ResolveActiveManagedLoop(defaultLoop *AgentLoop, pool *LoopPool, sessMgr *SessionManager) *AgentLoop {
+	if sessMgr == nil {
+		return defaultLoop
+	}
+	if active := sessMgr.Active(); active != "" {
+		return FindSessionLoop(defaultLoop, pool, active)
+	}
+	return defaultLoop
+}
+
+func ResolveRetryLoop(defaultLoop *AgentLoop, pool *LoopPool, sessionID string) *AgentLoop {
+	if sessionID == "" {
+		return ResolveSessionLoop(defaultLoop, pool, sessionID, false)
+	}
+	if loop := FindSessionLoop(defaultLoop, pool, sessionID); loop != nil {
+		return loop
+	}
+	// Retry only needs a temporary history container; avoid mutating another
+	// session loop or creating a ghost pooled loop for a non-resident session.
+	return NewAgentLoop(Deps{})
+}
+
+func ResolveStatsLoop(defaultLoop *AgentLoop, pool *LoopPool, sessMgr *SessionManager, sessionID string) *AgentLoop {
+	if sessionID == "" {
+		return ResolveActiveManagedLoop(defaultLoop, pool, sessMgr)
+	}
+	return FindSessionLoop(defaultLoop, pool, sessionID)
+}
+
+func CollectLoopContextStats(loop *AgentLoop) LoopContextStats {
+	history := loop.GetHistory()
+	tokenStats := loop.GetTokenStats()
+	cacheStats := loop.GetCacheStats()
+	tokenEst := 0
+	for _, m := range history {
+		tokenEst += len(m.Content) / 4
+	}
+
+	byModel := make(map[string]ModelUsage, len(tokenStats.ByModel))
+	for model, usage := range tokenStats.ByModel {
+		byModel[model] = usage
+	}
+
+	return LoopContextStats{
+		HistoryCount:  len(history),
+		TokenEstimate: tokenEst,
+		TotalCostUSD:  tokenStats.TotalCostUSD,
+		TotalCalls:    tokenStats.TotalCalls,
+		ByModel:       byModel,
+		CacheHitRate:  cacheStats.HitRate,
+		CacheBreaks:   cacheStats.CacheBreaks,
+	}
+}
+
+func RestoreLoopHistoryIfNeeded(loop *AgentLoop, history HistoryLoader, sessionID string, compact bool) int {
+	if loop == nil || history == nil || sessionID == "" || len(loop.GetHistory()) != 0 {
+		return 0
+	}
+
+	exports, err := history.LoadAll(sessionID)
+	if err != nil || len(exports) == 0 {
+		return 0
+	}
+
+	msgs := RestoreHistory(exports)
+	loop.SetHistory(msgs)
+	if compact {
+		loop.CompactIfNeeded()
+	}
+	return len(msgs)
+}
+
+func StripSessionLastTurn(loop *AgentLoop, history HistoryLoader, sessionID string) (string, error) {
+	RestoreLoopHistoryIfNeeded(loop, history, sessionID, false)
+	return loop.StripLastTurn()
+}
+
+func ForEachCandidateLoop(defaultLoop *AgentLoop, pool *LoopPool, sessMgr *SessionManager, fn LoopHandler) (bool, error) {
+	if defaultLoop != nil {
+		handled, err := fn(defaultLoop)
+		if handled || err != nil {
+			return handled, err
+		}
+	}
+
+	seen := map[string]struct{}{}
+	candidates := make([]string, 0, 16)
+	addCandidate := func(sessionID string) {
+		if sessionID == "" {
+			return
+		}
+		if _, ok := seen[sessionID]; ok {
+			return
+		}
+		seen[sessionID] = struct{}{}
+		candidates = append(candidates, sessionID)
+	}
+
+	if pool != nil {
+		for _, sessionID := range pool.List() {
+			addCandidate(sessionID)
+		}
+	}
+	if sessMgr != nil {
+		for _, session := range sessMgr.List() {
+			addCandidate(session.ID)
+		}
+		if sessions, err := sessMgr.ListFromRepo(200, 0); err == nil {
+			for _, session := range sessions {
+				addCandidate(session.ID)
+			}
+		}
+	}
+
+	for _, sessionID := range candidates {
+		loop := ResolveSessionLoop(defaultLoop, pool, sessionID, true)
+		if loop == nil {
+			continue
+		}
+		if handled, err := fn(loop); handled || err != nil {
+			return handled, err
+		}
+	}
+	return false, nil
+}
+
 // Chat sends a user message and runs the agent loop.
 // If sessionID is provided and the loop has no history, load from DB (session resume).
 func (ce *ChatEngine) Chat(ctx context.Context, sessionID, message string) error {
-	loop := ce.pool.Get(sessionID)
+	loop := ResolveSessionLoop(nil, ce.pool, sessionID, true)
 	if sessionID != "" {
 		ce.sessMgr.Activate(sessionID)
-		// Session resume: load history from DB if loop is empty
-		if ce.history != nil && len(loop.GetHistory()) == 0 {
-			exports, err := ce.history.LoadAll(sessionID)
-			if err == nil && len(exports) > 0 {
-				msgs := RestoreHistory(exports)
-				loop.SetHistory(msgs)
-				// Auto-compact on resume: prevent full-history overload
-				loop.CompactIfNeeded()
-				slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s", len(msgs), sessionID))
-			}
+		if restored := RestoreLoopHistoryIfNeeded(loop, ce.history, sessionID, true); restored > 0 {
+			slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s", restored, sessionID))
 		}
 	}
 	err := loop.Run(ctx, message)
@@ -61,8 +230,8 @@ func (ce *ChatEngine) TouchSession(id string) {
 
 // RetryLastRun re-runs the last assistant turn by removing it and re-generating.
 func (ce *ChatEngine) RetryLastRun(ctx context.Context, sessionID string) error {
-	loop := ce.pool.Get(sessionID)
-	lastUser, err := loop.StripLastTurn()
+	loop := ResolveRetryLoop(nil, ce.pool, sessionID)
+	lastUser, err := StripSessionLastTurn(loop, ce.history, sessionID)
 	if err != nil {
 		return err
 	}
@@ -74,7 +243,7 @@ func (ce *ChatEngine) RetryLastRun(ctx context.Context, sessionID string) error 
 
 // StopChat signals the agent loop for a specific session to stop.
 func (ce *ChatEngine) StopChat(sessionID string) {
-	if loop := ce.pool.GetIfExists(sessionID); loop != nil {
+	if loop := ResolveSessionLoop(nil, ce.pool, sessionID, false); loop != nil {
 		loop.Stop()
 	}
 }

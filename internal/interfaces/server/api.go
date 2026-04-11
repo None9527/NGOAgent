@@ -178,15 +178,12 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "session_id required", http.StatusBadRequest)
 			return
 		}
-		if err := s.chat.ResumeRun(r.Context(), req.SessionID, resolvedRuntimeRunID(req)); err != nil {
+		ingressResp, err := s.chat.ApplyRuntimeIngress(r.Context(), apitype.NewRuntimeResumeIngressRequest(req))
+		if err != nil {
 			writeJSONError(w, err)
 			return
 		}
-		json.NewEncoder(w).Encode(apitype.RuntimeResumeResponse{
-			Status:    "resumed",
-			SessionID: req.SessionID,
-			Run:       apitype.RuntimeRunTarget{RunID: resolvedRuntimeRunID(req)},
-		})
+		json.NewEncoder(w).Encode(apitype.RuntimeResumeResponseFromIngress(ingressResp))
 	})
 
 	mux.HandleFunc("/api/v1/runtime/decision/apply", func(w http.ResponseWriter, r *http.Request) {
@@ -203,18 +200,12 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "session_id and decision required", http.StatusBadRequest)
 			return
 		}
-		req.Decision = apitype.NormalizeRuntimeDecisionInput(req.Decision)
-		runID := apitype.ResolveRuntimeRunID(req.Run, req.RunID)
-		if err := s.chat.ApplyDecisionToRun(r.Context(), req.SessionID, runID, req.Decision.Kind, req.Decision.Decision, req.Decision.Feedback); err != nil {
+		ingressResp, err := s.chat.ApplyRuntimeIngress(r.Context(), apitype.NewRuntimeDecisionIngressRequest(req))
+		if err != nil {
 			writeJSONError(w, err)
 			return
 		}
-		json.NewEncoder(w).Encode(apitype.RuntimeDecisionApplyResponse{
-			Status:    "applied",
-			SessionID: req.SessionID,
-			Run:       apitype.RuntimeRunTarget{RunID: runID},
-			Decision:  req.Decision,
-		})
+		json.NewEncoder(w).Encode(apitype.RuntimeDecisionApplyResponseFromIngress(ingressResp))
 	})
 
 	mux.HandleFunc("/api/v1/runtime/ingress", func(w http.ResponseWriter, r *http.Request) {

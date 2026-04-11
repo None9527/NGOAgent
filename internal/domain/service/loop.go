@@ -1,5 +1,5 @@
-// Package engine implements the core agent loop (ReAct pattern),
-// state machine, Delta streaming protocol, and context management.
+// Package service implements the graph-backed agent loop,
+// Delta streaming protocol, and context management.
 package service
 
 import (
@@ -149,7 +149,6 @@ type AgentLoop struct {
 	deps Deps
 
 	// ── Lifecycle & Synchronization ──
-	state     State
 	mu        sync.Mutex // Protects: history, ephemerals, task, evo state, historyDirty
 	runMu     sync.Mutex // Backpressure: prevents concurrent Run()
 	stopCh    chan struct{}
@@ -179,10 +178,9 @@ type AgentLoop struct {
 	barrier       *SubagentBarrier
 
 	// ── Evo State (per-run, reset on new user message) ──
-	evoLastEval      *EvalResult
-	evoLastPlan      *RepairPlan
-	evoRepairSuccess bool
-	traceCollector   *TraceCollectorHook
+	intelligence   graphruntime.IntelligenceState
+	orchestration  graphruntime.OrchestrationState
+	traceCollector *TraceCollectorHook
 
 	// ── Runtime Config ──
 	mode ModePermissions // Execution mode permissions — set via API, NOT persisted
@@ -217,7 +215,6 @@ func NewAgentLoop(deps Deps) *AgentLoop {
 	}
 	a := &AgentLoop{
 		deps:          deps,
-		state:         StateIdle,
 		stopCh:        make(chan struct{}),
 		guard:         NewBehaviorGuard(agentCfg),
 		task:          NewTaskTracker(),
