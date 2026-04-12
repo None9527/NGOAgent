@@ -56,49 +56,33 @@ func Build() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfgMgr := foundation.cfgMgr
 	cfg := foundation.cfg
-	db := foundation.db
-	repo := foundation.repo
-	historyStore := foundation.historyStore
-	snapshotStore := foundation.snapshotStore
-	evoStore := foundation.evoStore
-	transcriptStore := foundation.transcriptStore
-	agentRegistry := foundation.agentRegistry
 
 	// ═══════════════════════════════════════════
 	// Phase 2: Core Infrastructure
 	// ═══════════════════════════════════════════
 	core := assembleCoreInfrastructure(cfg)
-	router := core.router
-	promptEngine := core.promptEngine
-	workspaceDir := core.workspaceDir
-	sbMgr := core.sandboxMgr
-	secHook := core.securityHook
 
 	// ═══════════════════════════════════════════
 	// Phase 3: Storage Layer
 	// ═══════════════════════════════════════════
-	storage := assembleStorage(cfg, workspaceDir)
-	sessionID := storage.sessionID
-	brainDir := storage.brainDir
-	brainStore := storage.brainStore
-	kiStore := storage.kiStore
-	kiRetriever := storage.kiRetriever
-	memStore := storage.memStore
-	diaryStore := storage.diaryStore
-	wsStore := storage.workspaceStore
-	fileHistory := storage.fileHistory
-	skillMgr := storage.skillMgr
-	mcpMgr := storage.mcpMgr
+	storage := assembleStorage(cfg, core.workspaceDir)
 
 	// ═══════════════════════════════════════════
 	// Phase 4: Tool Registration
 	// ═══════════════════════════════════════════
-	tools := assembleBuiltinTools(cfg, workspaceDir, brainDir, fileHistory, sbMgr, kiStore, kiRetriever, memStore, diaryStore, skillMgr)
-	registry := tools.registry
-	spawnTool := tools.spawn
-	skillTool := tools.skill
+	tools := assembleBuiltinTools(
+		cfg,
+		core.workspaceDir,
+		storage.brainDir,
+		storage.fileHistory,
+		core.sandboxMgr,
+		storage.kiStore,
+		storage.kiRetriever,
+		storage.memStore,
+		storage.diaryStore,
+		storage.skillMgr,
+	)
 	// manage_cron tool is registered after CronManager creation (Phase 7)
 
 	// ═══════════════════════════════════════════
@@ -106,44 +90,36 @@ func Build() (*App, error) {
 	// ═══════════════════════════════════════════
 	engine := assembleEngine(engineAssemblyInput{
 		cfg:             cfg,
-		sessionID:       sessionID,
-		brainDir:        brainDir,
-		router:          router,
-		promptEngine:    promptEngine,
-		registry:        registry,
-		secHook:         secHook,
-		sbMgr:           sbMgr,
-		brainStore:      brainStore,
-		kiStore:         kiStore,
-		kiRetriever:     kiRetriever,
-		wsStore:         wsStore,
-		skillMgr:        skillMgr,
-		historyStore:    historyStore,
-		fileHistory:     fileHistory,
-		memStore:        memStore,
-		diaryStore:      diaryStore,
-		snapshotStore:   snapshotStore,
-		evoStore:        evoStore,
-		transcriptStore: transcriptStore,
-		repo:            repo,
-		agentRegistry:   agentRegistry,
-		spawnTool:       spawnTool,
-		skillTool:       skillTool,
+		sessionID:       storage.sessionID,
+		brainDir:        storage.brainDir,
+		router:          core.router,
+		promptEngine:    core.promptEngine,
+		registry:        tools.registry,
+		secHook:         core.securityHook,
+		sbMgr:           core.sandboxMgr,
+		brainStore:      storage.brainStore,
+		kiStore:         storage.kiStore,
+		kiRetriever:     storage.kiRetriever,
+		wsStore:         storage.workspaceStore,
+		skillMgr:        storage.skillMgr,
+		historyStore:    foundation.historyStore,
+		fileHistory:     storage.fileHistory,
+		memStore:        storage.memStore,
+		diaryStore:      storage.diaryStore,
+		snapshotStore:   foundation.snapshotStore,
+		evoStore:        foundation.evoStore,
+		transcriptStore: foundation.transcriptStore,
+		repo:            foundation.repo,
+		agentRegistry:   foundation.agentRegistry,
+		spawnTool:       tools.spawn,
+		skillTool:       tools.skill,
 	})
-	baseDeps := engine.baseDeps
-	factory := engine.factory
-	loop := engine.loop
-	loopPool := engine.loopPool
-	sessMgr := engine.sessionMgr
-	chatEngine := engine.chatEngine
-	modelMgr := engine.modelMgr
-	toolAdmin := engine.toolAdmin
 
 	// ═══════════════════════════════════════════
 	// Phase 6: Hot-Reload Subscriptions
 	// ═══════════════════════════════════════════
-	registerHotReloadSubscriptions(cfgMgr, router, secHook, mcpMgr, registry, loop, func() *service.LoopPool {
-		return loopPool
+	registerHotReloadSubscriptions(foundation.cfgMgr, core.router, core.securityHook, storage.mcpMgr, tools.registry, engine.loop, func() *service.LoopPool {
+		return engine.loopPool
 	})
 
 	// NOTE: Approval flow uses PendingApproval registry (RequestApproval → Resolve via POST /v1/approve).
@@ -151,7 +127,7 @@ func Build() (*App, error) {
 	// until resolved by an external client (forge script, CLI, web UI).
 
 	// Start config file watching
-	if err := cfgMgr.StartWatching(); err != nil {
+	if err := foundation.cfgMgr.StartWatching(); err != nil {
 		slog.Info(fmt.Sprintf("Warning: config watch: %v", err))
 	}
 
@@ -160,73 +136,37 @@ func Build() (*App, error) {
 	// ═══════════════════════════════════════════
 	stopCh := make(chan struct{})
 
-	cronMgr := assembleCronRuntime(cfg, baseDeps, registry)
+	cronMgr := assembleCronRuntime(cfg, engine.baseDeps, tools.registry)
 
-	startRuntimeCapabilities(cfg, stopCh, registry, mcpMgr, skillMgr)
+	startRuntimeCapabilities(cfg, stopCh, tools.registry, storage.mcpMgr, storage.skillMgr)
 
 	// ═══════════════════════════════════════════
 	// Phase 7.5: R3 Orchestration Wiring
 	// ═══════════════════════════════════════════
-	orchestration := assembleOrchestration(cfg, registry, mcpMgr, skillMgr)
-	eventBus := orchestration.eventBus
-	toolDiscovery := orchestration.discovery
-	a2aHandler := orchestration.a2aHandler
-	addr := orchestration.addr
+	orchestration := assembleOrchestration(cfg, tools.registry, storage.mcpMgr, storage.skillMgr)
 
 	// ═══════════════════════════════════════════
 	// Phase 8: Unified API + Server
 	// ═══════════════════════════════════════════
 
 	transports := assembleTransports(transportAssemblyInput{
-		cfg:           cfg,
-		cfgMgr:        cfgMgr,
-		db:            db,
-		snapshotStore: snapshotStore,
-		historyStore:  historyStore,
-		loop:          loop,
-		loopPool:      loopPool,
-		chatEngine:    chatEngine,
-		sessionMgr:    sessMgr,
-		modelMgr:      modelMgr,
-		toolAdmin:     toolAdmin,
-		secHook:       secHook,
-		skillMgr:      skillMgr,
+		foundation:    foundation,
+		core:          core,
+		storage:       storage,
+		engine:        engine,
+		orchestration: orchestration,
 		cronMgr:       cronMgr,
-		mcpMgr:        mcpMgr,
-		discovery:     toolDiscovery,
-		router:        router,
-		brainDir:      brainDir,
-		kiStore:       kiStore,
-		sbMgr:         sbMgr,
-		a2aHandler:    a2aHandler,
-		httpAddr:      addr,
 	})
-	appServices := transports.services
-	srv := transports.httpServer
-	grpcSrv := transports.grpcServer
 
 	return assembleApp(appAssemblyInput{
-		cfgMgr:        cfgMgr,
-		db:            db,
-		repo:          repo,
-		appServices:   appServices,
-		router:        router,
-		loop:          loop,
-		factory:       factory,
-		httpServer:    srv,
-		grpcServer:    grpcSrv,
-		chatEngine:    chatEngine,
-		sessionMgr:    sessMgr,
-		modelMgr:      modelMgr,
-		toolAdmin:     toolAdmin,
+		foundation:    foundation,
+		core:          core,
+		storage:       storage,
+		tools:         tools,
+		engine:        engine,
+		orchestration: orchestration,
+		transports:    transports,
 		cronMgr:       cronMgr,
-		mcpMgr:        mcpMgr,
-		skillMgr:      skillMgr,
-		secHook:       secHook,
-		spawnTool:     spawnTool,
-		eventBus:      eventBus,
-		a2aHandler:    a2aHandler,
-		toolDiscovery: toolDiscovery,
 		stopCh:        stopCh,
 	}), nil
 }
