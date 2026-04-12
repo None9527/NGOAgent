@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
 	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
@@ -91,14 +92,14 @@ func (a *RuntimeCommands) ResumeRun(ctx context.Context, sessionID, runID string
 }
 
 func (a *RuntimeCommands) ApplyRuntimeIngress(ctx context.Context, req apitype.RuntimeIngressRequest) (apitype.RuntimeIngressResponse, error) {
-	req = apitype.NormalizeRuntimeIngressRequest(req)
+	req = apitype.CompleteRuntimeIngressRequest(req)
 	resp := apitype.RuntimeIngressResponse{
 		Status:    runtimeIngressStatus(req),
 		SessionID: req.SessionID,
 		Ingress:   req.Ingress,
 	}
-	if req.SessionID == "" {
-		return resp, agenterr.NewValidation("session_id", "is required")
+	if err := apitype.ValidateRuntimeIngressRequest(req); err != nil {
+		return resp, err
 	}
 	ctx = a.runtimeIngressContext(ctx, req)
 	facades := newApplicationFacades(a.ApplicationKernel)
@@ -109,4 +110,22 @@ func (a *RuntimeCommands) ApplyRuntimeIngress(ctx context.Context, req apitype.R
 	resp.Ingress = normalizedIngress
 
 	return resp, nil
+}
+
+func (a *RuntimeCommands) withAcquiredSessionLoop(
+	sessionID string,
+	restoreReason string,
+	fn func(loop *service.AgentLoop) (bool, error),
+) (bool, error) {
+	loop := service.ResolveSessionLoop(a.loop, a.loopPool, sessionID, true)
+	if restored := service.RestoreLoopHistoryIfNeeded(loop, a.histQuery, sessionID, true); restored > 0 {
+		slog.Info(fmt.Sprintf("[session] Resumed %d messages for session %s (%s)", restored, sessionID, restoreReason))
+	}
+
+	if !loop.TryAcquire() {
+		return false, ErrBusy
+	}
+	defer loop.ReleaseAcquire()
+
+	return fn(loop)
 }

@@ -100,7 +100,10 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "session_id required", http.StatusBadRequest)
 			return
 		}
-		runs, err := s.runtime.ListRuntimeRuns(r.Context(), sessionID)
+		eventType := r.URL.Query().Get("event_type")
+		trigger := r.URL.Query().Get("trigger")
+		barrierID := r.URL.Query().Get("barrier_id")
+		runs, err := s.runtime.ListRuntimeRunsByEvent(r.Context(), sessionID, eventType, trigger, barrierID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -114,7 +117,10 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "session_id required", http.StatusBadRequest)
 			return
 		}
-		graph, err := s.runtime.ListRuntimeGraph(r.Context(), sessionID)
+		eventType := r.URL.Query().Get("event_type")
+		trigger := r.URL.Query().Get("trigger")
+		barrierID := r.URL.Query().Get("barrier_id")
+		graph, err := s.runtime.ListRuntimeGraphByEvent(r.Context(), sessionID, eventType, trigger, barrierID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -174,10 +180,6 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if req.SessionID == "" {
-			http.Error(w, "session_id required", http.StatusBadRequest)
-			return
-		}
 		ingressResp, err := s.chat.ApplyRuntimeIngress(r.Context(), apitype.NewRuntimeResumeIngressRequest(req))
 		if err != nil {
 			writeJSONError(w, err)
@@ -194,10 +196,6 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 		req, err := decodeRuntimeDecisionApplyRequest(r)
 		if err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
-			return
-		}
-		if req.SessionID == "" || req.Decision.Decision == "" {
-			http.Error(w, "session_id and decision required", http.StatusBadRequest)
 			return
 		}
 		ingressResp, err := s.chat.ApplyRuntimeIngress(r.Context(), apitype.NewRuntimeDecisionIngressRequest(req))

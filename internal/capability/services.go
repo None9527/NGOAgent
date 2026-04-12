@@ -42,6 +42,8 @@ type Runtime interface {
 	ListPendingDecisions(ctx context.Context, sessionID string) ([]apitype.RuntimeRunInfo, error)
 	PendingDecision(ctx context.Context, sessionID, runID string) (*apitype.RuntimeRunInfo, error)
 	ListRuntimeGraph(ctx context.Context, sessionID string) (apitype.OrchestrationGraphInfo, error)
+	ListRuntimeRunsByEvent(ctx context.Context, sessionID, eventType, trigger, barrierID string) ([]apitype.RuntimeRunInfo, error)
+	ListRuntimeGraphByEvent(ctx context.Context, sessionID, eventType, trigger, barrierID string) (apitype.OrchestrationGraphInfo, error)
 	ListChildRuns(ctx context.Context, parentRunID string) ([]apitype.RuntimeRunInfo, error)
 }
 

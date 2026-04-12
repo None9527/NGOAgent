@@ -39,6 +39,19 @@ func TestDecodeRuntimeDecisionApplyRequest_NewContractShape(t *testing.T) {
 	}
 }
 
+func TestRuntimeEventQueryParams_AppearInRequestURL(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/v1/runtime/runs?session_id=s1&event_type=barrier.timeout&trigger=timeout&barrier_id=b1", nil)
+	if got := req.URL.Query().Get("event_type"); got != "barrier.timeout" {
+		t.Fatalf("expected event_type query param, got %q", got)
+	}
+	if got := req.URL.Query().Get("trigger"); got != "timeout" {
+		t.Fatalf("expected trigger query param, got %q", got)
+	}
+	if got := req.URL.Query().Get("barrier_id"); got != "b1" {
+		t.Fatalf("expected barrier_id query param, got %q", got)
+	}
+}
+
 func TestDecodeRuntimeDecisionApplyRequest_LegacyFlatShape(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/runtime/decision/apply", strings.NewReader(`{
 		"session_id":"session-2",
@@ -71,6 +84,33 @@ func TestNormalizeRuntimeDecisionInput_UsesReasonAsFeedbackFallback(t *testing.T
 	})
 	if normalized.Feedback != "needs staging" {
 		t.Fatalf("expected reason fallback to populate feedback, got %#v", normalized)
+	}
+}
+
+func TestValidateRuntimeIngressRequest_MessageRequiresMessage(t *testing.T) {
+	err := apitype.ValidateRuntimeIngressRequest(apitype.CompleteRuntimeIngressRequest(apitype.RuntimeIngressRequest{
+		SessionID: "session-1",
+		Ingress: apitype.RuntimeIngressInput{
+			Kind: "message",
+		},
+	}))
+	if err == nil {
+		t.Fatal("expected validation error for empty message ingress")
+	}
+}
+
+func TestValidateRuntimeIngressRequest_ReconnectUsesDefaultMetadata(t *testing.T) {
+	req := apitype.CompleteRuntimeIngressRequest(apitype.RuntimeIngressRequest{
+		SessionID: "session-2",
+		Ingress: apitype.RuntimeIngressInput{
+			Kind: "reconnect",
+		},
+	})
+	if err := apitype.ValidateRuntimeIngressRequest(req); err != nil {
+		t.Fatalf("ValidateRuntimeIngressRequest: %v", err)
+	}
+	if req.Ingress.Source != "runtime_ingress" || req.Ingress.Trigger != "reconnect" {
+		t.Fatalf("expected reconnect defaults, got %#v", req.Ingress)
 	}
 }
 
@@ -132,9 +172,8 @@ func TestDecodeRuntimeIngressRequest_NestedContractShape(t *testing.T) {
 		"session_id":"session-6",
 		"ingress":{
 			"kind":"decision",
-			"source":"web",
 			"run":{"run_id":"run-6"},
-			"decision":{"kind":"plan_review","decision":"approve","feedback":"go"}
+			"decision":{"kind":"plan_review","decision":"approve","reason":"go"}
 		}
 	}`))
 
@@ -145,7 +184,10 @@ func TestDecodeRuntimeIngressRequest_NestedContractShape(t *testing.T) {
 	if decoded.SessionID != "session-6" || decoded.Ingress.Kind != "decision" {
 		t.Fatalf("unexpected ingress envelope: %#v", decoded)
 	}
-	if decoded.Ingress.Run.RunID != "run-6" || decoded.Ingress.RunID != "run-6" || decoded.Ingress.Decision.Decision != "approve" {
+	if decoded.Ingress.Source != "decision_apply" || decoded.Ingress.Trigger != "decision_apply" {
+		t.Fatalf("expected default ingress metadata, got %#v", decoded.Ingress)
+	}
+	if decoded.Ingress.Run.RunID != "run-6" || decoded.Ingress.RunID != "run-6" || decoded.Ingress.Decision.Decision != "approve" || decoded.Ingress.Decision.Feedback != "go" {
 		t.Fatalf("unexpected ingress payload: %#v", decoded.Ingress)
 	}
 }
@@ -172,11 +214,13 @@ func TestRuntimeGraphResponse_MarshalsTopologyKeys(t *testing.T) {
 			PendingRuntimeControlRuns: []string{"run-parent"},
 			RunCount:                  1,
 			IngressNodeCount:          1,
-			EdgeCount:                 1,
+			EventNodeCount:            1,
+			EdgeCount:                 2,
 		},
 		IngressNodes: []apitype.RuntimeIngressNodeInfo{{ID: "ingress:resume:web", Category: "runtime_control", Phase: "resume", Kind: "resume", Source: "web"}},
+		EventNodes:   []apitype.RuntimeEventNodeInfo{{ID: "event:run-parent:trigger.received:2026-04-12T10:00:00Z", Type: "trigger.received", Kind: "resume", Source: "web", Summary: "resume", At: "2026-04-12T10:00:00Z"}},
 		Nodes:        []apitype.RuntimeRunInfo{{RunID: "run-parent"}},
-		Edges:        []apitype.RuntimeEdgeInfo{{Kind: "parent_child", SourceRunID: "run-parent", TargetRunID: "run-child"}},
+		Edges:        []apitype.RuntimeEdgeInfo{{Kind: "event", SourceRunID: "event:run-parent:trigger.received:2026-04-12T10:00:00Z", TargetRunID: "run-parent"}, {Kind: "parent_child", SourceRunID: "run-parent", TargetRunID: "run-child"}},
 	})
 	if err != nil {
 		t.Fatalf("marshal OrchestrationGraphInfo: %v", err)
@@ -185,9 +229,10 @@ func TestRuntimeGraphResponse_MarshalsTopologyKeys(t *testing.T) {
 		!strings.Contains(string(body), `"root_run_ids":["run-parent"]`) ||
 		!strings.Contains(string(body), `"pending_run_ids":["run-parent"]`) ||
 		!strings.Contains(string(body), `"pending_runtime_control_run_ids":["run-parent"]`) ||
-		!strings.Contains(string(body), `"summary":{"root_run_ids":["run-parent"],"pending_run_ids":["run-parent"],"pending_runtime_control_run_ids":["run-parent"],"run_count":1,"ingress_node_count":1,"edge_count":1}`) ||
+		!strings.Contains(string(body), `"summary":{"root_run_ids":["run-parent"],"pending_run_ids":["run-parent"],"pending_runtime_control_run_ids":["run-parent"],"run_count":1,"ingress_node_count":1,"event_node_count":1,"edge_count":2}`) ||
 		!strings.Contains(string(body), `"ingress_nodes":[{"id":"ingress:resume:web","category":"runtime_control","phase":"resume","kind":"resume","source":"web"}]`) ||
-		!strings.Contains(string(body), `"edges":[{"kind":"parent_child","source_run_id":"run-parent","target_run_id":"run-child"}]`) {
+		!strings.Contains(string(body), `"event_nodes":[{"id":"event:run-parent:trigger.received:2026-04-12T10:00:00Z","type":"trigger.received","kind":"resume","source":"web","at":"2026-04-12T10:00:00Z","summary":"resume"}]`) ||
+		!strings.Contains(string(body), `"edges":[{"kind":"event","source_run_id":"event:run-parent:trigger.received:2026-04-12T10:00:00Z","target_run_id":"run-parent"},{"kind":"parent_child","source_run_id":"run-parent","target_run_id":"run-child"}]`) {
 		t.Fatalf("unexpected runtime graph response: %s", string(body))
 	}
 }

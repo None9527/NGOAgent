@@ -29,6 +29,7 @@ type ApplicationKernel struct {
 	skillMgr        *skill.Manager
 	cronMgr         *cron.Manager
 	mcpMgr          *mcp.Manager
+	discovery       service.ToolDiscovery
 	cfg             *config.Manager
 	router          *llm.Router
 	histQuery       HistoryQuerier

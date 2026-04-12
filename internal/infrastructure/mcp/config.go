@@ -31,6 +31,7 @@ type MCPFileEntry struct {
 	Command string            `json:"command"`
 	Args    []string          `json:"args"`
 	Env     map[string]string `json:"env,omitempty"`
+	Cwd     string            `json:"cwd,omitempty"`
 }
 
 // MCPFile represents the parsed content of a mcp.json file.
@@ -90,6 +91,7 @@ func LoadMCPConfigs(globalDir string, inline []ServerConfig) []ServerConfig {
 				Command: entry.Command,
 				Args:    entry.Args,
 				Env:     entry.Env,
+				Cwd:     entry.Cwd,
 			}
 			slog.Info(fmt.Sprintf("[mcp] Loaded server %q from %s", name, path))
 		}

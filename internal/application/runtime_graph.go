@@ -6,16 +6,18 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
 )
 
-func buildRuntimeGraph(sessionID string, runs []apitype.RuntimeRunInfo) apitype.OrchestrationGraphInfo {
+func buildRuntimeGraph(sessionID string, runs []apitype.RuntimeRunInfo, caps []apitype.CapabilityInfo) apitype.OrchestrationGraphInfo {
 	graph := apitype.OrchestrationGraphInfo{
 		SessionID:                 sessionID,
 		Nodes:                     runs,
+		Capabilities:              caps,
 		RootRunIDs:                rootRunIDs(runs),
 		UserTurnRootRunIDs:        userTurnRootRunIDs(runs),
 		PendingRunIDs:             pendingRunIDs(runs),
 		PendingDecisionRunIDs:     pendingDecisionRunIDs(runs),
 		PendingRuntimeControlRuns: pendingRuntimeControlRunIDs(runs),
 		IngressNodes:              runtimeIngressNodes(runs),
+		EventNodes:                runtimeEventNodes(runs),
 		Edges:                     runtimeEdges(runs),
 	}
 	graph.Summary = apitype.OrchestrationGraphSummary{
@@ -26,6 +28,7 @@ func buildRuntimeGraph(sessionID string, runs []apitype.RuntimeRunInfo) apitype.
 		PendingRuntimeControlRuns: append([]string(nil), graph.PendingRuntimeControlRuns...),
 		RunCount:                  len(graph.Nodes),
 		IngressNodeCount:          len(graph.IngressNodes),
+		EventNodeCount:            len(graph.EventNodes),
 		EdgeCount:                 len(graph.Edges),
 	}
 	return graph
@@ -123,6 +126,28 @@ func runtimeEdges(runs []apitype.RuntimeRunInfo) []apitype.RuntimeEdgeInfo {
 				Summary:     ingressSummary(*run.Ingress),
 			})
 		}
+		for _, event := range run.Events {
+			eventID := runtimeEventNodeID(run.RunID, event)
+			if eventID == "" {
+				continue
+			}
+			addEdge(apitype.RuntimeEdgeInfo{
+				Kind:        "event",
+				SourceRunID: eventID,
+				TargetRunID: run.RunID,
+				BarrierID:   event.BarrierID,
+				Summary:     event.Summary,
+			})
+			if event.SourceRun != "" {
+				addEdge(apitype.RuntimeEdgeInfo{
+					Kind:        "event_source",
+					SourceRunID: event.SourceRun,
+					TargetRunID: eventID,
+					BarrierID:   event.BarrierID,
+					Summary:     event.Type,
+				})
+			}
+		}
 		if run.ParentRunID != "" {
 			addEdge(apitype.RuntimeEdgeInfo{
 				Kind:        "parent_child",
@@ -210,6 +235,65 @@ func runtimeIngressNodes(runs []apitype.RuntimeRunInfo) []apitype.RuntimeIngress
 		return nodes[i].ID < nodes[j].ID
 	})
 	return nodes
+}
+
+func runtimeEventNodes(runs []apitype.RuntimeRunInfo) []apitype.RuntimeEventNodeInfo {
+	nodes := make([]apitype.RuntimeEventNodeInfo, 0, len(runs))
+	seen := make(map[string]struct{}, len(runs)*2)
+	for _, run := range runs {
+		for _, event := range run.Events {
+			id := runtimeEventNodeID(run.RunID, event)
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			nodes = append(nodes, apitype.RuntimeEventNodeInfo{
+				ID:           id,
+				Type:         event.Type,
+				Kind:         event.Kind,
+				Source:       event.Source,
+				Trigger:      event.Trigger,
+				DecisionKind: event.DecisionKind,
+				Decision:     event.Decision,
+				RunID:        event.RunID,
+				SourceRun:    event.SourceRun,
+				BarrierID:    event.BarrierID,
+				At:           event.At,
+				Summary:      event.Summary,
+				PayloadJSON:  event.PayloadJSON,
+			})
+		}
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].ID < nodes[j].ID
+	})
+	return nodes
+}
+
+func runtimeEventNodeID(ownerRunID string, event apitype.RuntimeEventInfo) string {
+	baseRunID := event.RunID
+	if baseRunID == "" {
+		baseRunID = ownerRunID
+	}
+	if baseRunID == "" || event.Type == "" {
+		return ""
+	}
+	id := "event:" + baseRunID + ":" + event.Type
+	if event.At != "" {
+		id += ":" + event.At
+		return id
+	}
+	if event.Summary != "" {
+		id += ":" + event.Summary
+		return id
+	}
+	if event.BarrierID != "" {
+		id += ":" + event.BarrierID
+	}
+	return id
 }
 
 func ingressNodeID(info apitype.RuntimeIngressInfo) string {

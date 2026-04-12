@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ngoclaw/ngoagent/pkg/ctxutil"
@@ -357,6 +358,41 @@ func applyIngressMetadata(ctx context.Context, state *TurnState) {
 		Decision:     meta.Decision,
 		At:           time.Now().UTC(),
 	}
+	if event := TriggerEventFromIngress("", state.RunID, state.Orchestration.Ingress); event != nil {
+		payloadJSON := ""
+		if len(event.Payload) > 0 {
+			if raw, err := json.Marshal(event.Payload); err == nil {
+				payloadJSON = string(raw)
+			}
+		}
+		state.Orchestration.Events = append(state.Orchestration.Events, OrchestrationEventState{
+			Type:         "trigger.received",
+			Kind:         string(event.Kind),
+			Source:       event.Source,
+			Trigger:      event.Trigger,
+			DecisionKind: state.Orchestration.Ingress.DecisionKind,
+			Decision:     state.Orchestration.Ingress.Decision,
+			RunID:        event.RunID,
+			At:           event.At,
+			Summary:      triggerEventSummary(*event),
+			SourceRun:    "",
+			PayloadJSON:  payloadJSON,
+		})
+		if len(state.Orchestration.Events) > 32 {
+			state.Orchestration.Events = append([]OrchestrationEventState(nil), state.Orchestration.Events[len(state.Orchestration.Events)-32:]...)
+		}
+	}
+}
+
+func triggerEventSummary(event TriggerEvent) string {
+	parts := []string{string(event.Kind)}
+	if strings.TrimSpace(event.Trigger) != "" {
+		parts = append(parts, strings.TrimSpace(event.Trigger))
+	}
+	if decisionKind, ok := event.Payload["decision_kind"].(string); ok && strings.TrimSpace(decisionKind) != "" {
+		parts = append(parts, strings.TrimSpace(decisionKind))
+	}
+	return strings.Join(parts, ":")
 }
 
 func clonePendingMedia(in []map[string]string) []map[string]string {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -221,9 +222,9 @@ func TestEvolution_PromptPlanningNoPlanReminder(t *testing.T) {
 // ═══════════════════════════════════════════
 
 func TestEvolution_KIDistillHookFiltering(t *testing.T) {
-	saved := false
+	var saved atomic.Bool
 	mockStore := &mockKIStore{saveFn: func(title, summary, content string, tags, sources []string) error {
-		saved = true
+		saved.Store(true)
 		return nil
 	}}
 
@@ -249,12 +250,12 @@ func TestEvolution_KIDistillHookFiltering(t *testing.T) {
 		Mode:      "chat",
 	})
 	waitBrief()
-	if saved {
+	if saved.Load() {
 		t.Fatal("short session (<2 steps) should not trigger distillation")
 	}
 
 	// Meaningful session → SHOULD save
-	saved = false
+	saved.Store(false)
 	hook.OnRunComplete(context.TODO(), service.RunInfo{
 		SessionID:    "real",
 		Steps:        15,
@@ -268,7 +269,7 @@ func TestEvolution_KIDistillHookFiltering(t *testing.T) {
 		},
 	})
 	waitBrief()
-	if !saved {
+	if !saved.Load() {
 		t.Fatal("meaningful session (15 steps, chat mode) should trigger distillation")
 	}
 

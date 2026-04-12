@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -502,5 +503,113 @@ func TestRunSnapshotStore_RuntimeEventsAreAppendOnly(t *testing.T) {
 	}
 	if events[1].EventType != "child.completed" {
 		t.Fatalf("expected appended event to be preserved, got %#v", events[1])
+	}
+}
+
+func TestRunSnapshotStore_RoundTripsStructuredOrchestrationEvents(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "snapshots-runtime-events-structured.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open error: %v", err)
+	}
+
+	store := NewRunSnapshotStore(db)
+	now := time.Now().UTC().Round(time.Second)
+	snap := &graphruntime.RunSnapshot{
+		RunID:        "run-events-structured",
+		SessionID:    "session-events-structured",
+		GraphID:      "agent_loop",
+		GraphVersion: "v1alpha1",
+		Status:       graphruntime.NodeStatusWait,
+		TurnState: graphruntime.TurnState{
+			RunID: "run-events-structured",
+			Orchestration: graphruntime.OrchestrationState{
+				Ingress: graphruntime.IngressState{
+					Kind:         "decision",
+					Source:       "decision_apply",
+					Trigger:      "plan_review",
+					RunID:        "run-events-structured",
+					DecisionKind: "plan_review",
+					Decision:     "approved",
+				},
+				Events: []graphruntime.OrchestrationEventState{
+					{
+						Type:         "trigger.received",
+						Kind:         "decision",
+						Source:       "decision_apply",
+						Trigger:      "plan_review",
+						RunID:        "run-events-structured",
+						DecisionKind: "plan_review",
+						Decision:     "approved",
+						At:           now,
+						Summary:      "decision:plan_review",
+						PayloadJSON:  `{"decision":"approved"}`,
+					},
+					{
+						Type:        "barrier.timeout",
+						Kind:        "barrier",
+						Source:      "barrier",
+						Trigger:     "timeout",
+						RunID:       "run-events-structured",
+						BarrierID:   "barrier-structured",
+						At:          now.Add(time.Minute),
+						Summary:     "timeout",
+						PayloadJSON: `{"members":2}`,
+					},
+				},
+			},
+		},
+		ExecutionState: graphruntime.ExecutionState{
+			Status:     graphruntime.NodeStatusWait,
+			WaitReason: graphruntime.WaitReasonBarrier,
+		},
+		CreatedAt: now,
+		UpdatedAt: now.Add(time.Minute),
+	}
+	if err := store.Save(context.Background(), snap); err != nil {
+		t.Fatalf("Save error: %v", err)
+	}
+
+	loaded, err := store.LoadLatest(context.Background(), snap.RunID)
+	if err != nil {
+		t.Fatalf("LoadLatest error: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected loaded snapshot")
+	}
+	if loaded.TurnState.Orchestration.Ingress.DecisionKind != "plan_review" || loaded.TurnState.Orchestration.Ingress.Decision != "approved" {
+		t.Fatalf("expected ingress decision fields to round-trip, got %#v", loaded.TurnState.Orchestration.Ingress)
+	}
+	if len(loaded.TurnState.Orchestration.Events) != 2 {
+		t.Fatalf("expected 2 structured events, got %#v", loaded.TurnState.Orchestration.Events)
+	}
+	if loaded.TurnState.Orchestration.Events[0].DecisionKind != "plan_review" || loaded.TurnState.Orchestration.Events[0].PayloadJSON != `{"decision":"approved"}` {
+		t.Fatalf("expected trigger event decision fields to round-trip, got %#v", loaded.TurnState.Orchestration.Events[0])
+	}
+	if loaded.TurnState.Orchestration.Events[1].BarrierID != "barrier-structured" || loaded.TurnState.Orchestration.Events[1].Trigger != "timeout" {
+		t.Fatalf("expected barrier event fields to round-trip, got %#v", loaded.TurnState.Orchestration.Events[1])
+	}
+
+	sessionRuns, err := store.ListBySession(context.Background(), snap.SessionID)
+	if err != nil {
+		t.Fatalf("ListBySession error: %v", err)
+	}
+	if len(sessionRuns) != 1 || len(sessionRuns[0].TurnState.Orchestration.Events) != 2 {
+		t.Fatalf("expected session listing to retain structured events, got %#v", sessionRuns)
+	}
+
+	var records []RunEventRecord
+	if err := db.Where("run_id = ?", snap.RunID).Order("seq ASC").Find(&records).Error; err != nil {
+		t.Fatalf("load runtime event records: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 runtime event records, got %#v", records)
+	}
+	var persisted graphruntime.OrchestrationEventState
+	if err := json.Unmarshal([]byte(records[1].PayloadJSON), &persisted); err != nil {
+		t.Fatalf("unmarshal persisted runtime event payload: %v", err)
+	}
+	if persisted.BarrierID != "barrier-structured" || persisted.PayloadJSON != `{"members":2}` {
+		t.Fatalf("expected persisted event payload to keep structured fields, got %#v", persisted)
 	}
 }

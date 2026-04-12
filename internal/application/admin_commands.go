@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"context"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 )
@@ -95,4 +96,12 @@ func (a *AdminCommands) DeleteKI(id string) error {
 		return fmt.Errorf("KI store not configured or id empty")
 	}
 	return os.RemoveAll(filepath.Join(a.kiStore.BaseDir(), id))
+}
+
+func (a *AdminCommands) RefreshCapabilities(ctx context.Context) error {
+	if a.discovery == nil {
+		return fmt.Errorf("tool discovery service not configured")
+	}
+	a.discovery.Refresh(ctx)
+	return nil
 }

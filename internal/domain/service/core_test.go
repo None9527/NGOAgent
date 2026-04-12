@@ -216,6 +216,9 @@ func TestBarrierSnapshotReflectsMembers(t *testing.T) {
 	if len(events) != 1 || events[0].Type != "barrier.member_completed" || events[0].RunID != "run-a" {
 		t.Fatalf("expected barrier completion event recorded, got %#v", events)
 	}
+	if events[0].Kind != "barrier" || events[0].Source != "barrier" || events[0].Trigger != "member_completed" {
+		t.Fatalf("expected structured barrier completion event, got %#v", events[0])
+	}
 }
 
 func TestBarrierTimeoutRecordsOrchestrationEvent(t *testing.T) {
@@ -233,6 +236,9 @@ func TestBarrierTimeoutRecordsOrchestrationEvent(t *testing.T) {
 	}
 	if events[0].BarrierID == "" {
 		t.Fatalf("expected timeout event to carry barrier id, got %#v", events[0])
+	}
+	if events[0].Kind != "barrier" || events[0].Source != "barrier" || events[0].Trigger != "timeout" {
+		t.Fatalf("expected structured timeout event, got %#v", events[0])
 	}
 }
 

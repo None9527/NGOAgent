@@ -208,6 +208,7 @@ func (spawnYieldToolExec) Execute(_ context.Context, _ string, _ map[string]any)
 }
 
 func (spawnYieldToolExec) ListDefinitions() []llm.ToolDef { return nil }
+func (spawnYieldToolExec) Generation() int64              { return 0 }
 
 func TestHandleToolExec_SpawnYieldTransitionsToSpawn(t *testing.T) {
 	loop := NewAgentLoop(Deps{

@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 
@@ -127,6 +128,23 @@ func RegisterMCPTools(registry *Registry, manager *mcp.Manager) {
 		// Log summary, not per-tool (avoids log spam for large MCP servers)
 		_ = registered
 	}
+}
+
+// SyncMCPTools performs a full sync: removes all stale mcp__* tools from the
+// registry, then re-registers the current tool set from the MCP manager.
+// Use this after mcpMgr.Reload() to handle servers that were stopped/restarted.
+func SyncMCPTools(registry *Registry, manager *mcp.Manager) int {
+	// Phase 1: Remove all existing MCP tools (they may point to dead servers)
+	removed := registry.UnregisterByPrefix("mcp__")
+
+	// Phase 2: Re-register from current live server state
+	tools := manager.ListTools()
+	for _, t := range tools {
+		registry.Register(NewMCPToolAdapter(t, manager))
+	}
+
+	slog.Info(fmt.Sprintf("[mcp] SyncMCPTools: removed=%d, registered=%d", removed, len(tools)))
+	return len(tools)
 }
 
 // MCPDefs converts MCP tools to LLM tool definitions (for prompt/tool injection).

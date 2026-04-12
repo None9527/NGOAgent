@@ -1,7 +1,10 @@
 package application
 
 import (
+	"time"
+
 	"github.com/ngoclaw/ngoagent/internal/capability"
+	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	grpcserver "github.com/ngoclaw/ngoagent/internal/interfaces/grpc"
 	"github.com/ngoclaw/ngoagent/internal/interfaces/server"
 )
@@ -10,6 +13,7 @@ import (
 // Builder and transports can consume these capabilities directly without
 // coupling construction to the AgentAPI compatibility shell.
 type ApplicationServices struct {
+	kernel      *ApplicationKernel
 	chatService *ChatService
 	runtime     *RuntimeService
 	session     *SessionService
@@ -57,6 +61,11 @@ func (s *ApplicationServices) LegacyAPI() LegacyAPI {
 	return s.legacyFacade()
 }
 
+// Discovery returns the generic ToolDiscovery service.
+func (s *ApplicationServices) Discovery() service.ToolDiscovery {
+	return s.kernel.discovery
+}
+
 // HTTPTransport exports the capability set required by the HTTP transport.
 func (s *ApplicationServices) HTTPTransport() server.Capabilities {
 	return server.Capabilities{
@@ -74,5 +83,51 @@ func (s *ApplicationServices) GRPCTransport() grpcserver.Capabilities {
 		Chat:    s.Chat(),
 		Session: s.Session(),
 		Admin:   s.Admin(),
+	}
+}
+
+// Compile-time capability checks.
+var _ capability.Chat = (*ChatService)(nil)
+var _ capability.ChatControl = (*ChatService)(nil)
+var _ capability.Runtime = (*RuntimeService)(nil)
+var _ capability.Session = (*SessionService)(nil)
+var _ capability.Admin = (*AdminService)(nil)
+var _ capability.Cost = (*CostService)(nil)
+
+func newApplicationKernel(deps ApplicationDeps) *ApplicationKernel {
+	return &ApplicationKernel{
+		loop:            deps.Loop,
+		loopPool:        deps.LoopPool,
+		chatEngine:      deps.ChatEngine,
+		sessMgr:         deps.SessionMgr,
+		modelMgr:        deps.ModelMgr,
+		toolAdmin:       deps.ToolAdmin,
+		secHook:         deps.SecHook,
+		skillMgr:        deps.SkillMgr,
+		cronMgr:         deps.CronMgr,
+		mcpMgr:          deps.MCPMgr,
+		discovery:       deps.Discovery,
+		cfg:             deps.Config,
+		router:          deps.Router,
+		histQuery:       deps.HistQuery,
+		brainDir:        deps.BrainDir,
+		kiStore:         deps.KIStore,
+		sandboxMgr:      deps.SandboxMgr,
+		tokenUsageStore: deps.Wiring.TokenUsageStore,
+		runtimeStore:    deps.Wiring.RuntimeStore,
+		startedAt:       time.Now(),
+	}
+}
+
+func buildApplicationServices(kernel *ApplicationKernel) *ApplicationServices {
+	facades := newApplicationFacades(kernel)
+
+	return &ApplicationServices{
+		kernel:      kernel,
+		chatService: &ChatService{commands: facades.chatCommands, runtimeCommands: facades.runtimeCommands},
+		runtime:     &RuntimeService{commands: facades.runtimeCommands, queries: facades.runtimeQueries},
+		session:     &SessionService{commands: facades.sessionCommands, queries: facades.sessionQueries},
+		admin:       &AdminService{commands: facades.adminCommands, queries: facades.adminQueries},
+		cost:        &CostService{kernel: kernel},
 	}
 }

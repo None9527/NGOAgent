@@ -1,11 +1,12 @@
 // Package mcp provides a full MCP (Model Context Protocol) client implementation.
-// Protocol: JSON-RPC 2.0 over stdio with Content-Length framing (LSP-style).
+// Protocol: JSON-RPC 2.0 over stdio with JSON Lines framing (MCP 2024-11-05 spec).
 // Features: concurrent-safe routing, tool/resource/prompt discovery, change notifications,
 // auto-reconnect, and full content-type support (text, image, resource).
 package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -109,6 +109,7 @@ type ServerConfig struct {
 	Command string
 	Args    []string
 	Env     map[string]string
+	Cwd     string // Working directory for the server process (empty = inherit)
 }
 
 // ─── Server (per-process state) ───────────────────────────────────────────────
@@ -124,6 +125,7 @@ type Server struct {
 	Command string
 	Args    []string
 	Env     map[string]string
+	Cwd     string // Working directory for the server process
 
 	mu        sync.Mutex
 	cmd       *exec.Cmd
@@ -162,6 +164,11 @@ func NewManager() *Manager {
 
 // Start launches a named MCP server and discovers its capabilities.
 func (m *Manager) Start(ctx context.Context, name, command string, args []string, env map[string]string) error {
+	return m.StartWithCwd(ctx, name, command, args, env, "")
+}
+
+// StartWithCwd launches a named MCP server with a specific working directory.
+func (m *Manager) StartWithCwd(ctx context.Context, name, command string, args []string, env map[string]string, cwd string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -174,6 +181,7 @@ func (m *Manager) Start(ctx context.Context, name, command string, args []string
 		Command: command,
 		Args:    args,
 		Env:     env,
+		Cwd:     cwd,
 		pending: make(map[int]*pendingCall),
 	}
 	srv.onToolsChanged = func() { m.refreshServer(srv) }
@@ -205,7 +213,7 @@ func (m *Manager) Stop(name string) error {
 // StartAll launches all configured servers (best-effort, logs failures).
 func (m *Manager) StartAll(ctx context.Context, configs []ServerConfig) {
 	for _, cfg := range configs {
-		if err := m.Start(ctx, cfg.Name, cfg.Command, cfg.Args, cfg.Env); err != nil {
+		if err := m.StartWithCwd(ctx, cfg.Name, cfg.Command, cfg.Args, cfg.Env, cfg.Cwd); err != nil {
 			slog.Info(fmt.Sprintf("[mcp] Failed to start %q: %v", cfg.Name, err))
 		}
 	}
@@ -380,6 +388,11 @@ func (m *Manager) GetPrompt(ctx context.Context, serverName, promptName string, 
 func (m *Manager) spawnServer(ctx context.Context, srv *Server) error {
 	cmd := exec.CommandContext(ctx, srv.Command, srv.Args...)
 
+	// Set working directory if configured
+	if srv.Cwd != "" {
+		cmd.Dir = srv.Cwd
+	}
+
 	// Inherit parent environment + server-specific overrides
 	cmd.Env = os.Environ()
 	for k, v := range srv.Env {
@@ -455,55 +468,38 @@ func (m *Manager) refreshServer(srv *Server) {
 	}
 }
 
-// ─── Internal: LSP framing I/O ────────────────────────────────────────────────
+// ─── Internal: JSON Lines I/O (MCP 2024-11-05 spec) ──────────────────────────
 
-// writeRPC marshals a JSON-RPC message with Content-Length framing.
+// writeRPC marshals a JSON-RPC message as a single JSON line.
 func writeRPC(srv *Server, msg any) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(data))
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
-	if _, err := io.WriteString(srv.stdin, header); err != nil {
+	// JSON Lines: one complete JSON object per line
+	if _, err := srv.stdin.Write(data); err != nil {
 		return err
 	}
-	_, err = srv.stdin.Write(data)
+	_, err = io.WriteString(srv.stdin, "\n")
 	return err
 }
 
-// readFrame reads one Content-Length framed JSON-RPC message from the reader.
+// readFrame reads one JSON Lines message (one line = one JSON object).
 func readFrame(r *bufio.Reader) ([]byte, error) {
-	contentLength := -1
-	// Read headers
 	for {
-		line, err := r.ReadString('\n')
+		line, err := r.ReadBytes('\n')
 		if err != nil {
 			return nil, err
 		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break // empty line = end of headers
+		// Trim whitespace and skip empty lines
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
 		}
-		if strings.HasPrefix(strings.ToLower(line), "content-length:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				n, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-				if err == nil {
-					contentLength = n
-				}
-			}
-		}
+		return line, nil
 	}
-	if contentLength < 0 {
-		return nil, fmt.Errorf("missing Content-Length header")
-	}
-	buf := make([]byte, contentLength)
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return nil, err
-	}
-	return buf, nil
 }
 
 // ─── Internal: reader goroutine ──────────────────────────────────────────────

@@ -94,6 +94,14 @@ func (r *RuntimeService) ListRuntimeGraph(ctx context.Context, sessionID string)
 	return r.queries.ListRuntimeGraph(ctx, sessionID)
 }
 
+func (r *RuntimeService) ListRuntimeRunsByEvent(ctx context.Context, sessionID, eventType, trigger, barrierID string) ([]apitype.RuntimeRunInfo, error) {
+	return r.queries.ListRuntimeRunsByEvent(ctx, sessionID, eventType, trigger, barrierID)
+}
+
+func (r *RuntimeService) ListRuntimeGraphByEvent(ctx context.Context, sessionID, eventType, trigger, barrierID string) (apitype.OrchestrationGraphInfo, error) {
+	return r.queries.ListRuntimeGraphByEvent(ctx, sessionID, eventType, trigger, barrierID)
+}
+
 func (r *RuntimeService) ListChildRuns(ctx context.Context, parentRunID string) ([]apitype.RuntimeRunInfo, error) {
 	return r.queries.ListChildRuns(ctx, parentRunID)
 }
@@ -206,6 +214,14 @@ func (a *AdminService) ListMCPServers() ([]apitype.MCPServerInfo, error) {
 
 func (a *AdminService) ListMCPTools() ([]apitype.MCPToolInfo, error) {
 	return a.queries.ListMCPTools()
+}
+
+func (a *AdminService) ListCapabilities(ctx context.Context) []apitype.CapabilityInfo {
+	return a.queries.ListCapabilities(ctx)
+}
+
+func (a *AdminService) RefreshCapabilities(ctx context.Context) error {
+	return a.commands.RefreshCapabilities(ctx)
 }
 
 func (a *AdminService) Health() apitype.HealthResponse {

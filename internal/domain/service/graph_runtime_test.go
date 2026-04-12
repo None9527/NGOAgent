@@ -498,6 +498,9 @@ func TestGraphAdapterSyncToGraphState_PreservesOrchestrationEvents(t *testing.T)
 	if state.Orchestration.Events[0].BarrierID != "barrier-1" {
 		t.Fatalf("expected barrier id in orchestration event, got %#v", state.Orchestration.Events[0])
 	}
+	if state.Orchestration.Events[0].Kind != "barrier" || state.Orchestration.Events[0].Source != "barrier" || state.Orchestration.Events[0].Trigger != "member_completed" {
+		t.Fatalf("expected structured barrier event fields, got %#v", state.Orchestration.Events[0])
+	}
 }
 
 func TestGraphAdapterSyncToGraphState_SelectsLatestPendingApproval(t *testing.T) {

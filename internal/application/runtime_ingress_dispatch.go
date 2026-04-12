@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 
-	agenterr "github.com/ngoclaw/ngoagent/internal/domain/errors"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/interfaces/apitype"
 )
@@ -35,7 +34,7 @@ func (a *RuntimeCommands) dispatchRuntimeIngress(
 	case "reconnect":
 		return a.applyRuntimeIngressReconnect(ctx, req, facades)
 	default:
-		return apitype.RuntimeIngressInput{}, agenterr.NewValidation("ingress.kind", "unsupported ingress kind")
+		return apitype.RuntimeIngressInput{}, apitype.ValidateRuntimeIngressRequest(req)
 	}
 }
 
@@ -44,9 +43,6 @@ func (a *RuntimeCommands) applyRuntimeIngressMessage(
 	req apitype.RuntimeIngressRequest,
 	facades *applicationFacades,
 ) (apitype.RuntimeIngressInput, error) {
-	if strings.TrimSpace(req.Ingress.Message) == "" {
-		return apitype.RuntimeIngressInput{}, agenterr.NewValidation("ingress.message", "is required")
-	}
 	if err := facades.chatCommands.ChatStream(ctx, req.SessionID, req.Ingress.Message, req.Ingress.Mode, &service.Delta{}); err != nil {
 		return apitype.RuntimeIngressInput{}, err
 	}
@@ -55,9 +51,6 @@ func (a *RuntimeCommands) applyRuntimeIngressMessage(
 
 func (a *RuntimeCommands) applyRuntimeIngressDecision(ctx context.Context, req apitype.RuntimeIngressRequest) (apitype.RuntimeIngressInput, error) {
 	decision := apitype.NormalizeRuntimeDecisionInput(req.Ingress.Decision)
-	if strings.TrimSpace(decision.Decision) == "" {
-		return apitype.RuntimeIngressInput{}, agenterr.NewValidation("ingress.decision.decision", "is required")
-	}
 	runID := apitype.ResolveRuntimeRunID(req.Ingress.Run, req.Ingress.RunID)
 	resolvedKind, err := a.applyDecisionToRun(
 		ctx,

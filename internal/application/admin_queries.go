@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"context"
 
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
@@ -36,6 +37,26 @@ func (a *AdminQueries) ListTools() []apitype.ToolInfoResponse {
 	result := make([]apitype.ToolInfoResponse, len(tools))
 	for i, tool := range tools {
 		result[i] = apitype.ToolInfoResponse{Name: tool.Name, Enabled: tool.Enabled}
+	}
+	return result
+}
+
+func (a *AdminQueries) ListCapabilities(ctx context.Context) []apitype.CapabilityInfo {
+	if a.discovery == nil {
+		return nil
+	}
+	caps := a.discovery.ListCapabilities(ctx)
+	result := make([]apitype.CapabilityInfo, len(caps))
+	for i, c := range caps {
+		result[i] = apitype.CapabilityInfo{
+			Name:        c.Name,
+			Description: c.Description,
+			Category:    c.Category,
+			Source:      c.Source,
+			Tags:        c.Tags,
+			Version:     c.Version,
+			// omitting input schema mapping for brevity in API response unless requested
+		}
 	}
 	return result
 }

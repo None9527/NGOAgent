@@ -54,12 +54,18 @@ func runtimeSnapshotToInfo(snap *graphruntime.RunSnapshot) apitype.RuntimeRunInf
 				eventAt = event.At.UTC().Format(time.RFC3339)
 			}
 			info.Events = append(info.Events, apitype.RuntimeEventInfo{
-				Type:      event.Type,
-				RunID:     event.RunID,
-				SourceRun: event.SourceRun,
-				BarrierID: event.BarrierID,
-				At:        eventAt,
-				Summary:   event.Summary,
+				Type:         event.Type,
+				Kind:         event.Kind,
+				Source:       event.Source,
+				Trigger:      event.Trigger,
+				DecisionKind: event.DecisionKind,
+				Decision:     event.Decision,
+				RunID:        event.RunID,
+				SourceRun:    event.SourceRun,
+				BarrierID:    event.BarrierID,
+				At:           eventAt,
+				Summary:      event.Summary,
+				PayloadJSON:  event.PayloadJSON,
 			})
 		}
 	}

@@ -239,6 +239,12 @@ func TestRuntimePersistsIngressAcrossRunAndResume(t *testing.T) {
 	if waiting == nil || waiting.TurnState.Orchestration.Ingress.Kind != "message" {
 		t.Fatalf("expected waiting snapshot to persist message ingress, got %#v", waiting)
 	}
+	if len(waiting.TurnState.Orchestration.Events) != 1 || waiting.TurnState.Orchestration.Events[0].Type != "trigger.received" || waiting.TurnState.Orchestration.Events[0].Summary != "message:user_message" {
+		t.Fatalf("expected trigger event on waiting snapshot, got %#v", waiting.TurnState.Orchestration.Events)
+	}
+	if waiting.TurnState.Orchestration.Events[0].Kind != "message" || waiting.TurnState.Orchestration.Events[0].Source != "chat_stream" || waiting.TurnState.Orchestration.Events[0].Trigger != "user_message" {
+		t.Fatalf("expected structured trigger fields on waiting snapshot, got %#v", waiting.TurnState.Orchestration.Events[0])
+	}
 
 	resumed = true
 	resumeCtx := ctxutil.WithRuntimeIngress(context.Background(), ctxutil.RuntimeIngressMetadata{
@@ -256,6 +262,15 @@ func TestRuntimePersistsIngressAcrossRunAndResume(t *testing.T) {
 	}
 	if final == nil || final.TurnState.Orchestration.Ingress.Kind != "resume" || final.TurnState.Orchestration.Ingress.RunID != "run-ingress" {
 		t.Fatalf("expected final snapshot to persist resume ingress, got %#v", final)
+	}
+	if len(final.TurnState.Orchestration.Events) != 2 {
+		t.Fatalf("expected trigger history to persist across resume, got %#v", final.TurnState.Orchestration.Events)
+	}
+	if final.TurnState.Orchestration.Events[1].Type != "trigger.received" || final.TurnState.Orchestration.Events[1].Summary != "resume" {
+		t.Fatalf("expected resume trigger event, got %#v", final.TurnState.Orchestration.Events[1])
+	}
+	if final.TurnState.Orchestration.Events[1].Kind != "resume" || final.TurnState.Orchestration.Events[1].Source != "resume_run" {
+		t.Fatalf("expected structured resume trigger event, got %#v", final.TurnState.Orchestration.Events[1])
 	}
 }
 

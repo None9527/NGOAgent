@@ -44,6 +44,9 @@ func (a *AgentLoop) recordOrchestrationEvent(event graphruntime.OrchestrationEve
 func (a *AgentLoop) recordBarrierProgress(runID, barrierID, summary string) {
 	a.recordOrchestrationEvent(graphruntime.OrchestrationEventState{
 		Type:      "barrier.member_completed",
+		Kind:      "barrier",
+		Source:    "barrier",
+		Trigger:   "member_completed",
 		RunID:     runID,
 		BarrierID: barrierID,
 		At:        time.Now().UTC(),
@@ -54,6 +57,9 @@ func (a *AgentLoop) recordBarrierProgress(runID, barrierID, summary string) {
 func (a *AgentLoop) recordBarrierFinalized(barrierID, summary string) {
 	a.recordOrchestrationEvent(graphruntime.OrchestrationEventState{
 		Type:      "barrier.finalized",
+		Kind:      "barrier",
+		Source:    "barrier",
+		Trigger:   "finalized",
 		BarrierID: barrierID,
 		At:        time.Now().UTC(),
 		Summary:   summary,
@@ -63,6 +69,9 @@ func (a *AgentLoop) recordBarrierFinalized(barrierID, summary string) {
 func (a *AgentLoop) recordBarrierTimeout(barrierID, summary string) {
 	a.recordOrchestrationEvent(graphruntime.OrchestrationEventState{
 		Type:      "barrier.timeout",
+		Kind:      "barrier",
+		Source:    "barrier",
+		Trigger:   "timeout",
 		BarrierID: barrierID,
 		At:        time.Now().UTC(),
 		Summary:   summary,
@@ -107,11 +116,12 @@ func (a *AgentLoop) RegisterSpawnedChild(parentRunID, childRunID, taskName, agen
 		Kind:        "subagent_task",
 	})
 	a.orchestration.Events = append(a.orchestration.Events, graphruntime.OrchestrationEventState{
-		Type:      "child.spawned",
-		RunID:     childRunID,
-		SourceRun: parentRunID,
-		At:        time.Now().UTC(),
-		Summary:   taskName,
+		Type:        "child.spawned",
+		RunID:       childRunID,
+		SourceRun:   parentRunID,
+		At:          time.Now().UTC(),
+		Summary:     taskName,
+		PayloadJSON: string(raw),
 	})
 	if len(a.orchestration.Events) > 32 {
 		a.orchestration.Events = append([]graphruntime.OrchestrationEventState(nil), a.orchestration.Events[len(a.orchestration.Events)-32:]...)

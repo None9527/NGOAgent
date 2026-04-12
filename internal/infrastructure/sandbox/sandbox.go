@@ -27,14 +27,32 @@ type Result struct {
 type Process struct {
 	ID             string
 	Cmd            *exec.Cmd
-	Stdout         *bytes.Buffer
-	Stderr         *bytes.Buffer
+	Stdout         *processBuffer
+	Stderr         *processBuffer
 	StdinPipe      io.WriteCloser
 	Done           chan struct{}
 	ExitCode       int
 	StartedAt      time.Time
 	cancel         context.CancelFunc
 	lastReadOffset int // For incremental output
+	mu             sync.Mutex
+}
+
+type processBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *processBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *processBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // Manager manages sandboxed process execution.
@@ -135,8 +153,8 @@ func (m *Manager) RunBackground(ctx context.Context, id, command, cwd string) er
 	// Inject persistent env and cwd
 	m.State.InjectEnv(cmd, cwd)
 
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
+	stdout := &processBuffer{}
+	stderr := &processBuffer{}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -172,9 +190,13 @@ func (m *Manager) RunBackground(ctx context.Context, id, command, cwd string) er
 		err := cmd.Wait()
 		if err != nil {
 			if cmd.ProcessState != nil {
+				proc.mu.Lock()
 				proc.ExitCode = cmd.ProcessState.ExitCode()
+				proc.mu.Unlock()
 			} else {
+				proc.mu.Lock()
 				proc.ExitCode = 1
+				proc.mu.Unlock()
 			}
 		}
 		close(proc.Done)
@@ -244,6 +266,9 @@ func (m *Manager) GetStatusWithLimit(id string, waitSeconds int, maxChars int) (
 	// Extract output — incremental if maxChars > 0
 	fullStdout := proc.Stdout.String()
 	fullStderr := proc.Stderr.String()
+
+	proc.mu.Lock()
+	defer proc.mu.Unlock()
 
 	var outStdout, outStderr string
 	if maxChars > 0 {

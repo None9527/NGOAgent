@@ -92,6 +92,17 @@ type ToolInfoResponse struct {
 	Enabled bool   `json:"enabled"`
 }
 
+// CapabilityInfo represents an aggregated runtime capability (tool, skill, mcp).
+type CapabilityInfo struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Category    string   `json:"category"` // "builtin", "mcp", "skill"
+	Source      string   `json:"source"`   // server name for MCP, skill path for skills
+	InputSchema any      `json:"input_schema,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Version     string   `json:"version,omitempty"`
+}
+
 // SkillInfoResponse wraps skill info for API.
 type SkillInfoResponse struct {
 	Name        string `json:"name"`
@@ -192,12 +203,18 @@ type RuntimeBarrierInfo struct {
 }
 
 type RuntimeEventInfo struct {
-	Type      string `json:"type"`
-	RunID     string `json:"run_id,omitempty"`
-	SourceRun string `json:"source_run,omitempty"`
-	BarrierID string `json:"barrier_id,omitempty"`
-	At        string `json:"at,omitempty"`
-	Summary   string `json:"summary,omitempty"`
+	Type         string `json:"type"`
+	Kind         string `json:"kind,omitempty"`
+	Source       string `json:"source,omitempty"`
+	Trigger      string `json:"trigger,omitempty"`
+	DecisionKind string `json:"decision_kind,omitempty"`
+	Decision     string `json:"decision,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+	SourceRun    string `json:"source_run,omitempty"`
+	BarrierID    string `json:"barrier_id,omitempty"`
+	At           string `json:"at,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	PayloadJSON  string `json:"payload_json,omitempty"`
 }
 
 type RuntimeEdgeInfo struct {
@@ -243,6 +260,22 @@ type RuntimeIngressNodeInfo struct {
 	At           string `json:"at,omitempty"`
 }
 
+type RuntimeEventNodeInfo struct {
+	ID           string `json:"id"`
+	Type         string `json:"type"`
+	Kind         string `json:"kind,omitempty"`
+	Source       string `json:"source,omitempty"`
+	Trigger      string `json:"trigger,omitempty"`
+	DecisionKind string `json:"decision_kind,omitempty"`
+	Decision     string `json:"decision,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+	SourceRun    string `json:"source_run,omitempty"`
+	BarrierID    string `json:"barrier_id,omitempty"`
+	At           string `json:"at,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	PayloadJSON  string `json:"payload_json,omitempty"`
+}
+
 type RuntimeRunInfo struct {
 	RunID           string               `json:"run_id"`
 	ParentRunID     string               `json:"parent_run_id,omitempty"`
@@ -270,6 +303,7 @@ type OrchestrationGraphSummary struct {
 	PendingRuntimeControlRuns []string `json:"pending_runtime_control_run_ids,omitempty"`
 	RunCount                  int      `json:"run_count"`
 	IngressNodeCount          int      `json:"ingress_node_count"`
+	EventNodeCount            int      `json:"event_node_count"`
 	EdgeCount                 int      `json:"edge_count"`
 }
 
@@ -281,7 +315,9 @@ type OrchestrationGraphInfo struct {
 	PendingDecisionRunIDs     []string                  `json:"pending_decision_run_ids,omitempty"`
 	PendingRuntimeControlRuns []string                  `json:"pending_runtime_control_run_ids,omitempty"`
 	Summary                   OrchestrationGraphSummary `json:"summary"`
+	Capabilities              []CapabilityInfo          `json:"capabilities,omitempty"`
 	IngressNodes              []RuntimeIngressNodeInfo  `json:"ingress_nodes,omitempty"`
+	EventNodes                []RuntimeEventNodeInfo    `json:"event_nodes,omitempty"`
 	Nodes                     []RuntimeRunInfo          `json:"nodes"`
 	Edges                     []RuntimeEdgeInfo         `json:"edges,omitempty"`
 }

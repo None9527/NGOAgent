@@ -269,6 +269,11 @@ func (a *AgentLoop) activeToolDefs(all []llm.ToolDef) []llm.ToolDef {
 			active = append(active, t)
 			continue
 		}
+		// MCP tools are always included — they represent user-configured external capabilities
+		if strings.HasPrefix(t.Function.Name, "mcp__") {
+			active = append(active, t)
+			continue
+		}
 		if wantSearch {
 			switch t.Function.Name {
 			case "web_search", "web_fetch", "deep_research", "http_fetch":

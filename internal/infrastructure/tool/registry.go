@@ -4,7 +4,9 @@ package tool
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
@@ -31,6 +33,7 @@ type Registry struct {
 	tools        map[string]Tool
 	disabled     map[string]bool
 	workspaceDir string // Default workspace for resolving relative paths
+	generation   atomic.Int64 // Monotonic counter: bumps on Register/Unregister
 }
 
 // NewRegistry creates an empty tool registry.
@@ -69,6 +72,45 @@ func (r *Registry) Register(t Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tools[t.Name()] = t
+	r.generation.Add(1)
+}
+
+// Unregister removes a tool by name. Returns true if it existed.
+func (r *Registry) Unregister(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.tools[name]; !ok {
+		return false
+	}
+	delete(r.tools, name)
+	delete(r.disabled, name)
+	r.generation.Add(1)
+	return true
+}
+
+// UnregisterByPrefix removes all tools whose names start with prefix.
+// Returns the count of removed tools.
+func (r *Registry) UnregisterByPrefix(prefix string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for name := range r.tools {
+		if strings.HasPrefix(name, prefix) {
+			delete(r.tools, name)
+			delete(r.disabled, name)
+			count++
+		}
+	}
+	if count > 0 {
+		r.generation.Add(1)
+	}
+	return count
+}
+
+// Generation returns the current generation counter.
+// Callers can compare saved vs current to detect tool set changes.
+func (r *Registry) Generation() int64 {
+	return r.generation.Load()
 }
 
 // Get returns a tool by name.

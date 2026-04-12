@@ -653,13 +653,16 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions, excluded []
 	// Resolve per-model parameters (model_config > agent global > fallback)
 	mp := a.deps.Config.ResolveModelParams(model)
 
-	// Cache tool definitions — tools don't change during a session
+	// Tool definitions cache — invalidated when registry generation changes
+	// (MCP hot-reload, skill registration, etc.)
 	var toolDefs []llm.ToolDef
 	func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		if a.cachedToolDefs == nil {
+		currentGen := a.deps.ToolExec.Generation()
+		if a.cachedToolDefs == nil || a.cachedToolDefsGen != currentGen {
 			a.cachedToolDefs = a.deps.ToolExec.ListDefinitions()
+			a.cachedToolDefsGen = currentGen
 		}
 		toolDefs = a.activeToolDefs(a.cachedToolDefs)
 	}()

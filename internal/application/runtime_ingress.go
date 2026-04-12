@@ -55,3 +55,16 @@ func resolvedRuntimeRunID(run apitype.RuntimeRunTarget, fallback string) string 
 	}
 	return strings.TrimSpace(fallback)
 }
+
+func runtimeIngressStatus(req apitype.RuntimeIngressRequest) string {
+	switch req.Ingress.Kind {
+	case "decision":
+		return "applied"
+	case "resume":
+		return "resumed"
+	case "message", "reconnect":
+		return "completed"
+	default:
+		return "processed"
+	}
+}

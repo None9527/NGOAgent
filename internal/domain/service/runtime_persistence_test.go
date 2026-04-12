@@ -117,3 +117,104 @@ func TestHandleReconnect_WithPersistenceStore_PrefersPendingWaitOverCompletedRun
 		t.Fatalf("expected pending wait to win reconnect lookup, got %#v", delta.approvals)
 	}
 }
+
+func TestHandleReconnect_WithPersistenceStore_ReplaysPlanReviewAndPreservesStructuredEvents(t *testing.T) {
+	db, err := persistence.Open(filepath.Join(t.TempDir(), "runtime-reconnect-plan-review.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	store := persistence.NewRunSnapshotStore(db)
+	delta := &mockDeltaSink{}
+	loop := NewAgentLoop(Deps{SnapshotStore: store, Delta: delta})
+
+	now := time.Now().UTC().Round(time.Second)
+	waiting := &graphruntime.RunSnapshot{
+		RunID:        "run-persist-plan-review",
+		SessionID:    loop.SessionID(),
+		GraphID:      "agent_loop",
+		GraphVersion: "v1alpha1",
+		Status:       graphruntime.NodeStatusWait,
+		TurnState: graphruntime.TurnState{
+			RunID: "run-persist-plan-review",
+			Intelligence: graphruntime.IntelligenceState{
+				Planning: graphruntime.PlanningState{
+					Required:         true,
+					ReviewRequired:   true,
+					Trigger:          "resume_run",
+					MissingArtifacts: []string{"plan.md"},
+				},
+			},
+			Orchestration: graphruntime.OrchestrationState{
+				Ingress: graphruntime.IngressState{
+					Kind:    "message",
+					Source:  "chat_stream",
+					Trigger: "user_message",
+					RunID:   "run-persist-plan-review",
+				},
+				Events: []graphruntime.OrchestrationEventState{
+					{
+						Type:        "trigger.received",
+						Kind:        "message",
+						Source:      "chat_stream",
+						Trigger:     "user_message",
+						RunID:       "run-persist-plan-review",
+						At:          now,
+						Summary:     "message:user_message",
+						PayloadJSON: `{"message":"review plan"}`,
+					},
+					{
+						Type:        "barrier.timeout",
+						Kind:        "barrier",
+						Source:      "barrier",
+						Trigger:     "timeout",
+						RunID:       "run-persist-plan-review",
+						BarrierID:   "barrier-plan",
+						At:          now.Add(time.Minute),
+						Summary:     "timeout",
+						PayloadJSON: `{"members":1}`,
+					},
+				},
+			},
+		},
+		ExecutionState: graphruntime.ExecutionState{
+			Status:     graphruntime.NodeStatusWait,
+			WaitReason: graphruntime.WaitReasonUserInput,
+		},
+		CreatedAt: now,
+		UpdatedAt: now.Add(time.Minute),
+	}
+	if err := store.Save(context.Background(), waiting); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	handled, err := loop.HandleReconnect(context.Background())
+	if err != nil {
+		t.Fatalf("HandleReconnect: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected reconnect to replay plan review")
+	}
+	if len(delta.reviews) != 1 {
+		t.Fatalf("expected one replayed plan review, got %#v", delta.reviews)
+	}
+	if delta.reviews[0].message != "Planning trigger: resume_run" {
+		t.Fatalf("unexpected plan review message: %#v", delta.reviews[0])
+	}
+	if len(delta.reviews[0].paths) != 1 || delta.reviews[0].paths[0] != "plan.md" {
+		t.Fatalf("unexpected plan review paths: %#v", delta.reviews[0].paths)
+	}
+
+	reloaded, err := store.LoadLatest(context.Background(), waiting.RunID)
+	if err != nil {
+		t.Fatalf("LoadLatest: %v", err)
+	}
+	if reloaded == nil || len(reloaded.TurnState.Orchestration.Events) != 2 {
+		t.Fatalf("expected structured events to survive reconnect replay, got %#v", reloaded)
+	}
+	if reloaded.TurnState.Orchestration.Events[0].Type != "trigger.received" || reloaded.TurnState.Orchestration.Events[0].PayloadJSON != `{"message":"review plan"}` {
+		t.Fatalf("expected trigger event to remain intact, got %#v", reloaded.TurnState.Orchestration.Events[0])
+	}
+	if reloaded.TurnState.Orchestration.Events[1].BarrierID != "barrier-plan" || reloaded.TurnState.Orchestration.Events[1].Trigger != "timeout" {
+		t.Fatalf("expected barrier event to remain intact, got %#v", reloaded.TurnState.Orchestration.Events[1])
+	}
+}

@@ -493,6 +493,9 @@ func Build() (*App, error) {
 		}
 		configs := mcp.LoadMCPConfigs(config.HomeDir(), inline)
 		mcpMgr.Reload(context.Background(), configs)
+		// Re-sync MCP tools into registry (remove stale, add new).
+		// Registry generation counter bumps → AgentLoop cache auto-invalidates.
+		tool.SyncMCPTools(registry, mcpMgr)
 	})
 
 	cfgMgr.Subscribe("agent", func(old, new *config.Config) {
@@ -630,6 +633,7 @@ func Build() (*App, error) {
 		SkillMgr:   skillMgr,
 		CronMgr:    cronMgr,
 		MCPMgr:     mcpMgr,
+		Discovery:  toolDiscovery,
 		Config:     cfgMgr,
 		Router:     router,
 		HistQuery:  &historyAdapter{store: historyStore},

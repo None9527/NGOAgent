@@ -174,17 +174,21 @@ func TestEventBus_TimestampAutoFill(t *testing.T) {
 	bus := NewEventBus(WithBufferSize(8), WithWorkerCount(1))
 	defer bus.Close()
 
-	var capturedAt time.Time
+	capturedAt := make(chan time.Time, 1)
 	bus.Register(graphruntime.TriggerInternal, func(_ context.Context, event graphruntime.TriggerEvent) error {
-		capturedAt = event.At
+		capturedAt <- event.At
 		return nil
 	})
 
 	before := time.Now().UTC()
 	_ = bus.Dispatch(context.Background(), graphruntime.TriggerEvent{Kind: graphruntime.TriggerInternal})
-	time.Sleep(50 * time.Millisecond)
 
-	if capturedAt.Before(before) {
-		t.Errorf("auto-filled timestamp %v is before dispatch time %v", capturedAt, before)
+	select {
+	case got := <-capturedAt:
+		if got.Before(before) {
+			t.Errorf("auto-filled timestamp %v is before dispatch time %v", got, before)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for dispatched event")
 	}
 }

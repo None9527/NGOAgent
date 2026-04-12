@@ -27,6 +27,7 @@ import (
 type ToolExecutor interface {
 	Execute(ctx context.Context, name string, args map[string]any) (dtool.ToolResult, error)
 	ListDefinitions() []llm.ToolDef
+	Generation() int64 // Monotonic counter: changes when tools are added/removed
 }
 
 // DeltaSink receives streaming events from the engine.
@@ -166,7 +167,8 @@ type AgentLoop struct {
 	task                *TaskTracker        // Task state (step count, artifacts, plan status)
 	pendingMedia        []map[string]string // Multimodal media items pending injection
 	historyDirty        bool                // True after compact/truncate → triggers sanitize
-	cachedToolDefs      []llm.ToolDef       // Tool definitions cache (rebuilt on change)
+	cachedToolDefs      []llm.ToolDef       // Tool definitions cache (invalidated by generation counter)
+	cachedToolDefsGen   int64               // Registry generation when cache was built
 	tokenTracker        TokenTracker        // Hybrid API+estimate token tracking
 	compactCount        int                 // Consecutive compaction count (guards summary loss)
 	outputContinuations int                 // Auto-continue count when LLM output is truncated

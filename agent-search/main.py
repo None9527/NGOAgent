@@ -11,8 +11,13 @@ Pipeline:
     → Stage 2: LLM reranker (→ ranked, only for standard/deep)
     → Stage 3: concurrent stealth fetch (top N, only for deep)
     → Stage 4: algorithmic de-noising (only for deep)
+
+MCP Server:
+  python -m mcp_server --transport stdio   # stdio mode (MCP standard)
+  python -m mcp_server --transport http    # HTTP mode (Streamable HTTP)
 """
 
+import sys
 import logging
 from contextlib import asynccontextmanager
 
@@ -86,3 +91,24 @@ async def api_extract(req: ExtractRequest):
     and L2 (Camoufox stealth browser). Binary assets are cached locally.
     """
     return await extract_pipeline(req)
+
+
+def main():
+    """Entry point — supports FastAPI or MCP server modes."""
+    # Check for MCP mode before argparse
+    if "mcp" in sys.argv:
+        from mcp_server import main as mcp_main
+
+        # Remove 'mcp' from argv so mcp_server's argparse works
+        sys.argv.remove("mcp")
+        mcp_main()
+        return
+
+    # Default: start FastAPI server
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8890, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

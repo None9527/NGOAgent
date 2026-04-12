@@ -720,6 +720,16 @@ func TestApplyRuntimeIngress_RoutesResumeAndValidatesDecision(t *testing.T) {
 		t.Fatal("expected validation error for empty decision ingress")
 	}
 
+	_, err = api.ApplyRuntimeIngress(context.Background(), apitype.RuntimeIngressRequest{
+		SessionID: sessionID,
+		Ingress: apitype.RuntimeIngressInput{
+			Kind: "message",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected validation error for empty message ingress")
+	}
+
 	resumeResp, err := api.ApplyRuntimeIngress(context.Background(), apitype.RuntimeIngressRequest{
 		SessionID: sessionID,
 		Ingress: apitype.RuntimeIngressInput{
@@ -833,6 +843,9 @@ func TestApplyRuntimeIngress_AcceptsDecisionReasonFallback(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("ApplyRuntimeIngress decision: %v", err)
+	}
+	if resp.Ingress.Source != "decision_apply" || resp.Ingress.Trigger != "decision_apply" {
+		t.Fatalf("expected default ingress metadata in response, got %#v", resp.Ingress)
 	}
 	if resp.Ingress.Decision.Kind != "plan_review" || resp.Ingress.Decision.Feedback != "reason-only fallback" {
 		t.Fatalf("expected normalized decision contract in ingress response, got %#v", resp.Ingress.Decision)
@@ -1288,11 +1301,12 @@ func TestListRuntimeRunsAndChildRuns(t *testing.T) {
 					PayloadJSON: `{"task_name":"research"}`,
 				}},
 				Events: []graphruntime.OrchestrationEventState{{
-					Type:      "child.spawned",
-					RunID:     "run-child",
-					SourceRun: "run-parent",
-					At:        now,
-					Summary:   "research",
+					Type:        "child.spawned",
+					RunID:       "run-child",
+					SourceRun:   "run-parent",
+					At:          now,
+					Summary:     "research",
+					PayloadJSON: `{"task_name":"research"}`,
 				}},
 			},
 		},
@@ -1373,6 +1387,9 @@ func TestListRuntimeRunsAndChildRuns(t *testing.T) {
 	if len(children) != 1 || children[0].RunID != "run-child" || children[0].ParentRunID != "run-parent" {
 		t.Fatalf("expected child run listing, got %#v", children)
 	}
+	if len(runs[1].Events) != 1 || runs[1].Events[0].Type != "child.spawned" || runs[1].Events[0].PayloadJSON != `{"task_name":"research"}` {
+		t.Fatalf("expected runtime event payload projection, got %#v", runs[1].Events)
+	}
 
 	graph, err := api.ListRuntimeGraph(context.Background(), "session-runtime")
 	if err != nil {
@@ -1393,7 +1410,7 @@ func TestListRuntimeRunsAndChildRuns(t *testing.T) {
 	if len(graph.UserTurnRootRunIDs) != 0 {
 		t.Fatalf("expected no user-turn roots for runtime-control root, got %#v", graph.UserTurnRootRunIDs)
 	}
-	if graph.Summary.RunCount != 2 || graph.Summary.IngressNodeCount != 1 || graph.Summary.EdgeCount != 3 {
+	if graph.Summary.RunCount != 2 || graph.Summary.IngressNodeCount != 1 || graph.Summary.EventNodeCount != 1 || graph.Summary.EdgeCount != 5 {
 		t.Fatalf("expected graph summary counts, got %#v", graph.Summary)
 	}
 	if len(graph.Summary.PendingRuntimeControlRuns) != 1 || graph.Summary.PendingRuntimeControlRuns[0] != "run-parent" {
@@ -1402,19 +1419,31 @@ func TestListRuntimeRunsAndChildRuns(t *testing.T) {
 	if len(graph.IngressNodes) != 1 || graph.IngressNodes[0].ID != "ingress:resume:runtime_ingress:barrier_resume" {
 		t.Fatalf("expected ingress node layer, got %#v", graph.IngressNodes)
 	}
+	if len(graph.EventNodes) != 1 || graph.EventNodes[0].ID != "event:run-child:child.spawned:2023-11-14T22:16:40Z" {
+		t.Fatalf("expected event node layer, got %#v", graph.EventNodes)
+	}
+	if graph.EventNodes[0].PayloadJSON != `{"task_name":"research"}` {
+		t.Fatalf("expected event payload on graph node, got %#v", graph.EventNodes[0])
+	}
 	if graph.IngressNodes[0].Category != "runtime_control" || graph.IngressNodes[0].Phase != "resume" {
 		t.Fatalf("expected ingress taxonomy on graph node, got %#v", graph.IngressNodes[0])
 	}
-	if len(graph.Edges) != 3 {
-		t.Fatalf("expected ingress, parent-child and handoff edges, got %#v", graph.Edges)
+	if len(graph.Edges) != 5 {
+		t.Fatalf("expected ingress, event, event-source, parent-child and handoff edges, got %#v", graph.Edges)
 	}
-	if graph.Edges[0].Kind != "ingress" || graph.Edges[0].SourceRunID != "ingress:resume:runtime_ingress:barrier_resume" || graph.Edges[0].TargetRunID != "run-parent" {
+	if graph.Edges[0].Kind != "event" || graph.Edges[0].SourceRunID != "event:run-child:child.spawned:2023-11-14T22:16:40Z" || graph.Edges[0].TargetRunID != "run-parent" {
+		t.Fatalf("expected event edge, got %#v", graph.Edges)
+	}
+	if graph.Edges[1].Kind != "event_source" || graph.Edges[1].SourceRunID != "run-parent" || graph.Edges[1].TargetRunID != "event:run-child:child.spawned:2023-11-14T22:16:40Z" {
+		t.Fatalf("expected event-source edge, got %#v", graph.Edges)
+	}
+	if graph.Edges[2].Kind != "ingress" || graph.Edges[2].SourceRunID != "ingress:resume:runtime_ingress:barrier_resume" || graph.Edges[2].TargetRunID != "run-parent" {
 		t.Fatalf("expected ingress edge, got %#v", graph.Edges)
 	}
-	if graph.Edges[1].Kind != "parent_child" || graph.Edges[1].SourceRunID != "run-parent" || graph.Edges[1].TargetRunID != "run-child" {
+	if graph.Edges[3].Kind != "parent_child" || graph.Edges[3].SourceRunID != "run-parent" || graph.Edges[3].TargetRunID != "run-child" {
 		t.Fatalf("expected parent-child edge, got %#v", graph.Edges)
 	}
-	if graph.Edges[2].Kind != "subagent_task" || graph.Edges[2].SourceRunID != "run-parent" || graph.Edges[2].TargetRunID != "run-child" {
+	if graph.Edges[4].Kind != "subagent_task" || graph.Edges[4].SourceRunID != "run-parent" || graph.Edges[4].TargetRunID != "run-child" {
 		t.Fatalf("expected handoff edge, got %#v", graph.Edges)
 	}
 
@@ -1522,5 +1551,179 @@ func TestListRuntimeRuns_MapsLastDecisionContracts(t *testing.T) {
 	}
 	if runs[1].LastDecision.Decision != "accept" || runs[1].LastDecision.Reason != "answer is coherent" {
 		t.Fatalf("unexpected reflection decision info: %#v", runs[1].LastDecision)
+	}
+}
+
+func TestListRuntimeGraph_MapsBarrierEventNodes(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := persistence.RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	store := persistence.NewRunSnapshotStore(db)
+	now := time.Unix(1700000500, 0)
+
+	snap := &graphruntime.RunSnapshot{
+		RunID:        "run-barrier",
+		SessionID:    "session-barrier-graph",
+		GraphID:      "agent_loop",
+		GraphVersion: "v1alpha1",
+		Status:       graphruntime.NodeStatusWait,
+		TurnState: graphruntime.TurnState{
+			RunID: "run-barrier",
+			Orchestration: graphruntime.OrchestrationState{
+				Events: []graphruntime.OrchestrationEventState{{
+					Type:      "barrier.timeout",
+					Kind:      "barrier",
+					Source:    "barrier",
+					Trigger:   "timeout",
+					BarrierID: "barrier-9",
+					At:        now,
+					Summary:   "timed out",
+				}},
+			},
+		},
+		ExecutionState: graphruntime.ExecutionState{
+			Status:     graphruntime.NodeStatusWait,
+			WaitReason: graphruntime.WaitReasonBarrier,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.Save(context.Background(), snap); err != nil {
+		t.Fatalf("save barrier snapshot: %v", err)
+	}
+
+	api := newTestLegacyAPIWithWiring(
+		service.NewAgentLoop(service.Deps{}),
+		nil,
+		nil,
+		service.NewSessionManager(&stubSessionRepo{}),
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		llm.NewRouter(nil),
+		ServiceWiring{RuntimeStore: store},
+	)
+
+	graph, err := api.ListRuntimeGraph(context.Background(), "session-barrier-graph")
+	if err != nil {
+		t.Fatalf("ListRuntimeGraph: %v", err)
+	}
+	if len(graph.EventNodes) != 1 {
+		t.Fatalf("expected barrier event node, got %#v", graph.EventNodes)
+	}
+	if graph.EventNodes[0].Kind != "barrier" || graph.EventNodes[0].Source != "barrier" || graph.EventNodes[0].Trigger != "timeout" {
+		t.Fatalf("expected structured barrier event node, got %#v", graph.EventNodes[0])
+	}
+	if graph.EventNodes[0].BarrierID != "barrier-9" {
+		t.Fatalf("expected barrier id on event node, got %#v", graph.EventNodes[0])
+	}
+	if len(graph.Edges) != 1 || graph.Edges[0].Kind != "event" || graph.Edges[0].BarrierID != "barrier-9" {
+		t.Fatalf("expected barrier event edge, got %#v", graph.Edges)
+	}
+}
+
+func TestListRuntimeRunsByEventAndGraphByEvent(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := persistence.RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	store := persistence.NewRunSnapshotStore(db)
+	now := time.Unix(1700000600, 0)
+
+	barrierRun := &graphruntime.RunSnapshot{
+		RunID:        "run-barrier-event",
+		SessionID:    "session-event-filter",
+		GraphID:      "agent_loop",
+		GraphVersion: "v1alpha1",
+		Status:       graphruntime.NodeStatusWait,
+		TurnState: graphruntime.TurnState{
+			RunID: "run-barrier-event",
+			Orchestration: graphruntime.OrchestrationState{
+				Events: []graphruntime.OrchestrationEventState{{
+					Type:      "barrier.timeout",
+					Kind:      "barrier",
+					Source:    "barrier",
+					Trigger:   "timeout",
+					BarrierID: "barrier-x",
+					At:        now,
+					Summary:   "timed out",
+				}},
+			},
+		},
+		ExecutionState: graphruntime.ExecutionState{Status: graphruntime.NodeStatusWait, WaitReason: graphruntime.WaitReasonBarrier},
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	triggerRun := &graphruntime.RunSnapshot{
+		RunID:        "run-trigger-event",
+		SessionID:    "session-event-filter",
+		GraphID:      "agent_loop",
+		GraphVersion: "v1alpha1",
+		Status:       graphruntime.NodeStatusWait,
+		TurnState: graphruntime.TurnState{
+			RunID: "run-trigger-event",
+			Orchestration: graphruntime.OrchestrationState{
+				Events: []graphruntime.OrchestrationEventState{{
+					Type:    "trigger.received",
+					Kind:    "resume",
+					Source:  "resume_run",
+					Trigger: "resume_run",
+					RunID:   "run-trigger-event",
+					At:      now.Add(time.Minute),
+					Summary: "resume",
+				}},
+			},
+		},
+		ExecutionState: graphruntime.ExecutionState{Status: graphruntime.NodeStatusWait, WaitReason: graphruntime.WaitReasonUserInput},
+		CreatedAt:      now.Add(time.Minute),
+		UpdatedAt:      now.Add(time.Minute),
+	}
+	if err := store.Save(context.Background(), barrierRun); err != nil {
+		t.Fatalf("save barrier run: %v", err)
+	}
+	if err := store.Save(context.Background(), triggerRun); err != nil {
+		t.Fatalf("save trigger run: %v", err)
+	}
+
+	api := newTestLegacyAPIWithWiring(
+		service.NewAgentLoop(service.Deps{}),
+		nil,
+		nil,
+		service.NewSessionManager(&stubSessionRepo{}),
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		llm.NewRouter(nil),
+		ServiceWiring{RuntimeStore: store},
+	)
+
+	runs, err := api.ListRuntimeRunsByEvent(context.Background(), "session-event-filter", "barrier.timeout", "timeout", "barrier-x")
+	if err != nil {
+		t.Fatalf("ListRuntimeRunsByEvent: %v", err)
+	}
+	if len(runs) != 1 || runs[0].RunID != "run-barrier-event" {
+		t.Fatalf("expected barrier-filtered run, got %#v", runs)
+	}
+
+	graph, err := api.ListRuntimeGraphByEvent(context.Background(), "session-event-filter", "trigger.received", "resume_run", "")
+	if err != nil {
+		t.Fatalf("ListRuntimeGraphByEvent: %v", err)
+	}
+	if len(graph.Nodes) != 1 || graph.Nodes[0].RunID != "run-trigger-event" {
+		t.Fatalf("expected trigger-filtered graph, got %#v", graph)
+	}
+	if len(graph.EventNodes) != 1 || graph.EventNodes[0].Type != "trigger.received" {
+		t.Fatalf("expected trigger event node, got %#v", graph.EventNodes)
 	}
 }

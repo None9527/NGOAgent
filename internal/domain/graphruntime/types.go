@@ -188,12 +188,18 @@ type HandoffState struct {
 }
 
 type OrchestrationEventState struct {
-	Type      string
-	RunID     string
-	SourceRun string
-	BarrierID string
-	At        time.Time
-	Summary   string
+	Type         string
+	Kind         string
+	Source       string
+	Trigger      string
+	DecisionKind string
+	Decision     string
+	RunID        string
+	SourceRun    string
+	BarrierID    string
+	At           time.Time
+	Summary      string
+	PayloadJSON  string
 }
 
 type IngressState struct {
