@@ -2,35 +2,20 @@
 package application
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"strings"
 
-	"github.com/google/uuid"
 	"github.com/ngoclaw/ngoagent/internal/domain/a2a"
-	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/cron"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm/anthropic"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm/google"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm/openai"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/mcp"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/memory"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/notify" // P3 M1
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/persistence"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/prompt"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/sandbox"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/security"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/tool"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/workspace"
 	grpcserver "github.com/ngoclaw/ngoagent/internal/interfaces/grpc"
 	"github.com/ngoclaw/ngoagent/internal/interfaces/server"
 	"gorm.io/gorm"
@@ -55,9 +40,9 @@ type App struct {
 	MCPMgr       *mcp.Manager
 	SkillMgr     *skill.Manager
 	SecurityHook *security.Hook
-	SpawnTool    *tool.SpawnAgentTool // exposed for server-side EventPusher wiring
-	EventBus     *service.EventBus           // R3: event-driven orchestration
-	A2AHandler   *a2a.Handler                // R3: Agent-to-Agent protocol
+	SpawnTool    *tool.SpawnAgentTool             // exposed for server-side EventPusher wiring
+	EventBus     *service.EventBus                // R3: event-driven orchestration
+	A2AHandler   *a2a.Handler                     // R3: Agent-to-Agent protocol
 	Discovery    *service.AggregatedToolDiscovery // R3: dynamic tool capability
 	StopCh       chan struct{}
 }
@@ -67,448 +52,98 @@ func Build() (*App, error) {
 	// ═══════════════════════════════════════════
 	// Phase 1: Foundation
 	// ═══════════════════════════════════════════
-	if err := config.Bootstrap(); err != nil {
-		slog.Info(fmt.Sprintf("Warning: bootstrap: %v", err))
-	}
-	cfgMgr := config.NewManager(config.ConfigPath())
-	cfg := cfgMgr.Get()
-
-	dbPath := config.ResolvePath(cfg.Storage.DBPath)
-	db, err := persistence.Open(dbPath)
+	foundation, err := assembleFoundation()
 	if err != nil {
 		return nil, err
 	}
-	repo := persistence.NewRepository(db)
-	historyStore := persistence.NewHistoryStore(db)
-	snapshotStore := persistence.NewRunSnapshotStore(db)
-	evoStore := persistence.NewEvoStore(db)               // Evo tables: evo_traces, evo_evaluations, evo_repairs
-	transcriptStore := persistence.NewTranscriptStore(db) // P2 F1: subagent transcripts
-
-	// SubAgent v2: Agent Definition Registry
-	agentRegistry := service.NewAgentRegistry()
-	// Load built-in agent definitions from agents/built-in/
-	exePath, _ := os.Executable()
-	builtInDir := filepath.Join(filepath.Dir(exePath), "agents", "built-in")
-	if _, err := os.Stat(builtInDir); os.IsNotExist(err) {
-		// Fallback: try relative to CWD (dev mode)
-		if cwd, err := os.Getwd(); err == nil {
-			builtInDir = filepath.Join(cwd, "agents", "built-in")
-		}
-	}
-	if err := agentRegistry.LoadFromDir(builtInDir, "built-in"); err != nil {
-		slog.Info(fmt.Sprintf("Warning: agent registry load: %v", err))
-	}
+	cfgMgr := foundation.cfgMgr
+	cfg := foundation.cfg
+	db := foundation.db
+	repo := foundation.repo
+	historyStore := foundation.historyStore
+	snapshotStore := foundation.snapshotStore
+	evoStore := foundation.evoStore
+	transcriptStore := foundation.transcriptStore
+	agentRegistry := foundation.agentRegistry
 
 	// ═══════════════════════════════════════════
 	// Phase 2: Core Infrastructure
 	// ═══════════════════════════════════════════
-	var providers []llm.Provider
-	for _, pd := range cfg.LLM.Providers {
-		provType := pd.Type
-		if provType == "" {
-			provType = "openai"
-		}
-		baseURL := pd.BaseURL
-		if preset, ok := llm.GetPresetProvider(provType); ok {
-			if baseURL == "" {
-				baseURL = preset.DefaultBaseURL
-			}
-		}
-
-		switch provType {
-		case "anthropic":
-			providers = append(providers, anthropic.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models))
-		case "google":
-			providers = append(providers, google.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models))
-		default:
-			// Fallback to OpenAI-compatible client natively for (DashScope, Volcengine, Mistral, Ollama, DeepSeek, etc.)
-			cli := openai.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models)
-			if provType == "dashscope" {
-				cli.SetExtraHeaders(map[string]string{"X-DashScope-Session-Cache": "enable"}) // implicitly enable cache for qwen
-			}
-			providers = append(providers, cli)
-		}
-	}
-	router := llm.NewRouter(providers)
-	// Apply configured default model (without this, router uses first provider's first model)
-	if cfg.Agent.DefaultModel != "" {
-		if err := router.SetDefault(cfg.Agent.DefaultModel); err != nil {
-			slog.Info(fmt.Sprintf("Warning: default_model %q not found in providers, using fallback", cfg.Agent.DefaultModel))
-		}
-	}
-
-	// P3 J3: Initialize global telemetry collector
-	llm.GlobalTelemetry = llm.NewTelemetryCollector()
-
-	homeDir := config.HomeDir()
-	promptEngine := prompt.NewEngineWithHome(homeDir)
-	// Resolve workspace path (~ → home dir) and ensure it exists
-	workspaceDir := cfg.Agent.Workspace
-	if strings.HasPrefix(workspaceDir, "~") {
-		if h, err := os.UserHomeDir(); err == nil {
-			workspaceDir = h + workspaceDir[1:]
-		}
-	}
-	if workspaceDir != "" {
-		os.MkdirAll(workspaceDir, 0755)
-	}
-	sbMgr := sandbox.NewManager(workspaceDir)
-	cfg.Security.Workspace = workspaceDir // Inject resolved workspace path for safe-zone checks
-	secHook := security.NewHook(&cfg.Security)
-
-	// P3 K1: Wire AI Safety Classifier strategy (pattern | llm | hybrid)
-	if mode := cfg.Security.ClassifierMode; mode == "llm" || mode == "hybrid" {
-		// Use first available LLM provider for classifier (prefer small/fast models)
-		clsModel := cfg.Security.ClassifierModel
-		if clsModel == "" {
-			clsModel = cfg.Agent.DefaultModel // fallback to default model
-		}
-		if len(providers) > 0 {
-			clsProvider := providers[0] // first provider
-			cls := security.NewClassifier(mode, secHook, clsProvider, clsModel)
-			secHook.SetClassifier(cls)
-			slog.Info(fmt.Sprintf("[security] classifier strategy: %s (model: %s)", mode, clsModel))
-		}
-	}
+	core := assembleCoreInfrastructure(cfg)
+	router := core.router
+	promptEngine := core.promptEngine
+	workspaceDir := core.workspaceDir
+	sbMgr := core.sandboxMgr
+	secHook := core.securityHook
 
 	// ═══════════════════════════════════════════
 	// Phase 3: Storage Layer
 	// ═══════════════════════════════════════════
-	// Default session ID: fixed identifier for the CLI/fallback loop.
-	// Web sessions use LoopPool with per-conversation UUIDs from the DB.
-	// Previously used generateSessionID() (random UUID), which created
-	// "ghost sessions" — unregistered in conversations table.
-	sessionID := "__default__"
-	brainDir := config.ResolvePath(cfg.Storage.BrainDir)
-	brainStore := brain.NewArtifactStore(brainDir, sessionID)
-
-	kiDir := config.ResolvePath(cfg.Storage.KnowledgeDir)
-	kiStore := knowledge.NewStore(kiDir)
-
-	// KI Embedding pipeline — only if provider is configured
-	var kiRetriever *knowledge.Retriever
-	if cfg.Embedding.Provider != "" && cfg.Embedding.BaseURL != "" {
-		dims := cfg.Embedding.Dimensions
-		if dims == 0 {
-			dims = 1024
-		}
-		embedder := knowledge.NewDashScopeEmbedder(
-			cfg.Embedding.BaseURL, cfg.Embedding.APIKey,
-			cfg.Embedding.Model, dims,
-		)
-		vecIndex := knowledge.NewVectorIndex(dims, filepath.Join(kiDir, "index"))
-		if err := vecIndex.Load(); err != nil {
-			slog.Info(fmt.Sprintf("Warning: vector index load: %v", err))
-		}
-		kiRetriever = knowledge.NewRetriever(kiStore, embedder, vecIndex)
-		if err := kiRetriever.BuildIndex(); err != nil {
-			slog.Info(fmt.Sprintf("Warning: KI index build: %v", err))
-		}
-		slog.Info(fmt.Sprintf("[ki] Embedding pipeline active: provider=%s model=%s dims=%d",
-			cfg.Embedding.Provider, cfg.Embedding.Model, dims))
-	}
-
-	// Memory store — reuses same embedder as KI for vector conversation memory
-	var memStore *memory.Store
-	if cfg.Embedding.Provider != "" && cfg.Embedding.BaseURL != "" {
-		dims := cfg.Embedding.Dimensions
-		if dims == 0 {
-			dims = 1024
-		}
-		memEmbedder := knowledge.NewDashScopeEmbedder(
-			cfg.Embedding.BaseURL, cfg.Embedding.APIKey,
-			cfg.Embedding.Model, dims,
-		)
-		memDir := filepath.Join(brainDir, "memory_vec")
-		memCfg := memory.StoreConfig{
-			HalfLifeDays: cfg.Memory.HalfLifeDays,
-			MaxFragments: cfg.Memory.MaxFragments,
-		}
-		memStore = memory.NewStore(memEmbedder, memDir, memCfg)
-		slog.Info(fmt.Sprintf("[memory] Vector memory active: dir=%s halfLife=%d maxFrag=%d",
-			memDir, memCfg.HalfLifeDays, memCfg.MaxFragments))
-	}
-
-	// Diary store — daily markdown entries under memory/diary/
-	diaryDir := filepath.Join(config.HomeDir(), "memory", "diary")
-	diaryStore := memory.NewDiaryStore(diaryDir)
-	slog.Info(fmt.Sprintf("[diary] Diary store active: dir=%s", diaryDir))
-
-	workDir := workspaceDir
-	if workDir == "" {
-		workDir, _ = os.Getwd()
-	}
-	wsStore := workspace.NewStore(workDir)
-
-	// FileHistory: snapshot-based file edit rollback
-	fileHistory := workspace.NewFileHistory(workDir, sessionID)
-	slog.Info(fmt.Sprintf("[file-history] initialized: dir=%s session=%s", fileHistory.BaseDir(), sessionID))
-
-	skillsDir := config.ResolvePath(cfg.Storage.SkillsDir)
-	skillMgr := skill.NewManager(skillsDir)
-	skillMgr.RegisterBundled() // P1 #49: load built-in recovery skills
-
-	mcpMgr := mcp.NewManager()
+	storage := assembleStorage(cfg, workspaceDir)
+	sessionID := storage.sessionID
+	brainDir := storage.brainDir
+	brainStore := storage.brainStore
+	kiStore := storage.kiStore
+	kiRetriever := storage.kiRetriever
+	memStore := storage.memStore
+	diaryStore := storage.diaryStore
+	wsStore := storage.workspaceStore
+	fileHistory := storage.fileHistory
+	skillMgr := storage.skillMgr
+	mcpMgr := storage.mcpMgr
 
 	// ═══════════════════════════════════════════
 	// Phase 4: Tool Registration
 	// ═══════════════════════════════════════════
-	registry := tool.NewRegistry()
-	registry.SetWorkspaceDir(workspaceDir) // Resolve relative paths against workspace
-	registry.Register(&tool.ReadFileTool{})
-	registry.Register(&tool.WriteFileTool{FileHistory: fileHistory})
-	registry.Register(&tool.EditFileTool{FileHistory: fileHistory})
-	registry.Register(&tool.GlobTool{})
-	registry.Register(&tool.GrepSearchTool{})
-	registry.Register(tool.NewRunCommandTool(sbMgr))
-	registry.Register(tool.NewCommandStatusTool(sbMgr))
-	// All web tools route through the agent-search pipeline (unified endpoint)
-	agentSearchURLB := cfg.Search.Endpoint
-	registry.Register(tool.NewWebSearchTool(agentSearchURLB))
-	registry.Register(tool.NewWebFetchTool(agentSearchURLB))
-	registry.Register(tool.NewDeepResearchTool(agentSearchURLB))
-	registry.Register(tool.NewTaskPlanTool(brainDir))
-	registry.Register(tool.NewTaskBoundaryTool())
-	registry.Register(tool.NewNotifyUserTool())
-	registry.Register(&tool.UpdateProjectContextTool{})
-	registry.Register(tool.NewSaveKnowledgeTool(kiStore, kiRetriever, cfg.Embedding.SimilarityThreshold))
-	registry.Register(tool.NewRecallTool(kiRetriever, memStore, diaryStore))
-	registry.Register(tool.NewSendMessageTool(brainDir))
-	registry.Register(tool.NewTaskListTool(brainDir))
-	spawnTool := tool.NewSpawnAgentTool(nil) // Lazy: SpawnFunc set after loop creation
-	registry.Register(spawnTool)
-	skillTool := tool.NewSkillTool(skillMgr) // Lazy: SpawnFunc set after loop creation
-	registry.Register(skillTool)
-	registry.Register(tool.NewEvoTool("/tmp/ngoagent-evo", sbMgr))
-	brainArtifactTool := tool.NewBrainArtifactTool(nil) // Lazy: Brain set per-session
-	registry.Register(brainArtifactTool)
-	registry.Register(tool.NewUndoEditTool(fileHistory))
-	// P1-D #71: Git integration tools
-	registry.Register(&tool.GitStatusTool{})
-	registry.Register(&tool.GitDiffTool{})
-	registry.Register(&tool.GitLogTool{})
-	registry.Register(&tool.GitCommitTool{})
-	registry.Register(&tool.GitBranchTool{})
-	// Multimodal: view_media tool for native VLM perception
-	viewMediaAddr := fmt.Sprintf("http://localhost:%d", cfg.Server.HTTPPort)
-	if cfg.Server.HTTPPort == 0 {
-		viewMediaAddr = "http://localhost:19996"
-	}
-	registry.Register(tool.NewViewMediaTool(viewMediaAddr))
-	// P3 M2 (#45): 6 new tools — expands tool matrix to CC parity
-	registry.Register(&tool.TreeTool{})
-	registry.Register(&tool.FindFilesTool{})
-	registry.Register(&tool.CountLinesTool{})
-	registry.Register(&tool.DiffFilesTool{})
-	registry.Register(tool.NewHTTPFetchTool())
-	registry.Register(&tool.ClipboardTool{})
+	tools := assembleBuiltinTools(cfg, workspaceDir, brainDir, fileHistory, sbMgr, kiStore, kiRetriever, memStore, diaryStore, skillMgr)
+	registry := tools.registry
+	spawnTool := tools.spawn
+	skillTool := tools.skill
 	// manage_cron tool is registered after CronManager creation (Phase 7)
 
 	// ═══════════════════════════════════════════
 	// Phase 5: Engine + Facades (unified via LoopFactory)
 	// ═══════════════════════════════════════════
-	// PostRun hooks: KI distillation after meaningful sessions
-	kiDistiller := llm.NewKnowledgeDistiller(router)
-	var dedupChecker service.KIDuplicateChecker
-	if kiRetriever != nil {
-		dedupChecker = kiRetriever
-	}
-	hookChain := service.NewHookManager()
-	hookChain.Add(service.NewKIDistillHook(func() service.KIStore { return kiStore }, kiDistiller, cfg.Embedding.SimilarityThreshold, dedupChecker))
-	hookChain.AddToolHook(service.NewAuditHook())
-	hookChain.AddCompactHook(service.NewCompactAuditHook())
-	if memStore != nil {
-		hookChain.AddCompactHook(service.NewMemoryCompactHook(memStore, sessionID, dedupChecker))
-		// Phase 3: Real-time memory sink — save after every run, not just compaction
-		hookChain.Add(service.NewMemoryPostRunHook(memStore, dedupChecker))
-	}
-	// Diary hook: record run summary to daily diary after each session
-	hookChain.Add(service.NewDiaryHook(&diaryAdapter{store: diaryStore}))
-	// NOTE: TraceCollectorHook is per-loop (created in NewAgentLoop), NOT global.
-
-	// Evo evaluator + repair router (nil-safe: if EvoConfig disabled, these are inert)
-	var evoEvaluator *service.EvoEvaluator
-	var evoRepairRouter *service.RepairRouter
-	if cfg.Evo.AutoEval {
-		evalModel := cfg.Evo.EvalModel
-		if evalModel == "" {
-			evalModel = cfg.Agent.DefaultModel
-		}
-		if evalProvider, err := router.Resolve(evalModel); err == nil {
-			evoEvaluator = service.NewEvoEvaluator(evalProvider, cfg.Evo, evoStore)
-			evoRepairRouter = service.NewRepairRouter(cfg.Evo, evoStore)
-			slog.Info(fmt.Sprintf("[evo] Evaluator active: model=%s threshold=%.1f maxRetries=%d",
-				evalModel, cfg.Evo.ScoreThreshold, cfg.Evo.MaxRetries))
-		} else {
-			slog.Info(fmt.Sprintf("[evo] Warning: eval model %q not found, evo disabled: %v", evalModel, err))
-		}
-	}
-
-	baseDeps := service.Deps{
-		Config:          cfg,
-		LLMRouter:       router,
-		PromptEngine:    promptEngine,
-		ToolExec:        registry,
-		Security:        &securityAdapter{hook: secHook},
-		Delta:           &service.Delta{}, // Overridden per-channel
-		Brain:           brainStore,
-		KIStore:         kiStore,
-		KIRetriever:     kiRetriever,
-		Workspace:       wsStore,
-		SkillMgr:        skillMgr,
-		HistoryStore:    &historyAdapter{store: historyStore},
-		FileHistory:     fileHistory,
-		Hooks:           hookChain,
-		MemoryStore:     memStore,
-		SnapshotStore:   snapshotStore,
-		EvoEvaluator:    evoEvaluator,
-		EvoRepairRouter: evoRepairRouter,
-		EvoStore:        evoStore,
-		WebhookHook:     buildWebhookHook(cfg, sessionID),
-	}
-	factory := service.NewLoopFactory(baseDeps, 8) // max 8 concurrent runs
-
-	// Main chat loop (backward-compat: server still uses loop directly)
-	delta := &service.Delta{}
-	loop := service.NewAgentLoop(baseDeps)
-	loop.SetDelta(delta)
-
-	// Wire SpawnFunc via factory — creates async subagent loops with barrier coordination
-	// IMPORTANT: loopPool is declared here as a pointer so the SpawnFunc closure can capture it
-	// by reference. It must be assigned BEFORE any SpawnFunc call (which only happens at runtime).
-	var loopPool *service.LoopPool
-
-	orchestrator := service.NewSubagentOrchestrator(factory, loop, func(runtimeSID string) *service.AgentLoop {
-		if loopPool != nil {
-			if parentLoop := loopPool.GetIfExists(runtimeSID); parentLoop != nil {
-				return parentLoop
-			}
-		}
-		return loop
-	}, agentRegistry)
-	orchestrator.SetEventPusher(spawnTool.EventPusher)
-	orchestrator.SetMaxSubagents(cfg.Agent.MaxSubagents)
-	if transcriptStore != nil {
-		orchestrator.SetTranscriptSaver(func(sessionID, taskName, runID, status, output string) error {
-			return transcriptStore.SaveSimple(sessionID, taskName, runID, status, output)
-		})
-	}
-	spawnTool.SetSpawnFunc(func(ctx context.Context, task, taskName, agentType string) (string, error) {
-		orchestrator.SetEventPusher(spawnTool.EventPusher)
-		return orchestrator.Spawn(ctx, sessionID, task, taskName, agentType)
+	engine := assembleEngine(engineAssemblyInput{
+		cfg:             cfg,
+		sessionID:       sessionID,
+		brainDir:        brainDir,
+		router:          router,
+		promptEngine:    promptEngine,
+		registry:        registry,
+		secHook:         secHook,
+		sbMgr:           sbMgr,
+		brainStore:      brainStore,
+		kiStore:         kiStore,
+		kiRetriever:     kiRetriever,
+		wsStore:         wsStore,
+		skillMgr:        skillMgr,
+		historyStore:    historyStore,
+		fileHistory:     fileHistory,
+		memStore:        memStore,
+		diaryStore:      diaryStore,
+		snapshotStore:   snapshotStore,
+		evoStore:        evoStore,
+		transcriptStore: transcriptStore,
+		repo:            repo,
+		agentRegistry:   agentRegistry,
+		spawnTool:       spawnTool,
+		skillTool:       skillTool,
 	})
-	// Wire same SpawnFunc to skillTool for fork-mode skill execution
-	skillTool.SetSpawnFunc(spawnTool.GetSpawnFunc())
-
-	// Sprint 1-1 / 2-2 / 3-1: Wire runtime context for conditional tool descriptions
-	hasGit := false
-	if cwd, err := os.Getwd(); err == nil {
-		if _, err := os.Stat(filepath.Join(cwd, ".git")); err == nil {
-			hasGit = true
-		}
-	}
-	spawnTool.ToolCtx = prompttext.ToolContext{
-		HasGit:     hasGit,
-		HasSandbox: sbMgr != nil,
-		SkillCount: len(skillMgr.List()),
-		HasBrain:   brainDir != "",
-	}
-	if brainDir != "" {
-		spawnTool.ScratchDir = filepath.Join(brainDir, sessionID, "scratchpad")
-	}
-	// SubAgent v2: populate agent_type enum from registry
-	spawnTool.SetAgentTypes(agentRegistry.TypeNames())
-
-	// Per-session loop pool (uses factory baseDeps)
-	// NOTE: must be assigned AFTER spawnTool.SetSpawnFunc so the closure captures the pointer correctly.
-	loopPool = service.NewLoopPool(func(sid string) *service.AgentLoop {
-		return service.NewAgentLoop(baseDeps)
-	}, brainDir)
-
-	sessMgr := service.NewSessionManager(&sessionRepoAdapter{repo: repo, loc: cfg.LoadLocation()})
-	chatEngine := service.NewChatEngine(loopPool, sessMgr, &historyAdapter{store: historyStore})
-	modelMgr := service.NewModelManager(router)
-	toolAdmin := service.NewToolAdmin(&toolRegistryAdapter{reg: registry})
-
-	// Register TitleDistillHook after sessMgr is available
-	hookChain.Add(service.NewTitleDistillHook(
-		llm.NewTitleDistiller(router),
-		sessMgr,
-	))
-
-	// MarkReady: transition .state.json from "new" → "ready" after first conversation
-	if !config.IsBootstrapped() {
-		hookChain.Add(&bootstrapReadyHook{})
-	}
+	baseDeps := engine.baseDeps
+	factory := engine.factory
+	loop := engine.loop
+	loopPool := engine.loopPool
+	sessMgr := engine.sessionMgr
+	chatEngine := engine.chatEngine
+	modelMgr := engine.modelMgr
+	toolAdmin := engine.toolAdmin
 
 	// ═══════════════════════════════════════════
 	// Phase 6: Hot-Reload Subscriptions
 	// ═══════════════════════════════════════════
-	cfgMgr.Subscribe("llm", func(old, new *config.Config) {
-		slog.Info(fmt.Sprint("[hot-reload] LLM config changed, rebuilding providers"))
-		var newProviders []llm.Provider
-		for _, pd := range new.LLM.Providers {
-			provType := pd.Type
-			if provType == "" {
-				provType = "openai"
-			}
-			baseURL := pd.BaseURL
-			if preset, ok := llm.GetPresetProvider(provType); ok {
-				if baseURL == "" {
-					baseURL = preset.DefaultBaseURL
-				}
-			}
-
-			switch provType {
-			case "anthropic":
-				newProviders = append(newProviders, anthropic.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models))
-			case "google":
-				newProviders = append(newProviders, google.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models))
-			default:
-				cli := openai.NewClient(pd.Name, baseURL, pd.APIKey, pd.Models)
-				if provType == "dashscope" {
-					cli.SetExtraHeaders(map[string]string{"X-DashScope-Session-Cache": "enable"})
-				}
-				newProviders = append(newProviders, cli)
-			}
-		}
-		router.Reload(newProviders)
-	})
-
-	cfgMgr.Subscribe("security", func(old, new *config.Config) {
-		slog.Info(fmt.Sprint("[hot-reload] Security config changed"))
-		secHook.ReloadChain(&new.Security)
-	})
-
-	cfgMgr.Subscribe("mcp", func(old, new *config.Config) {
-		slog.Info(fmt.Sprint("[hot-reload] MCP config changed, reloading servers"))
-		var inline []mcp.ServerConfig
-		for _, s := range new.MCP.Servers {
-			inline = append(inline, mcp.ServerConfig{
-				Name:    s.Name,
-				Command: s.Command,
-				Args:    s.Args,
-				Env:     s.Env,
-			})
-		}
-		configs := mcp.LoadMCPConfigs(config.HomeDir(), inline)
-		mcpMgr.Reload(context.Background(), configs)
-		// Re-sync MCP tools into registry (remove stale, add new).
-		// Registry generation counter bumps → AgentLoop cache auto-invalidates.
-		tool.SyncMCPTools(registry, mcpMgr)
-	})
-
-	cfgMgr.Subscribe("agent", func(old, new *config.Config) {
-		slog.Info(fmt.Sprintf("[hot-reload] Agent config changed: planning=%v max_steps=%d max_subagents=%d",
-			new.Agent.PlanningMode, new.Agent.MaxSteps, new.Agent.MaxSubagents))
-		// Push to main loop
-		loop.ReloadConfig(new)
-		// Push to all active session loops
-		if loopPool != nil {
-			loopPool.ForEach(func(l *service.AgentLoop) {
-				l.ReloadConfig(new)
-			})
-		}
+	registerHotReloadSubscriptions(cfgMgr, router, secHook, mcpMgr, registry, loop, func() *service.LoopPool {
+		return loopPool
 	})
 
 	// NOTE: Approval flow uses PendingApproval registry (RequestApproval → Resolve via POST /v1/approve).
@@ -525,162 +160,75 @@ func Build() (*App, error) {
 	// ═══════════════════════════════════════════
 	stopCh := make(chan struct{})
 
-	// Start cron manager — file-based, each job = directory + job.json + logs/
-	// Jobs are created/managed by the agent via manage_cron tool.
-	cronDir := filepath.Join(config.HomeDir(), "cron")
-	cronMgr, err := cron.NewManager(cronDir, func(jobName string) cron.Runner {
-		// Cron loops use isolated deps: no KI hooks, no KI distillation.
-		// Cron output stays in session history + log files only.
-		cronDeps := baseDeps
-		cronDeps.Hooks = nil       // Disable KIDistillHook
-		cronDeps.KIStore = nil     // Prevent save_memory from writing to KI
-		cronDeps.KIRetriever = nil // No KI retrieval injection
-		cronDeps.Delta = &service.LogSink{Prefix: "[cron]"}
-		cronDeps.Brain = brain.NewArtifactStoreFromDir(filepath.Join(cronDir, jobName, "artifacts"))
-		cronLoop := service.NewAgentLoop(cronDeps)
-		return cronLoop
-	})
-	if err != nil {
-		slog.Info(fmt.Sprintf("Warning: cron manager init: %v", err))
-	} else {
-		if cfg.Cron.Enabled {
-			if err := cronMgr.Start(); err != nil {
-				slog.Info(fmt.Sprintf("Warning: cron start: %v", err))
-			}
-		}
-		// Register manage_cron tool now that manager is ready
-		registry.Register(tool.NewManageCronTool(cronMgr))
+	cronMgr := assembleCronRuntime(cfg, baseDeps, registry)
 
-	}
-
-	// Start skill file watcher
-	skillMgr.StartWatcher(stopCh)
-
-	// Load MCP servers: merge mcp.json files with inline config.yaml entries
-	var inlineMCP []mcp.ServerConfig
-	for _, s := range cfg.MCP.Servers {
-		inlineMCP = append(inlineMCP, mcp.ServerConfig{
-			Name:    s.Name,
-			Command: s.Command,
-			Args:    s.Args,
-			Env:     s.Env,
-		})
-	}
-	mcpConfigs := mcp.LoadMCPConfigs(config.HomeDir(), inlineMCP)
-	if len(mcpConfigs) > 0 {
-		mcpMgr.StartAll(context.Background(), mcpConfigs)
-		// Auto-register MCP-discovered tools into agent registry
-		tool.RegisterMCPTools(registry, mcpMgr)
-	}
-	// Skill registration:
-	// - executable/hybrid: register as ScriptTool (LLM calls directly via tool name)
-	// - workflow/guide: agent-discoverable (invoked via skill(name="X"))
-	for _, sk := range skillMgr.AutoPromote() {
-		if sk.Type == "executable" || sk.Type == "hybrid" {
-			registry.Register(tool.NewScriptTool(sk))
-			slog.Info(fmt.Sprintf("[skill] Registered ScriptTool: %s", sk.Name))
-		} else {
-			slog.Info(fmt.Sprintf("[skill] Registered standard skill: %s", sk.Name))
-		}
-	}
-	slog.Info(fmt.Sprintf("[skill] %d skills discovered (pre-read, invoked via SkillTool)", len(skillMgr.List())))
+	startRuntimeCapabilities(cfg, stopCh, registry, mcpMgr, skillMgr)
 
 	// ═══════════════════════════════════════════
 	// Phase 7.5: R3 Orchestration Wiring
 	// ═══════════════════════════════════════════
-	addr := ":19996"
-	if cfg.Server.HTTPPort != 0 {
-		addr = fmt.Sprintf(":%d", cfg.Server.HTTPPort)
-	}
-
-	eventBus := service.NewEventBus(
-		service.WithBufferSize(256),
-		service.WithWorkerCount(4),
-	)
-	slog.Info("[r3] EventBus started: buffer=256, workers=4")
-
-	toolDiscovery := service.NewAggregatedToolDiscovery(
-		&toolRegistryAdapter{reg: registry},
-		&mcpDiscoveryAdapter{mgr: mcpMgr},
-		&skillDiscoveryAdapter{mgr: skillMgr},
-	)
-	slog.Info(fmt.Sprintf("[r3] ToolDiscovery initialized: %d capabilities", len(toolDiscovery.Advertise(context.Background()))))
-
-	agentCard := a2a.AgentCard{
-		Name:         "NGOAgent",
-		Description:  "Autonomous coding agent with graph-based execution engine",
-		Version:      Version,
-		URL:          "http://localhost" + addr,
-		Capabilities: toolDiscovery.Advertise(context.Background()),
-		InputModes:   []string{"text"},
-		OutputModes:  []string{"text", "sse"},
-	}
-	a2aHandler := a2a.NewHandler(agentCard, eventBus)
-	slog.Info(fmt.Sprintf("[r3] A2A handler ready: %s v%s", agentCard.Name, agentCard.Version))
+	orchestration := assembleOrchestration(cfg, registry, mcpMgr, skillMgr)
+	eventBus := orchestration.eventBus
+	toolDiscovery := orchestration.discovery
+	a2aHandler := orchestration.a2aHandler
+	addr := orchestration.addr
 
 	// ═══════════════════════════════════════════
 	// Phase 8: Unified API + Server
 	// ═══════════════════════════════════════════
 
-	appServices := NewApplicationServices(ApplicationDeps{
-		Loop:       loop,
-		LoopPool:   loopPool,
-		ChatEngine: chatEngine,
-		SessionMgr: sessMgr,
-		ModelMgr:   modelMgr,
-		ToolAdmin:  toolAdmin,
-		SecHook:    secHook,
-		SkillMgr:   skillMgr,
-		CronMgr:    cronMgr,
-		MCPMgr:     mcpMgr,
-		Discovery:  toolDiscovery,
-		Config:     cfgMgr,
-		Router:     router,
-		HistQuery:  &historyAdapter{store: historyStore},
-		BrainDir:   brainDir,
-		KIStore:    kiStore,
-		SandboxMgr: sbMgr,
-		Wiring: ServiceWiring{
-			TokenUsageStore: persistence.NewTokenUsageStore(db),
-			RuntimeStore:    snapshotStore,
-		},
+	transports := assembleTransports(transportAssemblyInput{
+		cfg:           cfg,
+		cfgMgr:        cfgMgr,
+		db:            db,
+		snapshotStore: snapshotStore,
+		historyStore:  historyStore,
+		loop:          loop,
+		loopPool:      loopPool,
+		chatEngine:    chatEngine,
+		sessionMgr:    sessMgr,
+		modelMgr:      modelMgr,
+		toolAdmin:     toolAdmin,
+		secHook:       secHook,
+		skillMgr:      skillMgr,
+		cronMgr:       cronMgr,
+		mcpMgr:        mcpMgr,
+		discovery:     toolDiscovery,
+		router:        router,
+		brainDir:      brainDir,
+		kiStore:       kiStore,
+		sbMgr:         sbMgr,
+		a2aHandler:    a2aHandler,
+		httpAddr:      addr,
 	})
+	appServices := transports.services
+	srv := transports.httpServer
+	grpcSrv := transports.grpcServer
 
-	httpCaps := appServices.HTTPTransport()
-	httpCaps.A2A = a2aHandler
-	srv := server.NewServer(httpCaps, addr, cfg.Server.AuthToken)
-
-	// gRPC server — defaults to :19998
-	grpcAddr := ":19998"
-	if cfg.Server.GRPCPort != 0 {
-		grpcAddr = fmt.Sprintf(":%d", cfg.Server.GRPCPort)
-	}
-	grpcSrv := grpcserver.NewServer(appServices.GRPCTransport(), grpcAddr)
-
-	return &App{
-		Config:       cfgMgr,
-		DB:           db,
-		Repo:         repo,
-		Services:     appServices,
-		Router:       router,
-		Loop:         loop,
-		Factory:      factory,
-		Server:       srv,
-		GRPCServer:   grpcSrv,
-		ChatEngine:   chatEngine,
-		SessionMgr:   sessMgr,
-		ModelMgr:     modelMgr,
-		ToolAdmin:    toolAdmin,
-		CronMgr:      cronMgr,
-		MCPMgr:       mcpMgr,
-		SkillMgr:     skillMgr,
-		SecurityHook: secHook,
-		SpawnTool:    spawnTool,
-		EventBus:     eventBus,
-		A2AHandler:   a2aHandler,
-		Discovery:    toolDiscovery,
-		StopCh:       stopCh,
-	}, nil
+	return assembleApp(appAssemblyInput{
+		cfgMgr:        cfgMgr,
+		db:            db,
+		repo:          repo,
+		appServices:   appServices,
+		router:        router,
+		loop:          loop,
+		factory:       factory,
+		httpServer:    srv,
+		grpcServer:    grpcSrv,
+		chatEngine:    chatEngine,
+		sessionMgr:    sessMgr,
+		modelMgr:      modelMgr,
+		toolAdmin:     toolAdmin,
+		cronMgr:       cronMgr,
+		mcpMgr:        mcpMgr,
+		skillMgr:      skillMgr,
+		secHook:       secHook,
+		spawnTool:     spawnTool,
+		eventBus:      eventBus,
+		a2aHandler:    a2aHandler,
+		toolDiscovery: toolDiscovery,
+		stopCh:        stopCh,
+	}), nil
 }
 
 // Shutdown gracefully shuts down all components.
@@ -697,10 +245,6 @@ func (app *App) Shutdown() {
 		app.CronMgr.Stop()
 	}
 	slog.Info(fmt.Sprint("[app] Shutdown complete"))
-}
-
-func generateSessionID() string {
-	return uuid.New().String()
 }
 
 // Adapter types are in adapters.go
