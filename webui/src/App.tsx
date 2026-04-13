@@ -38,7 +38,7 @@ export default function App() {
   const session = useSession()
   const stream = useStream()
   const hub = useHub()
-  const { sessionId, sessions, setSessionId, pendingScrollToEnd, loadHistory } = session
+  const { sessionId, sessions, setSessionId, pendingScrollToEnd: pendingScrollToEndRef, loadHistory } = session
   const messages = useMessageStore(s => s.messages)
   const { planMode, availableModels, health } = config
   const {
@@ -103,11 +103,11 @@ export default function App() {
 
   // Reactive scroll-to-end: fires after React commits state from loadHistory
   useEffect(() => {
-    if (pendingScrollToEnd.current && messages.length > 0) {
-      pendingScrollToEnd.current = false
+    if (pendingScrollToEndRef.current && messages.length > 0) {
+      pendingScrollToEndRef.current = false
       resetToBottom()
     }
-  }, [messages, resetToBottom])
+  }, [messages, pendingScrollToEndRef, resetToBottom])
 
   // Initialize: load existing sessions + health after connection is established
   useEffect(() => {
@@ -284,8 +284,10 @@ export default function App() {
     return <Suspense fallback={<div className="flex h-screen items-center justify-center"><span className="animate-pulse text-white/40">Loading...</span></div>}><ConnectPage onConnected={() => setConnected(true)} /></Suspense>
   }
 
+  const isKernelActive = streamPhase === 'streaming' || streamPhase === 'auto_waking'
+
   return (
-    <div className="flex h-[100dvh] w-screen overflow-hidden bg-transparent text-gray-200 font-sans selection:bg-blue-500/30">
+    <div className="app-shell flex h-[100dvh] w-screen overflow-hidden text-gray-200 font-sans selection:bg-cyan-400/25">
       
       <Sidebar 
         isOpen={isSidebarOpen} 
@@ -298,7 +300,7 @@ export default function App() {
         onRenameSession={handleRenameSession}
       />
 
-      <main className="flex-1 flex flex-col relative w-full h-full min-w-0 bg-transparent">
+      <main className="app-main flex-1 flex flex-col relative w-full h-full min-w-0">
         
         <TopNavbar 
           onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} 
@@ -310,6 +312,9 @@ export default function App() {
           currentModel={health?.model || ''}
           onModelSelect={handleModelSwitch}
           onOpenSettings={() => setIsSettingsOpen(true)}
+          planMode={planMode}
+          streamPhase={streamPhase}
+          taskProgress={taskProgress}
         />
 
         {/* Banners absolutely centered over the read-column */}
@@ -328,7 +333,7 @@ export default function App() {
               theme="dark"
               sessionId={sessionId}
               onRetry={handleRetry}
-              isStreaming={streamPhase === 'streaming' || streamPhase === 'auto_waking'}
+              isStreaming={isKernelActive}
               composerHeight={composerHeight}
             />
           )}
@@ -337,11 +342,10 @@ export default function App() {
         </div>
 
         {/* Floating Composer Container (Anchored to main bounds, compensated for 6px custom scrollbar width) */}
-        <div ref={composerRef} className="absolute bottom-0 left-0 w-full pointer-events-none z-10 pr-[6px]" 
-             style={{ background: 'linear-gradient(to bottom, transparent, rgba(0,0,0,0.5) 40%, rgba(0,0,0,0.95) 100%)' }}>
-          <div className="w-full max-w-4xl mx-auto px-1 md:px-4 pb-2 md:pb-8 pt-10 md:pt-24 pointer-events-auto">
+        <div ref={composerRef} className="composer-dock absolute bottom-0 left-0 w-full pointer-events-none z-10 pr-[6px]">
+          <div className="w-full max-w-4xl mx-auto px-2 md:px-5 pb-2 md:pb-6 pt-10 md:pt-24 pointer-events-auto">
             <TaskProgressBar
-              isStreaming={streamPhase === 'streaming' || streamPhase === 'auto_waking'}
+              isStreaming={isKernelActive}
               taskProgress={taskProgress}
               isWaitingPlan={planReview !== null}
               isWaitingApproval={pendingApprovals.length > 0}
@@ -360,8 +364,8 @@ export default function App() {
               onFilesChange={setAttachedFiles}
             />
             
-            <div className="text-center text-xs mt-2 text-gray-600">
-              NGOAgent can make mistakes. Consider verifying critical information.
+            <div className="composer-footnote text-center text-xs mt-2">
+              Kernel actions are streamed live. Verify critical outputs before applying them.
             </div>
           </div>
         </div>

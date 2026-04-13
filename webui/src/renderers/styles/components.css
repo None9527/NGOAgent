@@ -433,22 +433,22 @@
   width: 100%;
   max-width: 100%;
   margin: 0 auto;
-  border-radius: 1.75rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   transition: border-color 0.3s cubic-bezier(0.16, 1, 0.3, 1), 
               box-shadow 0.3s cubic-bezier(0.16, 1, 0.3, 1);
   z-index: 1;
-  background: rgba(30, 30, 32, 0.65);
+  background: rgba(12, 16, 13, 0.78);
   backdrop-filter: blur(24px) saturate(180%);
   color: #ffffff;
 }
 
 .composer-form:focus-within {
-  border-color: rgba(255, 255, 255, 0.25);
+  border-color: rgba(103, 232, 212, 0.36);
   box-shadow: 0 30px 60px -12px rgba(0, 0, 0, 0.8), 
               inset 0 1px 0 rgba(255, 255, 255, 0.15),
-              0 0 0 3px rgba(255, 255, 255, 0.05);
+              0 0 0 3px rgba(103, 232, 212, 0.08);
 }
 
 .composer-input {
@@ -470,7 +470,7 @@
   font-family: inherit;
   font-size: 15px;
   line-height: 1.5;
-  color: #e5e5e5;
+  color: #eef7f3;
 }
 
 @media (max-width: 639px) {
@@ -513,6 +513,28 @@
   color: #a3a3a3;
   border-top: none;
   overflow: hidden;
+}
+
+.mode-chip {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  border-width: 1px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 500;
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+
+.mode-chip:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.mode-chip:active {
+  transform: translateY(0);
 }
 
 @media (max-width: 639px) {
@@ -720,7 +742,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
+  border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(28, 28, 30, 0.85);
   backdrop-filter: blur(12px);
@@ -769,4 +791,3 @@
     opacity: 0.85;
   }
 }
-

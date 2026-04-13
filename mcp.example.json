@@ -11,6 +11,13 @@
       "env": {
         "GITHUB_TOKEN": "${GITHUB_TOKEN}"
       }
+    },
+    "agent-browser": {
+      "command": "python3",
+      "args": ["scripts/agent_browser_mcp.py"],
+      "env": {
+        "AGENT_BROWSER_ALLOWED_DOMAINS": "localhost,127.0.0.1"
+      }
     }
   }
 }

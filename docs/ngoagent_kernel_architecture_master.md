@@ -88,7 +88,7 @@ defer loop.ReleaseAcquire()
 在此阶段，我们将关注负责 LLM 对话窗口生命周期管理的模块，核心源码由 `prepare.go`, `run_helpers.go` 以及 `compact.go` 承载。这是保障大模型长效运行不崩溃及保持敏锐指令跟随能力的中枢神经。
 
 ### 1. 四层动态按预算注入机制 (`prepare.go`)
-当引擎进入 `doPrepare` 状态，它将针对系统的 `ephemerals`（临时语境提示词）执行基于 `TokenEst` (Token预算) 的注入判断：
+当引擎进入 prepare 节点（历史实现名为 `doPrepare`）时，它将针对系统的 `ephemerals`（临时语境提示词）执行基于 `TokenEst` (Token预算) 的注入判断：
 - **第一层 (核心策略层)**：判断进入自主权 Agentic 模式时注入策略性语句如：`"For complex, multi-step... use task_boundary..."`；亦或是协调团队并行的子代调度指引 (Leader Prompt)。
 - **第二层 (边界与汇报频控层)**：检测到 `StepsSinceUpdate >= 5` 时，高优注入逼迫大语言模型进行停顿汇报的标语 `<ephemeral_message>`。
 - **第三层 (人工计划与预警层)**：结合当前 `ArtifactLastStep` 的陈旧程度抛出任务进度落后提醒，以及结合动态 Token 探测发现超标（60%及以上），下发自我删减提醒。

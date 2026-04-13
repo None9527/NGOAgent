@@ -163,6 +163,8 @@ func projectCapabilities(caps []service.ToolCapability) []apitype.CapabilityInfo
 			Description: c.Description,
 			Category:    c.Category,
 			Source:      c.Source,
+			SourceKind:  c.SourceKind,
+			SourcePath:  c.SourcePath,
 			InputSchema: c.InputSchema, // Keep input schema for A2A exposure
 			Tags:        c.Tags,
 			Version:     c.Version,

@@ -5,7 +5,7 @@ import dtool "github.com/ngoclaw/ngoagent/internal/domain/tool"
 // TaskTracker manages task boundary state for the agent loop.
 // Extracted from AgentLoop to reduce God Object field count.
 // These fields are written by the task_boundary tool intercept in doToolExec
-// and read by doPrepare for ephemeral injection decisions.
+// and read by the prepare node service for ephemeral injection decisions.
 type TaskTracker struct {
 	dtool.BoundaryState // Shared with LoopState — eliminates protoState/syncLoopState copy
 

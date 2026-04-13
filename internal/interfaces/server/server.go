@@ -94,7 +94,7 @@ func (s *Server) PushEvent(sessionID, eventType string, data any) {
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Exempt paths: health check, A2A agent card discovery
-		if r.URL.Path == "/v1/health" || r.URL.Path == "/.well-known/agent.json" {
+		if r.URL.Path == "/v1/health" || r.URL.Path == "/v1/ready" || r.URL.Path == "/.well-known/agent.json" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -123,8 +123,15 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// Start begins listening for HTTP requests.
-func (s *Server) Start(ctx context.Context) error {
+func (s *Server) readinessPayload() (int, any) {
+	health := s.admin.Health()
+	if health.Ready {
+		return http.StatusOK, health
+	}
+	return http.StatusServiceUnavailable, health
+}
+
+func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// ─── Core SSE / Chat ───
@@ -141,6 +148,11 @@ func (s *Server) Start(ctx context.Context) error {
 	// ─── Health / Models / Config (read) ───
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(s.admin.Health())
+	})
+	mux.HandleFunc("/v1/ready", func(w http.ResponseWriter, r *http.Request) {
+		status, payload := s.readinessPayload()
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(payload)
 	})
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(s.admin.ListModels())
@@ -193,7 +205,12 @@ func (s *Server) Start(ctx context.Context) error {
 	s.registerAPIRoutes(mux)
 
 	// Auth middleware — always enforced (token auto-generated on first run)
-	handler := s.authMiddleware(mux)
+	return s.authMiddleware(mux)
+}
+
+// Start begins listening for HTTP requests.
+func (s *Server) Start(ctx context.Context) error {
+	handler := s.handler()
 	slog.Info("Auth token enforced — all API requests require Bearer token")
 
 	srv := &http.Server{

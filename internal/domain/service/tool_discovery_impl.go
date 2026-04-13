@@ -10,11 +10,12 @@ import (
 // AggregatedToolDiscovery implements ToolDiscovery by aggregating tools from
 // builtin ToolRegistry, MCP servers, and skill sources.
 type AggregatedToolDiscovery struct {
-	mu        sync.RWMutex
-	cache     []ToolCapability
-	registry  ToolRegistry
-	mcp       MCPToolSource
-	skills    SkillSource
+	mu             sync.RWMutex
+	cache          []ToolCapability
+	registry       ToolRegistry
+	mcp            MCPToolSource
+	skills         SkillSource
+	builtinSources map[string]string
 }
 
 // NewAggregatedToolDiscovery creates a discovery aggregator.
@@ -25,6 +26,17 @@ func NewAggregatedToolDiscovery(registry ToolRegistry, mcp MCPToolSource, skills
 		mcp:      mcp,
 		skills:   skills,
 	}
+}
+
+// SetBuiltinSources records builtin tool provider names for discovery metadata.
+func (d *AggregatedToolDiscovery) SetBuiltinSources(sources map[string]string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.builtinSources = make(map[string]string, len(sources))
+	for name, source := range sources {
+		d.builtinSources[strings.ToLower(name)] = source
+	}
+	d.cache = nil
 }
 
 // ListCapabilities returns all tools from all sources, deduped by name.
@@ -126,10 +138,17 @@ func (d *AggregatedToolDiscovery) aggregate() []ToolCapability {
 			if !tool.Enabled {
 				continue
 			}
+			source := d.builtinSources[strings.ToLower(tool.Name)]
+			tags := []string{"builtin"}
+			if source != "" {
+				tags = append(tags, source)
+			}
 			add(ToolCapability{
 				Name:     tool.Name,
 				Category: "builtin",
-				Tags:     []string{"builtin"},
+				Source:   source,
+				SourceKind: "builtin_provider",
+				Tags:     tags,
 			})
 		}
 	}
@@ -142,6 +161,7 @@ func (d *AggregatedToolDiscovery) aggregate() []ToolCapability {
 				Description: tool.Description,
 				Category:    "mcp",
 				Source:      tool.Server,
+				SourceKind:  "mcp_server",
 				InputSchema: tool.InputSchema,
 				Tags:        []string{"mcp", tool.Server},
 			})
@@ -158,8 +178,10 @@ func (d *AggregatedToolDiscovery) aggregate() []ToolCapability {
 				Name:        skill.Name,
 				Description: skill.Description,
 				Category:    "skill",
-				Source:      skill.Path,
-				Tags:        []string{"skill"},
+				Source:      skill.Name,
+				SourceKind:  "skill",
+				SourcePath:  skill.Path,
+				Tags:        []string{"skill", skill.Name},
 			})
 		}
 	}

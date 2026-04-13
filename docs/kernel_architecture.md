@@ -114,7 +114,7 @@ flowchart LR
 当前主入口通过 `run.go` 调用 graph runtime，再由节点处理器承载具体行为。拆分后的文件结构：
 
 ```
-run.go              (674L) — 主循环 + doPrepare/doGenerate
+run.go              (674L) — 主循环 + graph runtime 入口（历史上承载过 doPrepare/doGenerate）
 evo_controller.go   (187L) — fireHooks + runEvoEval + pushEvo
 persistence_ops.go  (107L) — 增量/全量历史持久化
 run_helpers.go      (287L) — buildRuntimeInfo + git snapshot + token estimation + tool tiering
@@ -129,7 +129,7 @@ Run(ctx, userMessage)
   ├─ runMu.Lock() — 保证同 loop 不并发
   │
   ├─ transition(Preparing)
-  │    └─ doPrepare() — 注入 ephemeral messages
+  │    └─ prepare node service — 注入 ephemeral messages
   │         ├─ EphemeralBudget 按维度/优先级裁剪
   │         ├─ 注入 workspace context (context.md + @include)
   │         ├─ 注入 KI summaries

@@ -98,7 +98,9 @@ func (s *stubSessionRepo) UpdateTitle(id, title string) error { return nil }
 func (s *stubSessionRepo) Touch(id string) error              { return nil }
 func (s *stubSessionRepo) DeleteConversation(id string) error { return nil }
 
-func newTestLegacyAPI(
+// newTestCompatibilityAPI is reserved for compatibility-facade coverage.
+// Capability-first tests should prefer newTestApplicationServices.
+func newTestCompatibilityAPI(
 	loop *service.AgentLoop,
 	loopPool *service.LoopPool,
 	chatEngine *service.ChatEngine,
@@ -124,7 +126,37 @@ func newTestLegacyAPI(
 	})
 }
 
-func newTestLegacyAPIWithWiring(
+// newTestApplicationServices is the preferred test entrypoint for the R4
+// application contract. Legacy facade helpers remain only for compatibility tests.
+func newTestApplicationServices(
+	loop *service.AgentLoop,
+	loopPool *service.LoopPool,
+	chatEngine *service.ChatEngine,
+	sessMgr *service.SessionManager,
+	modelMgr *service.ModelManager,
+	toolAdmin *service.ToolAdmin,
+	secHook *security.Hook,
+	histQuery HistoryQuerier,
+	brainDir string,
+	router *llm.Router,
+) *ApplicationServices {
+	return NewApplicationServices(ApplicationDeps{
+		Loop:       loop,
+		LoopPool:   loopPool,
+		ChatEngine: chatEngine,
+		SessionMgr: sessMgr,
+		ModelMgr:   modelMgr,
+		ToolAdmin:  toolAdmin,
+		SecHook:    secHook,
+		HistQuery:  histQuery,
+		BrainDir:   brainDir,
+		Router:     router,
+	})
+}
+
+// newTestCompatibilityAPIWithWiring is reserved for compatibility-facade coverage
+// that needs explicit persistence wiring.
+func newTestCompatibilityAPIWithWiring(
 	loop *service.AgentLoop,
 	loopPool *service.LoopPool,
 	chatEngine *service.ChatEngine,
@@ -150,6 +182,69 @@ func newTestLegacyAPIWithWiring(
 		Router:     router,
 		Wiring:     wiring,
 	})
+}
+
+func TestApplicationServicesHTTPTransportUsesCapabilityBundle(t *testing.T) {
+	services := newTestApplicationServices(
+		service.NewAgentLoop(service.Deps{}),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		nil,
+	)
+
+	httpCaps := services.HTTPTransport()
+	if _, ok := httpCaps.Chat.(*ChatService); !ok {
+		t.Fatalf("expected ChatService-backed HTTP chat capability, got %T", httpCaps.Chat)
+	}
+	if _, ok := httpCaps.Runtime.(*RuntimeService); !ok {
+		t.Fatalf("expected RuntimeService-backed HTTP runtime capability, got %T", httpCaps.Runtime)
+	}
+	if _, ok := httpCaps.Session.(*SessionService); !ok {
+		t.Fatalf("expected SessionService-backed HTTP session capability, got %T", httpCaps.Session)
+	}
+	if _, ok := httpCaps.Admin.(*AdminService); !ok {
+		t.Fatalf("expected AdminService-backed HTTP admin capability, got %T", httpCaps.Admin)
+	}
+	if _, ok := httpCaps.Cost.(*CostService); !ok {
+		t.Fatalf("expected CostService-backed HTTP cost capability, got %T", httpCaps.Cost)
+	}
+
+	grpcCaps := services.GRPCTransport()
+	if _, ok := grpcCaps.Chat.(*ChatService); !ok {
+		t.Fatalf("expected ChatService-backed gRPC chat capability, got %T", grpcCaps.Chat)
+	}
+	if _, ok := grpcCaps.Session.(*SessionService); !ok {
+		t.Fatalf("expected SessionService-backed gRPC session capability, got %T", grpcCaps.Session)
+	}
+	if _, ok := grpcCaps.Admin.(*AdminService); !ok {
+		t.Fatalf("expected AdminService-backed gRPC admin capability, got %T", grpcCaps.Admin)
+	}
+}
+
+func TestApplicationServicesLegacyAPIIsCompatibilityFacade(t *testing.T) {
+	services := newTestApplicationServices(
+		service.NewAgentLoop(service.Deps{}),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		nil,
+	)
+
+	legacy := services.LegacyAPI()
+	if _, ok := legacy.(*AgentAPI); !ok {
+		t.Fatalf("expected compatibility facade, got %T", legacy)
+	}
 }
 
 func TestAgentAPIApprove_RestoresPendingApprovalFromSnapshot(t *testing.T) {
@@ -193,7 +288,7 @@ func TestAgentAPIApprove_RestoresPendingApprovalFromSnapshot(t *testing.T) {
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
 
-	api := newTestLegacyAPI(factory("__default__"), loopPool, nil, sessMgr, nil, nil, secHook, nil, brainDir, nil)
+	api := newTestCompatibilityAPI(factory("__default__"), loopPool, nil, sessMgr, nil, nil, secHook, nil, brainDir, nil)
 
 	if err := api.Approve("approval-1", true); err != nil {
 		t.Fatalf("approve should restore from snapshot: %v", err)
@@ -258,7 +353,7 @@ func TestChatStream_ReplaysPendingApprovalOnReconnect(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, secHook, nil, brainDir, nil)
+	api := newTestCompatibilityAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, secHook, nil, brainDir, nil)
 
 	var approvalID, toolName, reason string
 	var args map[string]any
@@ -314,7 +409,7 @@ func TestChatStream_DoesNotReplayClearedApprovalSnapshot(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, secHook, nil, brainDir, nil)
+	api := newTestCompatibilityAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, secHook, nil, brainDir, nil)
 
 	delta := &service.Delta{
 		OnApprovalRequestFunc: func(id, tool string, approvalArgs map[string]any, approvalReason string) {
@@ -383,7 +478,7 @@ func TestReviewPlan_RejectsAndResumesPlanningLoop(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, history, brainDir, nil)
+	api := newTestCompatibilityAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, history, brainDir, nil)
 
 	if err := api.ReviewPlan(context.Background(), sessionID, false, "split rollout into phases"); err != nil {
 		t.Fatalf("ReviewPlan should resume planning loop: %v", err)
@@ -459,7 +554,7 @@ func TestApplyDecision_DelegatesPlanReview(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, brainDir, nil)
+	api := newTestCompatibilityAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, brainDir, nil)
 
 	if err := api.ApplyDecision(context.Background(), sessionID, "plan_review", "revise", "needs phasing"); err != nil {
 		t.Fatalf("ApplyDecision: %v", err)
@@ -535,7 +630,7 @@ func TestApplyDecision_InferKindFromPendingDecision(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := newTestLegacyAPIWithWiring(
+	api := newTestCompatibilityAPIWithWiring(
 		factory("__default__"),
 		service.NewLoopPool(factory, brainDir),
 		nil,
@@ -639,7 +734,7 @@ func TestResumeRun_ResumesNamedWaitingRun(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, brainDir, nil)
+	api := newTestCompatibilityAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, brainDir, nil)
 
 	if err := api.ResumeRun(context.Background(), sessionID, "run-resume-explicit"); err != nil {
 		t.Fatalf("ResumeRun: %v", err)
@@ -708,7 +803,7 @@ func TestApplyRuntimeIngress_RoutesResumeAndValidatesDecision(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := newTestLegacyAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, brainDir, nil)
+	api := newTestCompatibilityAPI(factory("__default__"), service.NewLoopPool(factory, brainDir), nil, sessMgr, nil, nil, nil, nil, brainDir, nil)
 
 	_, err := api.ApplyRuntimeIngress(context.Background(), apitype.RuntimeIngressRequest{
 		SessionID: sessionID,
@@ -816,7 +911,7 @@ func TestApplyRuntimeIngress_AcceptsDecisionReasonFallback(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := newTestLegacyAPIWithWiring(
+	api := newTestCompatibilityAPIWithWiring(
 		factory("__default__"),
 		service.NewLoopPool(factory, brainDir),
 		nil,
@@ -928,7 +1023,7 @@ func TestApplyRuntimeIngress_DecisionTargetsExplicitRun(t *testing.T) {
 	sessMgr := service.NewSessionManager(&stubSessionRepo{
 		sessions: []service.ConversationInfo{{ID: sessionID}},
 	})
-	api := newTestLegacyAPIWithWiring(
+	api := newTestCompatibilityAPIWithWiring(
 		factory("__default__"),
 		service.NewLoopPool(factory, brainDir),
 		nil,
@@ -1000,7 +1095,7 @@ func TestRetryRun_RestoresPersistedHistoryWithoutCreatingGhostLoop(t *testing.T)
 	pool := service.NewLoopPool(func(sid string) *service.AgentLoop {
 		return service.NewAgentLoop(service.Deps{})
 	}, t.TempDir())
-	api := newTestLegacyAPI(
+	api := newTestCompatibilityAPI(
 		defaultLoop,
 		pool,
 		nil,
@@ -1040,7 +1135,7 @@ func TestStopRun_DoesNotStopDefaultLoopForMissingSession(t *testing.T) {
 		return service.NewAgentLoop(service.Deps{})
 	}, t.TempDir())
 
-	api := newTestLegacyAPI(
+	api := newTestCompatibilityAPI(
 		defaultLoop,
 		pool,
 		nil,
@@ -1076,7 +1171,7 @@ func TestGetContextStats_UsesActiveSessionLoop(t *testing.T) {
 	})
 	sessMgr.Activate(sessionID)
 
-	api := newTestLegacyAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
+	api := newTestCompatibilityAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
 
 	stats := api.GetContextStats()
 	if stats.HistoryCount != 1 {
@@ -1100,7 +1195,7 @@ func TestGetContextStats_DoesNotCreateGhostLoopForMissingActiveSession(t *testin
 	})
 	sessMgr.Activate(sessionID)
 
-	api := newTestLegacyAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
+	api := newTestCompatibilityAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
 
 	stats := api.GetContextStats()
 	if stats.HistoryCount != 1 || stats.TokenEstimate != len("default only")/4 {
@@ -1124,7 +1219,7 @@ func TestClearHistory_DoesNotMutateDefaultLoopForMissingActiveSession(t *testing
 	})
 	sessMgr.Activate(sessionID)
 
-	api := newTestLegacyAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
+	api := newTestCompatibilityAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
 	api.ClearHistory()
 
 	history := defaultLoop.GetHistory()
@@ -1149,7 +1244,7 @@ func TestCompactContext_DoesNotCreateGhostLoopForMissingActiveSession(t *testing
 	})
 	sessMgr.Activate(sessionID)
 
-	api := newTestLegacyAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
+	api := newTestCompatibilityAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
 	api.CompactContext()
 
 	if got := pool.GetIfExists(sessionID); got != nil {
@@ -1157,7 +1252,7 @@ func TestCompactContext_DoesNotCreateGhostLoopForMissingActiveSession(t *testing
 	}
 }
 
-func TestGetHistory_PrefersResidentLoopWithoutCreatingGhostLoop(t *testing.T) {
+func TestGetHistory_PrefersPersistedHistoryWithoutCreatingGhostLoop(t *testing.T) {
 	sessionID := "session-history"
 	defaultLoop := service.NewAgentLoop(service.Deps{})
 	pool := service.NewLoopPool(func(sid string) *service.AgentLoop {
@@ -1166,7 +1261,7 @@ func TestGetHistory_PrefersResidentLoopWithoutCreatingGhostLoop(t *testing.T) {
 	resident := pool.Get(sessionID)
 	resident.SetHistory([]llm.Message{{Role: "user", Content: "resident history"}})
 
-	api := newTestLegacyAPI(
+	api := newTestCompatibilityAPI(
 		defaultLoop,
 		pool,
 		nil,
@@ -1185,8 +1280,8 @@ func TestGetHistory_PrefersResidentLoopWithoutCreatingGhostLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetHistory error: %v", err)
 	}
-	if len(history) != 1 || history[0].Content != "resident history" {
-		t.Fatalf("expected resident loop history, got %#v", history)
+	if len(history) != 1 || history[0].Content != "persisted history" {
+		t.Fatalf("expected persisted history, got %#v", history)
 	}
 
 	missingSession := "missing-history"
@@ -1199,6 +1294,37 @@ func TestGetHistory_PrefersResidentLoopWithoutCreatingGhostLoop(t *testing.T) {
 	}
 	if got := pool.GetIfExists(missingSession); got != nil {
 		t.Fatalf("expected GetHistory not to create ghost loop, got %#v", got)
+	}
+}
+
+func TestGetHistory_FallsBackToResidentLoopWhenNothingPersisted(t *testing.T) {
+	sessionID := "session-history-fallback"
+	defaultLoop := service.NewAgentLoop(service.Deps{})
+	pool := service.NewLoopPool(func(sid string) *service.AgentLoop {
+		return service.NewAgentLoop(service.Deps{})
+	}, t.TempDir())
+	resident := pool.Get(sessionID)
+	resident.SetHistory([]llm.Message{{Role: "user", Content: "resident-only history"}})
+
+	api := newTestCompatibilityAPI(
+		defaultLoop,
+		pool,
+		nil,
+		service.NewSessionManager(&stubSessionRepo{sessions: []service.ConversationInfo{{ID: sessionID}}}),
+		nil,
+		nil,
+		nil,
+		&stubHistoryQuery{exports: map[string][]service.HistoryExport{}},
+		"",
+		llm.NewRouter(nil),
+	)
+
+	history, err := api.GetHistory(sessionID)
+	if err != nil {
+		t.Fatalf("GetHistory error: %v", err)
+	}
+	if len(history) != 1 || history[0].Content != "resident-only history" {
+		t.Fatalf("expected resident fallback history, got %#v", history)
 	}
 }
 
@@ -1236,7 +1362,7 @@ func TestSaveSessionCost_UsesRequestedSessionInsteadOfActiveSession(t *testing.T
 	})
 	sessMgr.Activate(activeSession)
 
-	api := newTestLegacyAPIWithWiring(
+	api := newTestCompatibilityAPIWithWiring(
 		defaultLoop,
 		pool,
 		nil,
@@ -1341,7 +1467,7 @@ func TestListRuntimeRunsAndChildRuns(t *testing.T) {
 		t.Fatalf("save child snapshot: %v", err)
 	}
 
-	api := newTestLegacyAPIWithWiring(
+	api := newTestCompatibilityAPIWithWiring(
 		service.NewAgentLoop(service.Deps{}),
 		nil,
 		nil,
@@ -1519,7 +1645,7 @@ func TestListRuntimeRuns_MapsLastDecisionContracts(t *testing.T) {
 		t.Fatalf("save evaluation snapshot: %v", err)
 	}
 
-	api := newTestLegacyAPIWithWiring(
+	api := newTestCompatibilityAPIWithWiring(
 		service.NewAgentLoop(service.Deps{}),
 		nil,
 		nil,
@@ -1596,7 +1722,7 @@ func TestListRuntimeGraph_MapsBarrierEventNodes(t *testing.T) {
 		t.Fatalf("save barrier snapshot: %v", err)
 	}
 
-	api := newTestLegacyAPIWithWiring(
+	api := newTestCompatibilityAPIWithWiring(
 		service.NewAgentLoop(service.Deps{}),
 		nil,
 		nil,
@@ -1694,7 +1820,7 @@ func TestListRuntimeRunsByEventAndGraphByEvent(t *testing.T) {
 		t.Fatalf("save trigger run: %v", err)
 	}
 
-	api := newTestLegacyAPIWithWiring(
+	api := newTestCompatibilityAPIWithWiring(
 		service.NewAgentLoop(service.Deps{}),
 		nil,
 		nil,

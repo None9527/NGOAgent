@@ -143,7 +143,7 @@ func Build() (*App, error) {
 	// ═══════════════════════════════════════════
 	// Phase 7.5: R3 Orchestration Wiring
 	// ═══════════════════════════════════════════
-	orchestration := assembleOrchestration(cfg, tools.registry, storage.mcpMgr, storage.skillMgr)
+	orchestration := assembleOrchestration(cfg, tools, storage.mcpMgr, storage.skillMgr)
 
 	// ═══════════════════════════════════════════
 	// Phase 8: Unified API + Server

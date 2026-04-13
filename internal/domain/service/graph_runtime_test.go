@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,6 +103,43 @@ func TestNewAgentLoopGraph_ValidDefinition(t *testing.T) {
 	}
 	if _, ok := graph.Nodes["complete"]; !ok {
 		t.Fatal("expected complete node in graph definition")
+	}
+}
+
+func TestGraphRuntimeNodes_DoNotCallAgentLoopHandlersDirectly(t *testing.T) {
+	source, err := os.ReadFile("graph_runtime.go")
+	if err != nil {
+		t.Fatalf("read graph_runtime.go: %v", err)
+	}
+	text := string(source)
+	forbidden := []string{
+		"n.adapter.loop.doPrepare",
+		"n.adapter.loop.handleGenerate",
+		"n.adapter.loop.handleToolExec",
+		"n.adapter.loop.handleGuardCheck",
+		"n.adapter.loop.handleEvaluate",
+		"n.adapter.loop.handleRepair",
+		"n.adapter.loop.handleDone",
+		"n.adapter.loop.handleComplete",
+		"n.adapter.loop.pendingWake",
+	}
+	for _, needle := range forbidden {
+		if strings.Contains(text, needle) {
+			t.Fatalf("graph runtime node wrappers must delegate through node services, found %q", needle)
+		}
+	}
+}
+
+func TestGraphNodeServices_DoNotUsePrepareOrGenerateLoopHandlers(t *testing.T) {
+	source, err := os.ReadFile("graph_node_services.go")
+	if err != nil {
+		t.Fatalf("read graph_node_services.go: %v", err)
+	}
+	text := string(source)
+	for _, needle := range []string{".doPrepare(", ".handleGenerate("} {
+		if strings.Contains(text, needle) {
+			t.Fatalf("graph node services must not route prepare/generate through loop semantic handlers, found %q", needle)
+		}
 	}
 }
 
@@ -256,12 +295,109 @@ func TestPlanningNode_RoutesPrepareAfterRevisionDecision(t *testing.T) {
 	if state.Intelligence.Planning.ReviewRequired {
 		t.Fatalf("expected review requirement cleared after revision decision, got %#v", state.Intelligence.Planning)
 	}
-	loop.mu.Lock()
-	got := append([]string(nil), loop.ephemerals...)
-	loop.mu.Unlock()
+	got := append([]string(nil), state.Ephemerals...)
 	if len(got) != 1 || got[0] != "Plan review requested revision: split the work into milestones" {
 		t.Fatalf("expected revision feedback injected as ephemeral, got %#v", got)
 	}
+}
+
+func TestPlanningNodeService_ExecutesWithoutAgentLoop(t *testing.T) {
+	review := &planReviewRecorder{}
+	state := &graphruntime.TurnState{
+		Intelligence: graphruntime.IntelligenceState{
+			Planning: graphruntime.PlanningState{
+				Required:         true,
+				ReviewRequired:   true,
+				Trigger:          "mode_force_plan",
+				MissingArtifacts: []string{"plan.md"},
+			},
+		},
+	}
+
+	result := planningNodeService{review: review}.Execute(state)
+	if result.Status != graphruntime.NodeStatusWait || result.WaitReason != graphruntime.WaitReasonUserInput {
+		t.Fatalf("expected planning service to wait for user input, got %#v", result)
+	}
+	if len(review.messages) != 1 || review.messages[0] != "Planning trigger: mode_force_plan" {
+		t.Fatalf("expected plan review emission, got %#v", review.messages)
+	}
+	if len(review.paths[0]) != 1 || review.paths[0][0] != "plan.md" {
+		t.Fatalf("expected copied review paths, got %#v", review.paths)
+	}
+	if state.Intelligence.Decision.Kind != graphruntime.DecisionKindPlanReview ||
+		state.Intelligence.Decision.SchemaName != planningReviewSchema ||
+		state.Intelligence.Decision.ResumeAction != "resume_run" ||
+		!state.Intelligence.Decision.Valid {
+		t.Fatalf("expected planning service to write pending decision contract, got %#v", state.Intelligence.Decision)
+	}
+}
+
+func TestPrepareNodeService_ExecutesWithoutAgentLoop(t *testing.T) {
+	runtime := &prepareRuntimeRecorder{
+		snapshot: prepareTurnSnapshot{
+			lastMessage:      "/plan split runtime ownership",
+			boundaryMode:     "execution",
+			stepsSinceUpdate: 3,
+			currentStep:      1,
+		},
+		mode:          ModePermissions{Name: "plan", ForcePlan: true},
+		model:         "gpt-4.1",
+		tokenEstimate: 1024,
+	}
+
+	result, err := prepareNodeService{runtime: runtime}.Execute(context.Background(), &graphruntime.TurnState{})
+	if err != nil {
+		t.Fatalf("prepare service error: %v", err)
+	}
+	if result.RouteKey != graphRouteOrchestrate || result.ObservedState != "prepare" {
+		t.Fatalf("expected prepare service to route orchestrate, got %#v", result)
+	}
+	if !runtime.planning.Required || runtime.planning.Trigger == "" {
+		t.Fatalf("expected prepare service to write planning state, got %#v", runtime.planning)
+	}
+	if len(runtime.ephemerals) == 0 {
+		t.Fatal("expected prepare service to inject ephemerals through narrow runtime")
+	}
+}
+
+type planReviewRecorder struct {
+	messages []string
+	paths    [][]string
+}
+
+func (r *planReviewRecorder) OnPlanReview(message string, paths []string) {
+	r.messages = append(r.messages, message)
+	r.paths = append(r.paths, append([]string(nil), paths...))
+}
+
+type prepareRuntimeRecorder struct {
+	snapshot      prepareTurnSnapshot
+	mode          ModePermissions
+	model         string
+	tokenEstimate int
+	ephemerals    []string
+	planning      graphruntime.PlanningState
+}
+
+func (r *prepareRuntimeRecorder) runMode() string                      { return "" }
+func (r *prepareRuntimeRecorder) prepareSnapshot() prepareTurnSnapshot { return r.snapshot }
+func (r *prepareRuntimeRecorder) shouldInjectPlanning(message string) bool {
+	return strings.HasPrefix(strings.TrimSpace(message), "/plan")
+}
+func (r *prepareRuntimeRecorder) artifactExists(string) bool                 { return false }
+func (r *prepareRuntimeRecorder) setGuardModeState(bool, bool, bool, string) {}
+func (r *prepareRuntimeRecorder) Mode() ModePermissions                      { return r.mode }
+func (r *prepareRuntimeRecorder) estimateTokens() int                        { return r.tokenEstimate }
+func (r *prepareRuntimeRecorder) currentModel() string                       { return r.model }
+func (r *prepareRuntimeRecorder) phaseEphemeral() string                     { return "" }
+func (r *prepareRuntimeRecorder) stepsSinceBoundary() int                    { return 0 }
+func (r *prepareRuntimeRecorder) scratchpadDir() string                      { return "" }
+func (r *prepareRuntimeRecorder) generateKIIndex() string                    { return "" }
+func (r *prepareRuntimeRecorder) setPlanningDecision(p graphruntime.PlanningState) {
+	r.planning = p
+}
+func (r *prepareRuntimeRecorder) InjectEphemeral(message string) {
+	r.ephemerals = append(r.ephemerals, message)
 }
 
 func TestHandleReconnect_ReplaysPlanningReviewWait(t *testing.T) {
@@ -365,11 +501,11 @@ func TestGraphAdapterSyncsLoopStateIntoGraphState(t *testing.T) {
 		},
 	})
 	loop.mode = ModePermissions{Name: "agentic", SelfReview: true}
-	loop.outputContinuations = 2
-	loop.compactCount = 1
-	loop.ephemerals = []string{"remember this"}
-	loop.pendingMedia = []map[string]string{{"type": "image_url", "url": "https://example.com/image.png", "path": "/tmp/image.png"}}
-	loop.activeSkills = map[string]string{"git": "skill content"}
+	loop.outputContinuations = 9
+	loop.compactCount = 7
+	loop.ephemerals = []string{"stale loop ephemeral"}
+	loop.pendingMedia = []map[string]string{{"path": "/tmp/stale.png"}}
+	loop.activeSkills = map[string]string{"stale": "loop skill content"}
 	loop.task.RecordBoundary("write feature", "plan", "running", "implement runtime")
 	loop.task.PlanModified = true
 	loop.task.CurrentStep = 4
@@ -386,7 +522,8 @@ func TestGraphAdapterSyncsLoopStateIntoGraphState(t *testing.T) {
 			Status:   "running",
 		}},
 	}))
-	loop.history = []llm.Message{{
+	loop.history = []llm.Message{{Role: "assistant", Content: "stale loop answer"}}
+	graphHistory := messagesToGraphHistory([]llm.Message{{
 		Role:      "assistant",
 		Content:   "draft answer",
 		Reasoning: "analysis",
@@ -401,7 +538,7 @@ func TestGraphAdapterSyncsLoopStateIntoGraphState(t *testing.T) {
 				Arguments: `{"path":"a.go"}`,
 			},
 		}},
-	}}
+	}})
 
 	adapter := newGraphLoopAdapter(loop)
 	state := &graphruntime.TurnState{}
@@ -414,6 +551,14 @@ func TestGraphAdapterSyncsLoopStateIntoGraphState(t *testing.T) {
 	}
 
 	state.Mode = "agentic"
+	state.Compact = graphruntime.CompactState{
+		CompactCount:        1,
+		OutputContinuations: 2,
+	}
+	state.Ephemerals = []string{"remember this"}
+	state.PendingMedia = []map[string]string{{"type": "image_url", "url": "https://example.com/image.png", "path": "/tmp/image.png"}}
+	state.ActiveSkills = map[string]string{"git": "skill content"}
+	state.History = graphHistory
 	adapter.syncFromGraphState(state, exec)
 	adapter.syncToGraphState(state, exec)
 
@@ -471,6 +616,9 @@ func TestGraphAdapterSyncsLoopStateIntoGraphState(t *testing.T) {
 	if got := state.ActiveSkills["git"]; got != "skill content" {
 		t.Fatalf("expected active skill sync, got %#v", state.ActiveSkills)
 	}
+	if _, ok := state.ActiveSkills["stale"]; ok {
+		t.Fatalf("expected stale loop active skills to stay out of graph state, got %#v", state.ActiveSkills)
+	}
 	if !state.Reflection.Required {
 		t.Fatal("expected reflection requirement to sync from mode")
 	}
@@ -479,15 +627,15 @@ func TestGraphAdapterSyncsLoopStateIntoGraphState(t *testing.T) {
 	}
 }
 
-func TestGraphAdapterSyncToGraphState_PreservesOrchestrationEvents(t *testing.T) {
+func TestGraphNodeRuntimeSyncsLoopOrchestrationEventDelta(t *testing.T) {
 	loop := NewAgentLoop(Deps{})
-	loop.recordBarrierProgress("run-child", "barrier-1", "completed")
-
-	adapter := newGraphLoopAdapter(loop)
 	state := &graphruntime.TurnState{}
 	exec := &graphruntime.ExecutionState{}
+	runtime := newGraphNodeRuntime(loop, state, exec)
 
-	adapter.syncToGraphState(state, exec)
+	base := runtime.captureLoopSideEffectBaseline()
+	loop.recordBarrierProgress("run-child", "barrier-1", "completed")
+	runtime.syncLoopSideEffectsSince(base)
 
 	if len(state.Orchestration.Events) != 1 {
 		t.Fatalf("expected orchestration events to sync, got %#v", state.Orchestration.Events)
@@ -679,6 +827,10 @@ func TestGraphAdapterSyncFromGraphState_UsesBoundaryTaskState(t *testing.T) {
 	adapter := newGraphLoopAdapter(loop)
 
 	adapter.syncFromGraphState(&graphruntime.TurnState{
+		History: []graphruntime.ConversationMessageState{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: "hello"},
+		},
 		PendingMedia:  []map[string]string{{"type": "image_url", "path": "/tmp/restored.png"}},
 		ForceNextTool: "notify_user",
 		ActiveSkills:  map[string]string{"git": "skill content"},
@@ -698,6 +850,9 @@ func TestGraphAdapterSyncFromGraphState_UsesBoundaryTaskState(t *testing.T) {
 	if loop.task.Name != "task name" {
 		t.Fatalf("expected task name sync, got %q", loop.task.Name)
 	}
+	if len(loop.history) != 2 || loop.history[1].Role != "assistant" || loop.history[1].Content != "hello" {
+		t.Fatalf("expected history sync from graph state, got %#v", loop.history)
+	}
 	if loop.task.Status != "running" {
 		t.Fatalf("expected task status sync, got %q", loop.task.Status)
 	}
@@ -716,14 +871,8 @@ func TestGraphAdapterSyncFromGraphState_UsesBoundaryTaskState(t *testing.T) {
 	if loop.task.SkillLoaded != "git" || loop.task.SkillPath != "/skills/git" {
 		t.Fatalf("expected skill sync, got %#v", loop.task)
 	}
-	if len(loop.pendingMedia) != 1 || loop.pendingMedia[0]["path"] != "/tmp/restored.png" {
-		t.Fatalf("expected pending media sync, got %#v", loop.pendingMedia)
-	}
 	if loop.guard.PeekForceToolName() != "notify_user" {
 		t.Fatalf("expected force tool sync, got %q", loop.guard.PeekForceToolName())
-	}
-	if got := loop.activeSkills["git"]; got != "skill content" {
-		t.Fatalf("expected active skill sync, got %#v", loop.activeSkills)
 	}
 }
 
@@ -770,7 +919,7 @@ func TestGraphAdapterSyncToGraphState_ClearsStaleResponseArtifacts(t *testing.T)
 
 func TestGraphAdapterSyncToGraphState_MapsTrailingToolMessagesToToolResults(t *testing.T) {
 	loop := NewAgentLoop(Deps{})
-	loop.history = []llm.Message{
+	history := []llm.Message{
 		{
 			Role:      "assistant",
 			Content:   `{"decision":"tool","reason":"need edit"}`,
@@ -792,7 +941,7 @@ func TestGraphAdapterSyncToGraphState_MapsTrailingToolMessagesToToolResults(t *t
 	}
 
 	adapter := newGraphLoopAdapter(loop)
-	state := &graphruntime.TurnState{}
+	state := &graphruntime.TurnState{History: messagesToGraphHistory(history)}
 	adapter.syncToGraphState(state, &graphruntime.ExecutionState{OutputSchemaName: "reflection.review.v1"})
 
 	if len(state.ToolResults) != 1 {
@@ -843,6 +992,73 @@ func TestGraphAdapterExecuteNode_SyncsTurnStateBeforeReturningError(t *testing.T
 	}
 }
 
+func TestGraphNodeRuntimeWritesHistoryAndEphemeralsThroughTurnState(t *testing.T) {
+	loop := NewAgentLoop(Deps{})
+	adapter := newGraphLoopAdapter(loop)
+	state := &graphruntime.TurnState{}
+	exec := &graphruntime.ExecutionState{}
+
+	result, err := adapter.executeNode(state, exec, func() (graphruntime.NodeResult, error) {
+		runtime := newGraphNodeRuntime(loop, state, exec)
+		runtime.appendMessage(llm.Message{Role: "assistant", Content: "graph-owned message"})
+		runtime.InjectEphemeral("graph-owned ephemeral")
+		return loop.transitionTo(StateDone, graphRouteDone), nil
+	})
+	if err != nil {
+		t.Fatalf("executeNode error: %v", err)
+	}
+	if result.RouteKey != graphRouteDone {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if len(state.History) != 1 || state.History[0].Content != "graph-owned message" {
+		t.Fatalf("expected turn state history write, got %#v", state.History)
+	}
+	if len(state.Ephemerals) != 1 || state.Ephemerals[0] != "graph-owned ephemeral" {
+		t.Fatalf("expected turn state ephemeral write, got %#v", state.Ephemerals)
+	}
+}
+
+func TestGraphNodeRuntimeSyncsLoopSideEffectsWithoutOverwritingHistory(t *testing.T) {
+	loop := NewAgentLoop(Deps{})
+	state := &graphruntime.TurnState{
+		History: []graphruntime.ConversationMessageState{{Role: "assistant", Content: "graph-owned"}},
+	}
+	exec := &graphruntime.ExecutionState{}
+	runtime := newGraphNodeRuntime(loop, state, exec)
+
+	base := runtime.captureLoopSideEffectBaseline()
+	loop.mu.Lock()
+	loop.history = []llm.Message{{Role: "assistant", Content: "loop-owned"}}
+	loop.ephemerals = append(loop.ephemerals, "tool side effect")
+	loop.pendingMedia = append(loop.pendingMedia, map[string]string{"path": "/tmp/tool.png"})
+	loop.activeSkills = map[string]string{"git": "skill content"}
+	loop.task.SkillLoaded = "git"
+	loop.task.SkillPath = "/skills/git"
+	loop.mu.Unlock()
+
+	runtime.syncLoopSideEffectsSince(base)
+
+	if len(state.History) != 1 || state.History[0].Content != "graph-owned" {
+		t.Fatalf("expected graph history to survive side-effect sync, got %#v", state.History)
+	}
+	if len(state.Ephemerals) != 1 || state.Ephemerals[0] != "tool side effect" {
+		t.Fatalf("expected tool ephemeral absorbed into graph state, got %#v", state.Ephemerals)
+	}
+	if len(state.PendingMedia) != 1 || state.PendingMedia[0]["path"] != "/tmp/tool.png" {
+		t.Fatalf("expected pending media absorbed into graph state, got %#v", state.PendingMedia)
+	}
+	if state.ActiveSkills["git"] != "skill content" || state.Task.SkillLoaded != "git" || state.Task.SkillPath != "/skills/git" {
+		t.Fatalf("expected protocol side effects absorbed into graph state, got skills=%#v task=%#v", state.ActiveSkills, state.Task)
+	}
+	loop.mu.Lock()
+	remainingEphemerals := append([]string(nil), loop.ephemerals...)
+	remainingPendingMedia := cloneMediaItems(loop.pendingMedia)
+	loop.mu.Unlock()
+	if len(remainingEphemerals) != 0 || len(remainingPendingMedia) != 0 {
+		t.Fatalf("expected consumed loop side-effect buffers cleared, got ephemerals=%#v pendingMedia=%#v", remainingEphemerals, remainingPendingMedia)
+	}
+}
+
 func TestReflectionNode_DefaultsToAcceptAndRoutesDone(t *testing.T) {
 	loop := NewAgentLoop(Deps{})
 	node := reflectionNode{adapter: newGraphLoopAdapter(loop)}
@@ -871,6 +1087,12 @@ func TestReflectionNode_DefaultsToAcceptAndRoutesDone(t *testing.T) {
 	if !state.Intelligence.Review.Valid || state.Intelligence.Review.Decision != "accept" {
 		t.Fatalf("expected reflection decision to populate intelligence state, got %#v", state.Intelligence.Review)
 	}
+	if state.Intelligence.Decision.Kind != graphruntime.DecisionKindReflection ||
+		state.Intelligence.Decision.SchemaName != graphReflectionSchema ||
+		state.Intelligence.Decision.Decision != "accept" ||
+		!state.Intelligence.Decision.Valid {
+		t.Fatalf("expected reflection contract to populate intelligence state, got %#v", state.Intelligence.Decision)
+	}
 }
 
 func TestReflectionNode_ReviseRoutesBackToGenerate(t *testing.T) {
@@ -894,22 +1116,57 @@ func TestReflectionNode_ReviseRoutesBackToGenerate(t *testing.T) {
 	if result.RouteKey != graphRouteGenerate {
 		t.Fatalf("expected reflect revise to route generate, got %#v", result)
 	}
-	if len(loop.ephemerals) != 1 || loop.ephemerals[0] != "Self-review requested revision: needs tighter answer" {
-		t.Fatalf("expected revise reason injected as ephemeral, got %#v", loop.ephemerals)
+	if len(state.Ephemerals) != 1 || state.Ephemerals[0] != "Self-review requested revision: needs tighter answer" {
+		t.Fatalf("expected revise reason injected as ephemeral, got %#v", state.Ephemerals)
 	}
 	if !state.Intelligence.Review.Valid || state.Intelligence.Review.Decision != "revise" {
 		t.Fatalf("expected revise decision in intelligence state, got %#v", state.Intelligence.Review)
 	}
+	if state.Intelligence.Decision.Kind != graphruntime.DecisionKindReflection ||
+		state.Intelligence.Decision.Decision != "revise" ||
+		state.Intelligence.Decision.Reason != "needs tighter answer" {
+		t.Fatalf("expected revise decision contract in intelligence state, got %#v", state.Intelligence.Decision)
+	}
 }
 
-func TestHandleDone_CompletesWithoutPendingWake(t *testing.T) {
+func TestReflectionNodeService_ExecutesWithoutAgentLoop(t *testing.T) {
+	sink := &ephemeralRecorder{}
+	state := &graphruntime.TurnState{
+		StructuredOutput: graphruntime.StructuredOutputState{
+			SchemaName: graphReflectionSchema,
+			RawJSON:    `{"decision":"revise","reason":"tighten contract"}`,
+			Valid:      true,
+		},
+	}
+
+	result := reflectionNodeService{ephemeral: sink}.Execute(state)
+	if result.RouteKey != graphRouteGenerate || result.OutputSchemaName != graphReflectionSchema {
+		t.Fatalf("expected reflection service to route generate with schema, got %#v", result)
+	}
+	if state.Intelligence.Review.Decision != "revise" || !state.Intelligence.Review.Valid {
+		t.Fatalf("expected state-owned review decision, got %#v", state.Intelligence.Review)
+	}
+	if len(sink.messages) != 1 || sink.messages[0] != "Self-review requested revision: tighten contract" {
+		t.Fatalf("expected ephemeral injection through narrow sink, got %#v", sink.messages)
+	}
+}
+
+type ephemeralRecorder struct {
+	messages []string
+}
+
+func (r *ephemeralRecorder) InjectEphemeral(message string) {
+	r.messages = append(r.messages, message)
+}
+
+func TestDoneNodeService_CompletesWithoutPendingWake(t *testing.T) {
 	delta := &mockDeltaSink{}
 	loop := NewAgentLoop(Deps{Delta: delta})
 	rs := &runState{}
 
-	result, err := loop.handleDone(context.Background(), rs)
+	result, err := doneNodeService{runtime: loop}.Execute(context.Background(), rs)
 	if err != nil {
-		t.Fatalf("handleDone error: %v", err)
+		t.Fatalf("done service error: %v", err)
 	}
 	if result.RouteKey != graphRouteComplete || result.ObservedState != StateIdle.String() {
 		t.Fatalf("expected done to hand off to complete node, got %#v", result)
@@ -919,13 +1176,13 @@ func TestHandleDone_CompletesWithoutPendingWake(t *testing.T) {
 	}
 }
 
-func TestHandleDone_RoutesToMergeWhenPendingWakeExists(t *testing.T) {
+func TestDoneNodeService_RoutesToMergeWhenPendingWakeExists(t *testing.T) {
 	loop := NewAgentLoop(Deps{Delta: &mockDeltaSink{}})
 	loop.pendingWake.Store(true)
 
-	result, err := loop.handleDone(context.Background(), &runState{})
+	result, err := doneNodeService{runtime: loop}.Execute(context.Background(), &runState{})
 	if err != nil {
-		t.Fatalf("handleDone error: %v", err)
+		t.Fatalf("done service error: %v", err)
 	}
 	if result.RouteKey != graphRouteMerge || result.ObservedState != "merge" {
 		t.Fatalf("expected done to route merge when pending wake exists, got %#v", result)
@@ -935,7 +1192,7 @@ func TestHandleDone_RoutesToMergeWhenPendingWakeExists(t *testing.T) {
 	}
 }
 
-func TestHandleDone_RoutesToEvaluateWhenEvoEnabled(t *testing.T) {
+func TestDoneNodeService_RoutesToEvaluateWhenEvoEnabled(t *testing.T) {
 	loop := NewAgentLoop(Deps{
 		Delta:        &mockDeltaSink{},
 		EvoEvaluator: &EvoEvaluator{},
@@ -943,22 +1200,22 @@ func TestHandleDone_RoutesToEvaluateWhenEvoEnabled(t *testing.T) {
 	loop.mode = ModePermissions{Name: "agentic-evo", EvoEnabled: true}
 	loop.traceCollector = NewTraceCollectorHook(nil)
 
-	result, err := loop.handleDone(context.Background(), &runState{})
+	result, err := doneNodeService{runtime: loop}.Execute(context.Background(), &runState{})
 	if err != nil {
-		t.Fatalf("handleDone error: %v", err)
+		t.Fatalf("done service error: %v", err)
 	}
 	if result.RouteKey != graphRouteEvaluate || result.ObservedState != "evaluate" {
 		t.Fatalf("expected done to route evaluate, got %#v", result)
 	}
 }
 
-func TestHandleComplete_FiresCompletionSideEffects(t *testing.T) {
+func TestCompleteNodeService_FiresCompletionSideEffects(t *testing.T) {
 	delta := &mockDeltaSink{}
 	loop := NewAgentLoop(Deps{Delta: delta})
 
-	result, err := loop.handleComplete(context.Background(), &runState{})
+	result, err := completeNodeService{runtime: loop}.Execute(context.Background(), &runState{})
 	if err != nil {
-		t.Fatalf("handleComplete error: %v", err)
+		t.Fatalf("complete service error: %v", err)
 	}
 	if result.Status != graphruntime.NodeStatusComplete || result.ObservedState != StateIdle.String() {
 		t.Fatalf("expected complete node to finish run, got %#v", result)
@@ -968,7 +1225,266 @@ func TestHandleComplete_FiresCompletionSideEffects(t *testing.T) {
 	}
 }
 
-func TestHandleEvaluate_WithoutTraceRoutesComplete(t *testing.T) {
+func TestTerminalNodeServices_ExecuteWithoutAgentLoop(t *testing.T) {
+	runtime := &terminalRuntimeRecorder{evo: true}
+	done, err := doneNodeService{runtime: runtime}.Execute(context.Background(), &runState{})
+	if err != nil {
+		t.Fatalf("done service error: %v", err)
+	}
+	if done.RouteKey != graphRouteEvaluate {
+		t.Fatalf("expected done service to route evaluate when evo is active, got %#v", done)
+	}
+	if !runtime.snapshotted || !runtime.persisted {
+		t.Fatalf("expected done service to snapshot and persist, got %#v", runtime)
+	}
+
+	complete, err := completeNodeService{runtime: runtime}.Execute(context.Background(), &runState{})
+	if err != nil {
+		t.Fatalf("complete service error: %v", err)
+	}
+	if complete.Status != graphruntime.NodeStatusComplete || complete.ObservedState != StateIdle.String() {
+		t.Fatalf("expected complete service terminal result, got %#v", complete)
+	}
+	if !runtime.completed || !runtime.idle {
+		t.Fatalf("expected completion side effects through runtime port, got %#v", runtime)
+	}
+}
+
+func TestToolExecNodeService_ExecutesWithoutAgentLoop(t *testing.T) {
+	runtime := &toolExecRuntimeRecorder{
+		last: llm.Message{
+			ToolCalls: []llm.ToolCall{{
+				ID: "call-1",
+				Function: llm.ToolCallFunc{
+					Name:      "spawn_agent",
+					Arguments: `{}`,
+				},
+			}},
+		},
+		yield: true,
+		spawn: true,
+	}
+
+	result, err := toolExecNodeService{runtime: runtime}.Execute(context.Background(), &runState{})
+	if err != nil {
+		t.Fatalf("tool exec service error: %v", err)
+	}
+	if result.RouteKey != graphRouteSpawn || result.ObservedState != "spawn" {
+		t.Fatalf("expected yield to route spawn, got %#v", result)
+	}
+	if runtime.serialCalls != 1 {
+		t.Fatalf("expected serial tool execution once, got %d", runtime.serialCalls)
+	}
+	if !runtime.yieldConsumed {
+		t.Fatal("expected yield flag consumed")
+	}
+}
+
+func TestGuardCheckNodeService_ExecutesWithoutAgentLoop(t *testing.T) {
+	runtime := &guardCheckRuntimeRecorder{
+		tokenEstimate: 96,
+		model:         "gpt-4.1",
+	}
+
+	result, err := guardCheckNodeService{runtime: runtime}.Execute(&runState{exec: &graphruntime.ExecutionState{TurnSteps: 1}})
+	if err != nil {
+		t.Fatalf("guard check service error: %v", err)
+	}
+	if result.RouteKey != graphRouteGenerate || result.ObservedState != StateGenerate.String() {
+		t.Fatalf("expected guard check service to continue generate, got %#v", result)
+	}
+}
+
+func TestCompactNodeService_ExecutesWithoutAgentLoop(t *testing.T) {
+	runtime := &compactRuntimeRecorder{
+		toolHeavy: false,
+		model:     "gpt-4.1",
+	}
+
+	result, err := compactNodeService{runtime: runtime}.Execute(context.Background())
+	if err != nil {
+		t.Fatalf("compact service error: %v", err)
+	}
+	if result.RouteKey != graphRouteGenerate || result.ObservedState != StateGenerate.String() {
+		t.Fatalf("expected compact service to route generate, got %#v", result)
+	}
+	if runtime.compacted != 1 || runtime.persisted != 1 || len(runtime.ephemerals) != 1 {
+		t.Fatalf("expected compact service side effects through runtime ports, got %#v", runtime)
+	}
+}
+
+func TestGenerateNodeService_ExecutesWithoutAgentLoop(t *testing.T) {
+	runtime := &generateRuntimeRecorder{
+		resp: &llm.Response{
+			Content: "draft answer",
+		},
+		selfReview: true,
+		verdict:    GuardVerdict{Action: "pass"},
+	}
+
+	result, err := generateNodeService{runtime: runtime}.Execute(context.Background(), &runState{})
+	if err != nil {
+		t.Fatalf("generate service error: %v", err)
+	}
+	if result.RouteKey != graphRouteReflect || result.ObservedState != "reflect" {
+		t.Fatalf("expected generate service to route reflect, got %#v", result)
+	}
+	if runtime.microCompacted != 1 {
+		t.Fatalf("expected micro compact before generation, got %d", runtime.microCompacted)
+	}
+	if len(runtime.appended) != 1 || runtime.appended[0].Content != "draft answer" {
+		t.Fatalf("expected assistant message appended through runtime port, got %#v", runtime.appended)
+	}
+	if runtime.finalResponse != "draft answer" {
+		t.Fatalf("expected final response recorded through runtime port, got %q", runtime.finalResponse)
+	}
+}
+
+type terminalRuntimeRecorder struct {
+	snapshotted bool
+	persisted   bool
+	pendingWake bool
+	evo         bool
+	completed   bool
+	idle        bool
+	hookSteps   int
+}
+
+func (r *terminalRuntimeRecorder) snapshotPendingFileEdits(int) {
+	r.snapshotted = true
+}
+
+func (r *terminalRuntimeRecorder) persistHistory() {
+	r.persisted = true
+}
+
+func (r *terminalRuntimeRecorder) hasPendingWake() bool {
+	return r.pendingWake
+}
+
+func (r *terminalRuntimeRecorder) shouldRunEvoEvaluation() bool {
+	return r.evo
+}
+
+func (r *terminalRuntimeRecorder) transitionTo(next State, route string) graphruntime.NodeResult {
+	return graphruntime.NodeResult{RouteKey: route, ObservedState: next.String()}
+}
+
+func (r *terminalRuntimeRecorder) emitComplete() {
+	r.completed = true
+}
+
+func (r *terminalRuntimeRecorder) fireHooks(_ context.Context, steps int) {
+	r.hookSteps = steps
+}
+
+func (r *terminalRuntimeRecorder) markDreamIdle() {
+	r.idle = true
+}
+
+func (r *terminalRuntimeRecorder) finishWith(observed State, status graphruntime.NodeStatus) graphruntime.NodeResult {
+	return graphruntime.NodeResult{Status: status, ObservedState: observed.String()}
+}
+
+type toolExecRuntimeRecorder struct {
+	last          llm.Message
+	yield         bool
+	yieldConsumed bool
+	spawn         bool
+	serialCalls   int
+}
+
+func (r *toolExecRuntimeRecorder) lastHistoryMessage() llm.Message { return r.last }
+func (r *toolExecRuntimeRecorder) execToolsConcurrent(context.Context, []llm.ToolCall) {
+}
+func (r *toolExecRuntimeRecorder) execToolsSerial(context.Context, []llm.ToolCall) bool {
+	r.serialCalls++
+	return false
+}
+func (r *toolExecRuntimeRecorder) consumeYieldRequested() bool {
+	r.yieldConsumed = true
+	return r.yield
+}
+func (r *toolExecRuntimeRecorder) shouldRouteSpawn([]llm.ToolCall) bool { return r.spawn }
+func (r *toolExecRuntimeRecorder) transitionTo(next State, route string) graphruntime.NodeResult {
+	return graphruntime.NodeResult{RouteKey: route, ObservedState: next.String()}
+}
+
+type guardCheckRuntimeRecorder struct {
+	tokenEstimate int
+	model         string
+	truncated     int
+	ephemerals    []string
+}
+
+func (r *guardCheckRuntimeRecorder) estimateTokens() int  { return r.tokenEstimate }
+func (r *guardCheckRuntimeRecorder) currentModel() string { return r.model }
+func (r *guardCheckRuntimeRecorder) forceTruncate(n int)  { r.truncated = n }
+func (r *guardCheckRuntimeRecorder) InjectEphemeral(msg string) {
+	r.ephemerals = append(r.ephemerals, msg)
+}
+func (r *guardCheckRuntimeRecorder) transitionTo(next State, route string) graphruntime.NodeResult {
+	return graphruntime.NodeResult{RouteKey: route, ObservedState: next.String()}
+}
+
+type compactRuntimeRecorder struct {
+	toolHeavy     bool
+	tokenEstimate int
+	model         string
+	compacted     int
+	persisted     int
+	ephemerals    []string
+}
+
+func (r *compactRuntimeRecorder) toolHeavyCompact() bool { return r.toolHeavy }
+func (r *compactRuntimeRecorder) estimateTokens() int    { return r.tokenEstimate }
+func (r *compactRuntimeRecorder) currentModel() string   { return r.model }
+func (r *compactRuntimeRecorder) doCompact(context.Context) {
+	r.compacted++
+}
+func (r *compactRuntimeRecorder) persistFullHistory() {
+	r.persisted++
+}
+func (r *compactRuntimeRecorder) InjectEphemeral(msg string) {
+	r.ephemerals = append(r.ephemerals, msg)
+}
+func (r *compactRuntimeRecorder) transitionTo(next State, route string) graphruntime.NodeResult {
+	return graphruntime.NodeResult{RouteKey: route, ObservedState: next.String()}
+}
+
+type generateRuntimeRecorder struct {
+	resp           *llm.Response
+	err            error
+	selfReview     bool
+	verdict        GuardVerdict
+	microCompacted int
+	appended       []llm.Message
+	finalResponse  string
+}
+
+func (r *generateRuntimeRecorder) microCompact() { r.microCompacted++ }
+func (r *generateRuntimeRecorder) doGenerate(context.Context, RunOptions, []string) (*llm.Response, string, error) {
+	return r.resp, "mock", r.err
+}
+func (r *generateRuntimeRecorder) guardCheck(string, int, int) GuardVerdict { return r.verdict }
+func (r *generateRuntimeRecorder) recordFinalResponse(content string)       { r.finalResponse = content }
+func (r *generateRuntimeRecorder) selfReviewEnabled() bool                  { return r.selfReview }
+func (r *generateRuntimeRecorder) appendMessage(msg llm.Message) {
+	r.appended = append(r.appended, msg)
+}
+func (r *generateRuntimeRecorder) incrementOutputContinuation() int { return 1 }
+func (r *generateRuntimeRecorder) resetOutputContinuations()        {}
+func (r *generateRuntimeRecorder) emitText(string)                  {}
+func (r *generateRuntimeRecorder) emitError(error)                  {}
+func (r *generateRuntimeRecorder) forceTruncate(int)                {}
+func (r *generateRuntimeRecorder) transitionTo(next State, route string) graphruntime.NodeResult {
+	return graphruntime.NodeResult{RouteKey: route, ObservedState: next.String()}
+}
+func (r *generateRuntimeRecorder) finishWith(observed State, status graphruntime.NodeStatus) graphruntime.NodeResult {
+	return graphruntime.NodeResult{Status: status, ObservedState: observed.String()}
+}
+
+func TestEvaluationNodeService_WithoutTraceRoutesComplete(t *testing.T) {
 	loop := NewAgentLoop(Deps{
 		Delta:        &mockDeltaSink{},
 		EvoEvaluator: &EvoEvaluator{},
@@ -977,16 +1493,16 @@ func TestHandleEvaluate_WithoutTraceRoutesComplete(t *testing.T) {
 	loop.mode = ModePermissions{Name: "agentic-evo", EvoEnabled: true}
 	loop.history = []llm.Message{{Role: "user", Content: "ship it"}}
 
-	result, err := loop.handleEvaluate(context.Background(), &runState{})
+	result, err := evaluationNodeService{runtime: loop}.Execute()
 	if err != nil {
-		t.Fatalf("handleEvaluate error: %v", err)
+		t.Fatalf("evaluation service error: %v", err)
 	}
 	if result.RouteKey != graphRouteComplete {
 		t.Fatalf("expected evaluate without trace to route complete, got %#v", result)
 	}
 }
 
-func TestHandleRepair_ReentersPrepareWithinGraph(t *testing.T) {
+func TestRepairNodeService_ReentersPrepareWithinGraph(t *testing.T) {
 	delta := &mockDeltaSink{}
 	loop := NewAgentLoop(Deps{Delta: delta})
 	loop.setRepairDecision(graphruntime.RepairState{
@@ -996,9 +1512,9 @@ func TestHandleRepair_ReentersPrepareWithinGraph(t *testing.T) {
 	})
 	rs := &runState{}
 
-	result, err := loop.handleRepair(context.Background(), rs)
+	result, err := repairNodeService{runtime: loop}.Execute(rs)
 	if err != nil {
-		t.Fatalf("handleRepair error: %v", err)
+		t.Fatalf("repair service error: %v", err)
 	}
 	if result.RouteKey != graphRoutePrepare || result.ObservedState != "repair" {
 		t.Fatalf("expected repair to route prepare, got %#v", result)
@@ -1042,9 +1558,8 @@ func TestMergeNode_ConsumesPendingWakeAndReentersPrepare(t *testing.T) {
 	if loop.pendingWake.Load() {
 		t.Fatal("expected merge node to consume pending wake")
 	}
-	history := loop.GetHistory()
-	if len(history) != 1 || history[0].Role != "user" || history[0].Content != "" {
-		t.Fatalf("expected merge node to append empty user handoff message, got %#v", history)
+	if len(state.History) != 1 || state.History[0].Role != "user" || state.History[0].Content != "" {
+		t.Fatalf("expected merge node to append empty user handoff message, got %#v", state.History)
 	}
 	if state.Orchestration.PendingMerge {
 		t.Fatalf("expected merge node to clear pending merge state, got %#v", state.Orchestration)

@@ -2,6 +2,9 @@ package application
 
 import (
 	"fmt"
+	"log/slog"
+	"sort"
+	"strings"
 
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
@@ -16,6 +19,54 @@ type assembledTools struct {
 	registry *tool.Registry
 	spawn    *tool.SpawnAgentTool
 	skill    *tool.SkillTool
+	manifest []toolProviderManifest
+}
+
+type toolAssemblyInput struct {
+	cfg         *config.Config
+	registry    *tool.Registry
+	registered  []string
+	overwritten []string
+	brainDir    string
+	fileHistory *workspace.FileHistory
+	sbMgr       *sandbox.Manager
+	kiStore     *knowledge.Store
+	kiRetriever *knowledge.Retriever
+	memStore    *memory.Store
+	diaryStore  *memory.DiaryStore
+	skillMgr    *skill.Manager
+}
+
+type builtinToolProvider interface {
+	Name() string
+	Register(*toolAssemblyInput) assembledToolHandles
+}
+
+type toolProviderSet []builtinToolProvider
+
+type assembledToolHandles struct {
+	spawn *tool.SpawnAgentTool
+	skill *tool.SkillTool
+}
+
+type toolProviderManifest struct {
+	Name       string
+	Tools      []string
+	Overwrites []string
+}
+
+type toolProviderSetResult struct {
+	handles  assembledToolHandles
+	manifest []toolProviderManifest
+}
+
+func (in *toolAssemblyInput) Register(registered tool.Tool) {
+	name := registered.Name()
+	if _, exists := in.registry.Get(name); exists {
+		in.overwritten = append(in.overwritten, name)
+	}
+	in.registry.Register(registered)
+	in.registered = append(in.registered, name)
 }
 
 func assembleBuiltinTools(
@@ -33,57 +84,98 @@ func assembleBuiltinTools(
 	registry := tool.NewRegistry()
 	registry.SetWorkspaceDir(workspaceDir)
 
-	registry.Register(&tool.ReadFileTool{})
-	registry.Register(&tool.WriteFileTool{FileHistory: fileHistory})
-	registry.Register(&tool.EditFileTool{FileHistory: fileHistory})
-	registry.Register(&tool.GlobTool{})
-	registry.Register(&tool.GrepSearchTool{})
-	registry.Register(tool.NewRunCommandTool(sbMgr))
-	registry.Register(tool.NewCommandStatusTool(sbMgr))
-
-	registry.Register(tool.NewWebSearchTool(cfg.Search.Endpoint))
-	registry.Register(tool.NewWebFetchTool(cfg.Search.Endpoint))
-	registry.Register(tool.NewDeepResearchTool(cfg.Search.Endpoint))
-	registry.Register(tool.NewTaskPlanTool(brainDir))
-	registry.Register(tool.NewTaskBoundaryTool())
-	registry.Register(tool.NewNotifyUserTool())
-	registry.Register(&tool.UpdateProjectContextTool{})
-	registry.Register(tool.NewSaveKnowledgeTool(kiStore, kiRetriever, cfg.Embedding.SimilarityThreshold))
-	registry.Register(tool.NewRecallTool(kiRetriever, memStore, diaryStore))
-	registry.Register(tool.NewSendMessageTool(brainDir))
-	registry.Register(tool.NewTaskListTool(brainDir))
-
-	spawnTool := tool.NewSpawnAgentTool(nil)
-	registry.Register(spawnTool)
-	skillTool := tool.NewSkillTool(skillMgr)
-	registry.Register(skillTool)
-
-	registry.Register(tool.NewEvoTool("/tmp/ngoagent-evo", sbMgr))
-	registry.Register(tool.NewBrainArtifactTool(nil))
-	registry.Register(tool.NewUndoEditTool(fileHistory))
-
-	registry.Register(&tool.GitStatusTool{})
-	registry.Register(&tool.GitDiffTool{})
-	registry.Register(&tool.GitLogTool{})
-	registry.Register(&tool.GitCommitTool{})
-	registry.Register(&tool.GitBranchTool{})
-
-	viewMediaAddr := fmt.Sprintf("http://localhost:%d", cfg.Server.HTTPPort)
-	if cfg.Server.HTTPPort == 0 {
-		viewMediaAddr = "http://localhost:19996"
+	input := toolAssemblyInput{
+		cfg:         cfg,
+		registry:    registry,
+		brainDir:    brainDir,
+		fileHistory: fileHistory,
+		sbMgr:       sbMgr,
+		kiStore:     kiStore,
+		kiRetriever: kiRetriever,
+		memStore:    memStore,
+		diaryStore:  diaryStore,
+		skillMgr:    skillMgr,
 	}
-	registry.Register(tool.NewViewMediaTool(viewMediaAddr))
 
-	registry.Register(&tool.TreeTool{})
-	registry.Register(&tool.FindFilesTool{})
-	registry.Register(&tool.CountLinesTool{})
-	registry.Register(&tool.DiffFilesTool{})
-	registry.Register(tool.NewHTTPFetchTool())
-	registry.Register(&tool.ClipboardTool{})
+	result := defaultToolProviderSet().Register(input)
+	logToolProviderManifest(result.manifest)
 
 	return assembledTools{
 		registry: registry,
-		spawn:    spawnTool,
-		skill:    skillTool,
+		spawn:    result.handles.spawn,
+		skill:    result.handles.skill,
+		manifest: result.manifest,
 	}
+}
+
+func defaultToolProviderSet() toolProviderSet {
+	return toolProviderSet{
+		filesystemToolProvider{},
+		researchToolProvider{},
+		planningToolProvider{},
+		knowledgeToolProvider{},
+		runtimeToolProvider{},
+		gitToolProvider{},
+		mediaToolProvider{},
+		workspaceUtilityToolProvider{},
+	}
+}
+
+func (providers toolProviderSet) Register(input toolAssemblyInput) toolProviderSetResult {
+	var handles assembledToolHandles
+	manifest := make([]toolProviderManifest, 0, len(providers))
+	for _, provider := range providers {
+		providerInput := input
+		handles = mergeToolHandles(handles, provider.Register(&providerInput))
+		manifest = append(manifest, toolProviderManifest{
+			Name:       provider.Name(),
+			Tools:      sortedToolNames(providerInput.registered),
+			Overwrites: sortedToolNames(providerInput.overwritten),
+		})
+	}
+	return toolProviderSetResult{
+		handles:  handles,
+		manifest: manifest,
+	}
+}
+
+func mergeToolHandles(base assembledToolHandles, next assembledToolHandles) assembledToolHandles {
+	if next.spawn != nil {
+		base.spawn = next.spawn
+	}
+	if next.skill != nil {
+		base.skill = next.skill
+	}
+	return base
+}
+
+func sortedToolNames(names []string) []string {
+	names = append([]string(nil), names...)
+	sort.Strings(names)
+	return names
+}
+
+func logToolProviderManifest(manifest []toolProviderManifest) {
+	total, overwrites, groups := summarizeToolProviderManifest(manifest)
+	if total == 0 {
+		return
+	}
+	slog.Info("[tools] builtin providers registered",
+		"providers", len(manifest),
+		"tools", total,
+		"overwrites", overwrites,
+		"groups", groups,
+	)
+}
+
+func summarizeToolProviderManifest(manifest []toolProviderManifest) (int, int, string) {
+	total := 0
+	overwrites := 0
+	groups := make([]string, 0, len(manifest))
+	for _, entry := range manifest {
+		total += len(entry.Tools)
+		overwrites += len(entry.Overwrites)
+		groups = append(groups, fmt.Sprintf("%s:%d", entry.Name, len(entry.Tools)))
+	}
+	return total, overwrites, strings.Join(groups, ",")
 }

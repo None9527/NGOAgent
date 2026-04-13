@@ -1,0 +1,41 @@
+{
+  "id": "service_hydrate_skips_wake_ready_barrier",
+  "title": "hydrate pending barrier skips wake-ready barrier snapshot",
+  "category": "recovery",
+  "layers": ["service"],
+  "service": {
+    "session_id": "session-barrier-wake",
+    "seed_barrier": {
+      "ID": "stale-barrier",
+      "PendingCount": 1
+    },
+    "snapshots": [
+      {
+        "RunID": "run-wake",
+        "SessionID": "session-barrier-wake",
+        "GraphID": "agent_loop",
+        "GraphVersion": "v1alpha1",
+        "Status": "wait",
+        "TurnState": {
+          "RunID": "run-wake"
+        },
+        "ExecutionState": {
+          "Status": "wait",
+          "WaitReason": "barrier",
+          "PendingWake": true,
+          "PendingBarrier": {
+            "ID": "barrier-should-not-restore",
+            "PendingCount": 1
+          }
+        }
+      }
+    ],
+    "action": {
+      "kind": "hydrate_pending_barrier",
+      "run_id": "run-wake"
+    },
+    "expect": {
+      "no_active_barrier": true
+    }
+  }
+}

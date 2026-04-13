@@ -1,0 +1,39 @@
+{
+  "id": "service_latest_wait_replays_plan_review",
+  "title": "latest wait snapshot resolves to plan review reconnect action",
+  "category": "state_confusion",
+  "layers": ["service"],
+  "service": {
+    "session_id": "session-plan-review",
+    "snapshots": [
+      {
+        "RunID": "run-plan-review",
+        "SessionID": "session-plan-review",
+        "GraphID": "agent_loop",
+        "GraphVersion": "v1alpha1",
+        "Status": "wait",
+        "TurnState": {
+          "RunID": "run-plan-review",
+          "Intelligence": {
+            "Planning": {
+              "Required": true,
+              "ReviewRequired": true,
+              "Trigger": "resume_run",
+              "MissingArtifacts": ["plan.md"]
+            }
+          }
+        },
+        "ExecutionState": {
+          "Status": "wait",
+          "WaitReason": "user_input"
+        }
+      }
+    ],
+    "action": {
+      "kind": "latest_wait_snapshot_view"
+    },
+    "expect": {
+      "reconnect_action": "replay_plan_review"
+    }
+  }
+}

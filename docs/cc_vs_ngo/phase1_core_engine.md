@@ -86,7 +86,7 @@ AgentLoop.Run()
             │
             for {
               switch CurrentState() {
-              ├── StatePrepare   → doPrepare() → Generate
+              ├── StatePrepare   → prepare node service（历史实现名 doPrepare）→ Generate
               ├── StateGenerate  → doGenerate() → ToolExec | Done
               │       ├── PromptEngine.Assemble()
               │       ├── provider.GenerateStream()
@@ -156,12 +156,12 @@ AgentLoop.Run()
 
 **循环一次迭代**：
 ```
-1. StatePrepare:    doPrepare(ctx) — 注入 planning reminder
+1. StatePrepare:    prepare node service — 注入 planning reminder
 2. StateGenerate:   doGenerate(ctx) — 组装 prompt + API 调用
 3. StateToolExec:   for tc := range toolCalls { doToolExec() } — 串行执行
 4. StateGuardCheck: 3 级上下文检查 → Generate/Compact/Done
 5. StateCompact:    doCompact() → Generate
-6. StateDone:       persistHistory + fireHooks + pendingWake check
+6. StateDone:       persistHistory + fireHooks + pendingWake check（当前由 graph runtime / node service 协同承载）
 ```
 
 ### 2.3 循环控制流差异矩阵

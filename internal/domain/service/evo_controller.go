@@ -175,33 +175,21 @@ func evaluationNeedsRepair(eval graphruntime.EvaluationState) bool {
 	return false
 }
 
-func (a *AgentLoop) continueWithRepair(rs *runState) graphruntime.NodeResult {
-	intelligence := a.intelligenceSnapshot()
-	repair := intelligence.Repair
-	if !repair.Allowed || repair.Strategy == "" {
-		return a.transitionTo(StateIdle, graphRouteComplete)
-	}
+func (a *AgentLoop) repairSnapshot() graphruntime.RepairState {
+	return a.intelligenceSnapshot().Repair
+}
 
-	repair.Attempted = true
-	a.setRepairDecision(repair)
+func (a *AgentLoop) recordRepair(repair graphruntime.RepairState) {
 	if a.deps.EvoRepairRouter != nil {
 		_ = a.deps.EvoRepairRouter.RecordRepair(a.SessionID(), 0, repair, false, 0, 0, 0)
 	}
+}
+
+func (a *AgentLoop) emitRepairWake() {
 	a.pushEvo("auto_wake_start", map[string]string{"type": "auto_wake_start", "session_id": a.SessionID()})
 	if a.deps.Delta != nil {
 		a.deps.Delta.OnAutoWakeStart()
 	}
-	if repair.Ephemeral != "" {
-		a.InjectEphemeral(repair.Ephemeral)
-	}
-	rs.setStepCount(0)
-	rs.setRetryCount(0)
-	func() {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		a.history = append(a.history, a.buildUserMessage(""))
-	}()
-	return a.transitionTo(StatePrepare, graphRoutePrepare)
 }
 
 // pushEvo sends an evo event via WS push.

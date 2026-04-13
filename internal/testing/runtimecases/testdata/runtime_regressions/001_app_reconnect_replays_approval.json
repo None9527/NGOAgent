@@ -1,0 +1,40 @@
+{
+  "id": "app_reconnect_replays_approval",
+  "title": "application reconnect replays pending approval",
+  "category": "recovery",
+  "layers": ["application"],
+  "application": {
+    "session_id": "session-reconnect",
+    "snapshots": [
+      {
+        "RunID": "run-reconnect",
+        "SessionID": "session-reconnect",
+        "GraphID": "agent_loop",
+        "GraphVersion": "v1alpha1",
+        "Status": "wait",
+        "ExecutionState": {
+          "Status": "wait",
+          "WaitReason": "approval",
+          "PendingApproval": {
+            "ID": "approval-reconnect",
+            "ToolName": "write_file",
+            "Args": {"path": "replayed.go"},
+            "Reason": "needs confirmation"
+          }
+        },
+        "UpdatedAt": "2026-04-13T03:27:44Z"
+      }
+    ],
+    "action": {
+      "kind": "chat_stream"
+    },
+    "expect": {
+      "approval": {
+        "id": "approval-reconnect",
+        "tool_name": "write_file",
+        "reason": "needs confirmation",
+        "args": {"path": "replayed.go"}
+      }
+    }
+  }
+}

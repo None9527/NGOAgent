@@ -20,18 +20,33 @@ func (a *AgentLoop) setReviewDecision(review graphruntime.ReviewDecisionState) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.intelligence.Review = review
+	a.intelligence.Decision = graphruntime.DecisionContractState{
+		Kind:       graphruntime.DecisionKindReflection,
+		SchemaName: review.SchemaName,
+		Decision:   review.Decision,
+		Reason:     review.Reason,
+		Valid:      review.Valid && review.Decision != "",
+	}
 }
 
 func (a *AgentLoop) setPlanningDecision(planning graphruntime.PlanningState) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.intelligence.Planning = planning
+	if planning.ReviewRequired && planning.ReviewDecision == "" {
+		a.intelligence.Decision = planningPendingDecisionContract(planning)
+		return
+	}
+	if planning.ReviewDecision != "" {
+		a.intelligence.Decision = planningAppliedDecisionContract(planning)
+	}
 }
 
 func (a *AgentLoop) setEvaluationDecision(eval graphruntime.EvaluationState) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.intelligence.Evaluation = eval
+	a.intelligence.Decision = evaluationDecisionContract(eval)
 }
 
 func (a *AgentLoop) setRepairDecision(repair graphruntime.RepairState) {
@@ -48,7 +63,9 @@ func cloneIntelligenceState(in graphruntime.IntelligenceState) graphruntime.Inte
 }
 
 func intelligenceStateEmpty(in graphruntime.IntelligenceState) bool {
-	return !in.Planning.Required &&
+	return !in.Decision.Valid &&
+		in.Decision.Kind == graphruntime.DecisionKindNone &&
+		!in.Planning.Required &&
 		!in.Planning.ReviewRequired &&
 		in.Planning.ReviewDecision == "" &&
 		in.Planning.ReviewFeedback == "" &&

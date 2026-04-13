@@ -133,6 +133,21 @@ func (a *AgentLoop) runGraph(ctx context.Context, userMessage string) (runErr er
 		UserMessage: userMessage,
 		Mode:        a.options.Mode,
 	}
+	func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		turnState.History = messagesToGraphHistory(a.history)
+		turnState.Ephemerals = append([]string(nil), a.ephemerals...)
+		turnState.PendingMedia = cloneMediaItems(a.pendingMedia)
+		turnState.ActiveSkills = cloneStringMap(a.activeSkills)
+		turnState.Compact = graphruntime.CompactState{
+			CompactCount:        a.compactCount,
+			OutputContinuations: a.outputContinuations,
+			HistoryDirty:        a.historyDirty,
+		}
+		a.ephemerals = nil
+		a.pendingMedia = nil
+	}()
 	runCtx = ctxutil.WithRunID(runCtx, turnState.RunID)
 	req := graphruntime.RunRequest{
 		RunID:   turnState.RunID,
@@ -508,10 +523,35 @@ func (a *AgentLoop) finishWith(observed State, status graphruntime.NodeStatus) g
 	return graphruntime.NodeResult{Status: status, ObservedState: observed.String()}
 }
 
-// doPrepare and shouldInjectPlanning are in prepare.go
+// prepare node execution helpers and shouldInjectPlanning are in prepare.go
+
+type generateInput struct {
+	History      []llm.Message
+	Ephemerals   []string
+	PendingMedia []map[string]string
+	HistoryDirty bool
+	SubagentMode bool
+}
 
 // doGenerate calls the LLM with the fully assembled system prompt.
 func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions, excluded []string) (*llm.Response, string, error) {
+	input := generateInput{}
+	func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		input.History = append([]llm.Message(nil), a.history...)
+		input.Ephemerals = append([]string(nil), a.ephemerals...)
+		input.PendingMedia = cloneMediaItems(a.pendingMedia)
+		input.HistoryDirty = a.historyDirty
+		input.SubagentMode = a.options.Mode == "subagent"
+		a.ephemerals = nil
+		a.pendingMedia = nil
+		a.historyDirty = false
+	}()
+	return a.doGenerateWithInput(ctx, opts, excluded, input)
+}
+
+func (a *AgentLoop) doGenerateWithInput(ctx context.Context, opts RunOptions, excluded []string, input generateInput) (*llm.Response, string, error) {
 	model := opts.Model
 	if model == "" {
 		model = a.deps.LLMRouter.CurrentModel()
@@ -525,11 +565,11 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions, excluded []
 	provName := provider.Name()
 
 	// ═══ Assemble system prompt with ALL data sources ═══
-	promptDeps := a.buildPromptDeps(ctx, model, opts)
+	promptDeps := a.buildPromptDepsWithHistory(ctx, model, opts, input.History)
 	var systemPrompt string
 	var useCache bool
 	var splitResult prompt.AssembleResult
-	if a.options.Mode == "subagent" {
+	if input.SubagentMode {
 		systemPrompt, _ = a.deps.PromptEngine.AssembleSubagent(promptDeps)
 	} else {
 		// Use AssembleSplit: static (cacheable) + dynamic (per-request)
@@ -547,7 +587,7 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions, excluded []
 	a.cacheTracker.RecordCall(llm.HashString(systemPrompt))
 
 	// Build messages — use ContentParts with cache_control when provider supports it
-	messages := make([]llm.Message, 0, len(a.history)+1)
+	messages := make([]llm.Message, 0, len(input.History)+1)
 	if useCache {
 		// Multi-breakpoint cache: each segment gets its own cache_control marker
 		// DashScope supports up to 4 markers; we use 2 (core + session)
@@ -568,26 +608,14 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions, excluded []
 		messages = append(messages, llm.Message{Role: "system", Content: systemPrompt})
 	}
 
-	var ephemerals []string
-	var mediaItems []map[string]string
-	func() {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		messages = append(messages, a.history...)
-		// Drain ephemerals
-		ephemerals = a.ephemerals
-		a.ephemerals = nil
-		// Drain pending media
-		mediaItems = a.pendingMedia
-		a.pendingMedia = nil
-	}()
+	messages = append(messages, input.History...)
 
 	// ═══ Multimodal: inject pending media as ContentParts ═══
 	// Media loaded via view_media tool becomes visible to the VLM in the next call.
-	if len(mediaItems) > 0 {
+	if len(input.PendingMedia) > 0 {
 		var parts []llm.ContentPart
 		var pathList []string
-		for _, item := range mediaItems {
+		for _, item := range input.PendingMedia {
 			switch item["type"] {
 			case "image_url":
 				parts = append(parts, llm.ContentPart{
@@ -628,9 +656,9 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions, excluded []
 	}
 
 	// Inject ephemerals as a system-level hint (not user, to avoid consecutive user merging)
-	if len(ephemerals) > 0 {
+	if len(input.Ephemerals) > 0 {
 		var ephContent strings.Builder
-		for _, eph := range ephemerals {
+		for _, eph := range input.Ephemerals {
 			ephContent.WriteString("<EPHEMERAL_MESSAGE>\n")
 			ephContent.WriteString(eph)
 			ephContent.WriteString("\n</EPHEMERAL_MESSAGE>\n\n")
@@ -640,9 +668,7 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions, excluded []
 
 	// Sanitize only when history was restructured (compact/truncate).
 	// Normal flow produces well-ordered messages, so this is unnecessary overhead.
-	var dirty bool
-	func() { a.mu.Lock(); defer a.mu.Unlock(); dirty = a.historyDirty; a.historyDirty = false }()
-	if dirty {
+	if input.HistoryDirty {
 		messages = enforceTurnOrdering(messages)
 		messages = sanitizeMessages(messages)
 	}
@@ -779,6 +805,13 @@ func (a *AgentLoop) doGenerate(ctx context.Context, opts RunOptions, excluded []
 
 // buildPromptDeps populates ALL 11 fields from injected stores.
 func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunOptions) prompt.Deps {
+	a.mu.Lock()
+	history := append([]llm.Message(nil), a.history...)
+	a.mu.Unlock()
+	return a.buildPromptDepsWithHistory(ctx, model, opts, history)
+}
+
+func (a *AgentLoop) buildPromptDepsWithHistory(ctx context.Context, model string, opts RunOptions, history []llm.Message) prompt.Deps {
 	deps := prompt.Deps{
 		Mode:        opts.Mode,
 		ToolDescs:   a.buildToolDescs(),
@@ -811,9 +844,9 @@ func (a *AgentLoop) buildPromptDeps(ctx context.Context, model string, opts RunO
 	// Semantic Memory — retrieve relevant conversation fragments from vector memory.
 	if a.deps.MemoryStore != nil {
 		var query string
-		for i := len(a.history) - 1; i >= 0; i-- {
-			if a.history[i].Role == "user" {
-				query = a.history[i].Content
+		for i := len(history) - 1; i >= 0; i-- {
+			if history[i].Role == "user" {
+				query = history[i].Content
 				break
 			}
 		}

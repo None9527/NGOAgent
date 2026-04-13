@@ -11,11 +11,6 @@ import type { FC } from 'react';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { LinkIcon } from './icons/EditIcons.js';
-import {
-  EditPencilIcon,
-  AutoEditIcon,
-  PlanModeIcon,
-} from './icons/EditIcons.js';
 import { ArrowUpIcon } from './icons/NavigationIcons.js';
 import { StopIcon } from './icons/StopIcon.js';
 import { useStream } from '../providers/StreamProvider';
@@ -97,21 +92,27 @@ const formatFileSize = (bytes: number): string => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
-/**
- * Get icon component for edit mode type
- */
-export const getEditModeIcon = (iconType: EditModeIconType): ReactNode => {
-  switch (iconType) {
-    case 'edit':
-      return <EditPencilIcon />;
-    case 'auto':
-    case 'yolo':
-      return <AutoEditIcon />;
-    case 'plan':
-      return <PlanModeIcon />;
-    default:
-      return null;
-  }
+const modeTone: Record<string, { label: string; hint: string; className: string }> = {
+  Plan: {
+    label: 'Plan',
+    hint: 'review first',
+    className: 'border-cyan-300/35 bg-cyan-300/10 text-cyan-100',
+  },
+  Agentic: {
+    label: 'Agentic',
+    hint: 'execute',
+    className: 'border-amber-300/35 bg-amber-300/10 text-amber-100',
+  },
+  Evo: {
+    label: 'Evo',
+    hint: 'repair loop',
+    className: 'border-emerald-300/35 bg-emerald-300/10 text-emerald-100',
+  },
+  Auto: {
+    label: 'Auto',
+    hint: 'balanced',
+    className: 'border-white/[0.1] bg-white/[0.04] text-gray-200',
+  },
 };
 
 /**
@@ -183,6 +184,10 @@ export const InputForm: FC<InputFormProps> = ({
     title: planMode === 'plan' ? 'Planning mode' : planMode === 'agentic' ? 'Agentic mode' : planMode === 'evo' ? 'Evolution mode' : 'Auto mode',
     icon: null,
   };
+  const modeConfig = modeTone[editModeInfo.label] ?? modeTone.Auto;
+  const securityConfig = securityModeLabel === 'Allow'
+    ? { label: 'Allow', hint: 'guard high-risk', className: 'border-emerald-300/35 bg-emerald-300/10 text-emerald-100' }
+    : { label: 'Ask', hint: 'approve tools', className: 'border-amber-300/35 bg-amber-300/10 text-amber-100' };
   const placeholder = isStreaming ? 'Agent is thinking...' : 'Message NGOAgent...';
 
   const composerDisabled = isStreaming || isWaitingForResponse;
@@ -338,12 +343,12 @@ export const InputForm: FC<InputFormProps> = ({
                     {file.previewUrl ? (
                       <img src={file.previewUrl} alt={file.name} className="w-6 h-6 rounded object-cover flex-shrink-0" />
                     ) : (
-                      <span className="text-sm flex-shrink-0">📎</span>
+                      <span className="text-[10px] font-semibold uppercase text-white/45 flex-shrink-0">file</span>
                     )}
                     <span className="max-w-[100px] truncate text-[11px] font-medium">{file.name}</span>
                     <span className="text-[9px] text-gray-500 flex-shrink-0">{formatFileSize(file.size)}</span>
                     {file.status === 'uploading' && (
-                      <span className="animate-spin text-[10px] flex-shrink-0">⏳</span>
+                      <span className="text-[9px] uppercase text-cyan-200 flex-shrink-0">upload</span>
                     )}
                     {/* Inline remove button */}
                     <button
@@ -390,32 +395,22 @@ export const InputForm: FC<InputFormProps> = ({
             {/* Mode toggle buttons */}
             <button
               type="button"
-              className={`px-2.5 h-7 inline-flex items-center gap-1 rounded-full text-[11px] font-medium transition-all duration-300 hover:scale-105 active:scale-95 border ${
-                editModeInfo.label === 'Plan'
-                  ? 'bg-blue-600/20 border-blue-500/40 text-blue-300 hover:shadow-[0_0_15px_rgba(59,130,246,0.2)]'
-                  : editModeInfo.label === 'Agentic'
-                  ? 'bg-purple-600/20 border-purple-500/40 text-purple-300 hover:shadow-[0_0_15px_rgba(147,51,234,0.2)]'
-                  : editModeInfo.label === 'Evo'
-                  ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-300 hover:shadow-[0_0_15px_rgba(16,185,129,0.2)]'
-                  : 'bg-white/[0.04] border-white/[0.08] text-gray-400 hover:text-gray-200 hover:bg-white/[0.08] hover:shadow-[0_0_15px_rgba(255,255,255,0.05)]'
-              }`}
+              className={`mode-chip ${modeConfig.className}`}
               title={editModeInfo.title}
               onClick={onToggleEditMode}
             >
-              {editModeInfo.label === 'Plan' ? '📋' : editModeInfo.label === 'Agentic' ? '🤖' : editModeInfo.label === 'Evo' ? '🧬' : '⚡'} {editModeInfo.label}
+              <span className="font-semibold">{modeConfig.label}</span>
+              <span className="hidden text-[10px] opacity-60 sm:inline">{modeConfig.hint}</span>
             </button>
             {onToggleSecurityMode && (
               <button
                 type="button"
-                className={`px-2.5 h-7 inline-flex items-center gap-1 rounded-full text-[11px] font-medium transition-all duration-300 hover:scale-105 active:scale-95 border ${
-                  securityModeLabel === 'Allow'
-                    ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-300 hover:shadow-[0_0_15px_rgba(16,185,129,0.2)]'
-                    : 'bg-amber-600/20 border-amber-500/40 text-amber-300 hover:shadow-[0_0_15px_rgba(245,158,11,0.2)]'
-                }`}
+                className={`mode-chip ${securityConfig.className}`}
                 title={securityModeLabel === 'Allow' ? '全自动(高危弹确认)' : '全审批'}
                 onClick={onToggleSecurityMode}
               >
-                {securityModeLabel === 'Allow' ? '🔓' : '🔒'} {securityModeLabel}
+                <span className="font-semibold">{securityConfig.label}</span>
+                <span className="hidden text-[10px] opacity-60 sm:inline">{securityConfig.hint}</span>
               </button>
             )}
 

@@ -55,8 +55,8 @@ func (s *ApplicationServices) Cost() capability.Cost {
 	return s.cost
 }
 
-// LegacyAPI exposes the compatibility facade contract for legacy callers.
-// New code should depend on the explicit capability services instead.
+// LegacyAPI exposes the compatibility-only facade contract for legacy callers.
+// New code must depend on the explicit capability services instead.
 func (s *ApplicationServices) LegacyAPI() LegacyAPI {
 	return s.legacyFacade()
 }

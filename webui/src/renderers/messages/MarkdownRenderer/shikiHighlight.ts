@@ -3,38 +3,83 @@
  *
  * - Loads the highlighter once (singleton), then reuses it.
  * - Supports: TypeScript, JavaScript, Python, Go, Bash, JSON, YAML, Rust,
- *             C, C++, Java, Markdown, CSS, HTML, SQL, Kotlin, Swift, Ruby.
+ *             C, C++, Java, Markdown, CSS, HTML, SQL, Kotlin, Swift.
  * - Falls back to escaped plaintext on any error.
  * - All operations are async (returns HTML string).
  */
 
-import type { Highlighter } from 'shiki'
+import type { HighlighterCore, LanguageRegistration } from 'shiki/types'
 
 type SupportedTheme = 'github-dark' | 'github-light' | 'vitesse-dark'
-
-const PRELOAD_LANGS = [
-  'typescript', 'javascript', 'python', 'go', 'bash', 'json',
-] as const
 
 const SUPPORTED_LANGS = [
   'typescript', 'javascript', 'tsx', 'jsx',
   'python', 'go', 'bash', 'sh', 'json', 'yaml', 'rust',
-  'c', 'cpp', 'java', 'markdown', 'css', 'html', 'sql',
-  'kotlin', 'swift', 'ruby', 'text', 'plaintext',
+  'c', 'java', 'markdown', 'css', 'html', 'sql',
+  'kotlin', 'swift', 'text', 'plaintext',
 ] as const
 
-let _highlighter: Highlighter | null = null
-let _initPromise: Promise<Highlighter> | null = null
+type SupportedLang = typeof SUPPORTED_LANGS[number]
 
-async function getHighlighter(): Promise<Highlighter> {
+let _highlighter: HighlighterCore | null = null
+let _initPromise: Promise<HighlighterCore> | null = null
+
+async function loadLanguages(): Promise<LanguageRegistration[]> {
+  const [
+    typescript, javascript, tsx, jsx, python, go, bash, json, yaml, rust,
+    c, java, markdown, css, html, sql, kotlin, swift,
+  ] = await Promise.all([
+    import('shiki/langs/typescript.mjs'),
+    import('shiki/langs/javascript.mjs'),
+    import('shiki/langs/tsx.mjs'),
+    import('shiki/langs/jsx.mjs'),
+    import('shiki/langs/python.mjs'),
+    import('shiki/langs/go.mjs'),
+    import('shiki/langs/bash.mjs'),
+    import('shiki/langs/json.mjs'),
+    import('shiki/langs/yaml.mjs'),
+    import('shiki/langs/rust.mjs'),
+    import('shiki/langs/c.mjs'),
+    import('shiki/langs/java.mjs'),
+    import('shiki/langs/markdown.mjs'),
+    import('shiki/langs/css.mjs'),
+    import('shiki/langs/html.mjs'),
+    import('shiki/langs/sql.mjs'),
+    import('shiki/langs/kotlin.mjs'),
+    import('shiki/langs/swift.mjs'),
+  ])
+
+  return [
+    typescript.default, javascript.default, tsx.default, jsx.default,
+    python.default, go.default, bash.default, json.default, yaml.default,
+    rust.default, c.default, java.default, markdown.default, css.default,
+    html.default, sql.default, kotlin.default, swift.default,
+  ].flat()
+}
+
+function normalizeLanguage(lang: string): SupportedLang {
+  const normalized = lang?.toLowerCase().trim() || 'text'
+  if (normalized === 'shell' || normalized === 'zsh') return 'bash'
+  if (normalized === 'c++' || normalized === 'cpp') return 'c'
+  if (SUPPORTED_LANGS.includes(normalized as SupportedLang)) return normalized as SupportedLang
+  return 'text'
+}
+
+async function getHighlighter(): Promise<HighlighterCore> {
   if (_highlighter) return _highlighter
   if (_initPromise) return _initPromise
 
   _initPromise = (async () => {
-    const { createHighlighter } = await import('shiki')
-    const hl = await createHighlighter({
-      themes: ['github-dark'],  // Only load the used theme
-      langs: PRELOAD_LANGS as unknown as string[],  // Preload only common langs
+    const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, langs] = await Promise.all([
+      import('shiki/core'),
+      import('shiki/engine/javascript'),
+      import('shiki/themes/github-dark.mjs'),
+      loadLanguages(),
+    ])
+    const hl = await createHighlighterCore({
+      themes: [githubDark.default],
+      langs,
+      engine: createJavaScriptRegexEngine({ forgiving: true }),
     })
     _highlighter = hl
     return hl
@@ -42,9 +87,6 @@ async function getHighlighter(): Promise<Highlighter> {
 
   return _initPromise
 }
-
-// Start warming up the highlighter in the background on module load
-getHighlighter().catch(() => {/* silently retry on demand */})
 
 function escapeHtml(code: string): string {
   return code
@@ -68,24 +110,7 @@ export async function highlight(
   try {
     const hl = await getHighlighter()
 
-    // Normalize language
-    const normalizedLang = lang?.toLowerCase().trim() || 'text'
-    const supportedLang = SUPPORTED_LANGS.includes(normalizedLang as typeof SUPPORTED_LANGS[number])
-      ? normalizedLang
-      : 'text'
-
-    // Lazy-load language if not yet loaded
-    if (supportedLang !== 'text' && supportedLang !== 'plaintext') {
-      const loaded = hl.getLoadedLanguages()
-      if (!loaded.includes(supportedLang)) {
-        try {
-          await hl.loadLanguage(supportedLang as Parameters<typeof hl.loadLanguage>[0])
-        } catch {
-          // Language not available — fall back to plaintext
-          return `<pre><code>${escapeHtml(code)}</code></pre>`
-        }
-      }
-    }
+    const supportedLang = normalizeLanguage(lang)
 
     let html = hl.codeToHtml(code, {
       lang: supportedLang,

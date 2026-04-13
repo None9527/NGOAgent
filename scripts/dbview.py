@@ -3,6 +3,8 @@
 NGOAgent DB Inspector — 快速查看/查询 ngoagent.db
 用法:
   python3 dbview.py                    # 交互式 REPL
+  python3 dbview.py tables             # 所有表和行数
+  python3 dbview.py schema [table]     # 查看 schema / 指定表结构
   python3 dbview.py sessions           # 最近会话
   python3 dbview.py history <sid>      # 某会话的对话历史
   python3 dbview.py cost               # Token 用量排行
@@ -12,7 +14,6 @@ NGOAgent DB Inspector — 快速查看/查询 ngoagent.db
 """
 import sqlite3
 import sys
-import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,13 @@ def trunc(s, n=80):
     s = str(s).replace("\n", " ").strip()
     return s[:n] + "…" if len(s) > n else s
 
+def table_exists(db, name):
+    row = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+        (name,),
+    ).fetchone()
+    return row is not None
+
 # ─── Commands ────────────────────────────────────────────────
 
 def cmd_tables():
@@ -59,6 +67,38 @@ def cmd_tables():
         name = t["name"]
         cnt = db.execute(f"SELECT COUNT(*) as c FROM [{name}]").fetchone()["c"]
         print(f"  {C_GREEN}{name:<30}{C_RESET} {cnt:>6} rows")
+    db.close()
+
+def cmd_schema(table_name=None):
+    """查看 schema，支持指定表"""
+    db = conn()
+    if table_name:
+        rows = db.execute(f"PRAGMA table_info([{table_name}])").fetchall()
+        if not rows:
+            print(f"{C_RED}Table not found or has no columns: {table_name}{C_RESET}")
+            db.close()
+            return
+        print(f"\n{C_BOLD}{C_CYAN}═══ Schema: {table_name} ═══════════════════════════{C_RESET}")
+        for r in rows:
+            null_flag = "NOT NULL" if r["notnull"] else "NULL"
+            pk_flag = " PK" if r["pk"] else ""
+            default = f" default={r['dflt_value']}" if r["dflt_value"] is not None else ""
+            print(
+                f"  {C_GREEN}{r['name']:<20}{C_RESET} "
+                f"{C_DIM}{r['type'] or 'TEXT':<12}{C_RESET} {null_flag}{pk_flag}{default}"
+            )
+        db.close()
+        return
+
+    rows = db.execute("""
+        SELECT name, sql
+        FROM sqlite_master
+        WHERE type='table'
+        ORDER BY name
+    """).fetchall()
+    print(f"\n{C_BOLD}{C_CYAN}═══ Schema Tables ({len(rows)}) ═════════════════════{C_RESET}")
+    for r in rows:
+        print(f"  {C_GREEN}{r['name']}{C_RESET}")
     db.close()
 
 def cmd_sessions(limit=20):
@@ -90,35 +130,59 @@ def cmd_sessions(limit=20):
 def cmd_history(session_id, limit=50):
     """某会话的对话历史"""
     db = conn()
-    # 模糊匹配 session_id
+    if not table_exists(db, "messages"):
+        print(f"{C_RED}messages table not found; DB schema may be older than expected{C_RESET}")
+        db.close()
+        return
+
     rows = db.execute("""
-        SELECT id, role, content, tool_calls, tool_call_id, reasoning, token_count, created_at
-        FROM history_messages
-        WHERE session_id LIKE ?
-        ORDER BY id ASC LIMIT ?
+        SELECT id, seq, role, message_type, content_text, reasoning_text, tool_call_id, token_count, created_at
+        FROM messages
+        WHERE conversation_id LIKE ?
+        ORDER BY seq ASC LIMIT ?
     """, (f"{session_id}%", limit)).fetchall()
     if not rows:
         print(f"{C_RED}No messages found for session '{session_id}'{C_RESET}")
         db.close()
         return
+
+    tool_rows = []
+    if table_exists(db, "message_tool_calls"):
+        tool_rows = db.execute("""
+            SELECT mtc.message_id, mtc.tool_name, mtc.tool_call_id, mtc.position, mtc.status
+            FROM message_tool_calls mtc
+            JOIN messages m ON m.id = mtc.message_id
+            WHERE m.conversation_id LIKE ?
+            ORDER BY m.seq ASC, mtc.position ASC
+        """, (f"{session_id}%",)).fetchall()
+
+    tools_by_message = {}
+    for row in tool_rows:
+        tools_by_message.setdefault(row["message_id"], []).append(row)
+
     print(f"\n{C_BOLD}{C_CYAN}═══ History ({len(rows)} msgs) ═════════════════════{C_RESET}")
     for r in rows:
         role = r["role"]
         role_colors = {"user": C_GREEN, "assistant": C_CYAN, "tool": C_YELLOW, "system": C_MAGENTA}
         rc = role_colors.get(role, C_DIM)
-        content = trunc(r["content"], 120)
+        msg_type = r["message_type"] or role
+        content = trunc(r["content_text"], 120) or "(no content)"
         tok = f" [{r['token_count']}tok]" if r["token_count"] else ""
         tc_info = ""
-        if r["tool_calls"]:
-            try:
-                calls = json.loads(r["tool_calls"])
-                names = [c.get("function", {}).get("name", "?") for c in calls]
-                tc_info = f" → {C_YELLOW}{'|'.join(names)}{C_RESET}"
-            except:
-                tc_info = f" → {C_DIM}[tool_calls]{C_RESET}"
+        calls = tools_by_message.get(r["id"], [])
+        if calls:
+            names = [c["tool_name"] for c in calls]
+            tc_info = f" → {C_YELLOW}{'|'.join(names)}{C_RESET}"
         if r["tool_call_id"]:
             tc_info = f" {C_DIM}(reply to {r['tool_call_id'][:8]}){C_RESET}"
-        print(f"  {C_DIM}{r['id']:>5}{C_RESET} {rc}{role:>9}{C_RESET}{C_DIM}{tok}{C_RESET}{tc_info}  {content}")
+        print(
+            f"  {C_DIM}{r['seq']:>5}{C_RESET} "
+            f"{rc}{role:>9}{C_RESET} "
+            f"{C_DIM}{msg_type:<10}{C_RESET}"
+            f"{C_DIM}{tok}{C_RESET}{tc_info}  {content}"
+        )
+        if r["reasoning_text"]:
+            print(f"        {C_DIM}reasoning:{C_RESET} {trunc(r['reasoning_text'], 100)}")
     db.close()
 
 def cmd_cost(limit=15):
@@ -227,6 +291,7 @@ def cmd_repl():
 
 Commands:
   {C_GREEN}tables{C_RESET}          — 列出所有表
+  {C_GREEN}schema{C_RESET}   [tbl]  — 查看 schema / 表字段
   {C_GREEN}sessions{C_RESET}  [N]   — 最近 N 个会话
   {C_GREEN}history{C_RESET}   <sid>  — 会话历史 (支持前缀匹配)
   {C_GREEN}cost{C_RESET}      [N]   — Token 用量排行
@@ -250,6 +315,8 @@ Commands:
         arg = parts[1] if len(parts) > 1 else ""
         if cmd == "tables":
             cmd_tables()
+        elif cmd == "schema":
+            cmd_schema(arg or None)
         elif cmd == "sessions":
             cmd_sessions(int(arg) if arg.isdigit() else 20)
         elif cmd == "history":
@@ -283,6 +350,8 @@ if __name__ == "__main__":
         cmd_repl()
     elif args[0] == "tables":
         cmd_tables()
+    elif args[0] == "schema":
+        cmd_schema(args[1] if len(args) > 1 else None)
     elif args[0] == "sessions":
         cmd_sessions(int(args[1]) if len(args) > 1 else 20)
     elif args[0] == "history":

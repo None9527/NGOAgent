@@ -51,6 +51,63 @@ type StateMutation struct {
 	Value any
 }
 
+type NodeEffectKind string
+
+const (
+	NodeEffectNone               NodeEffectKind = ""
+	NodeEffectPersistHistory     NodeEffectKind = "persist_history"
+	NodeEffectPersistFullHistory NodeEffectKind = "persist_full_history"
+	NodeEffectEmitText           NodeEffectKind = "emit_text"
+	NodeEffectEmitError          NodeEffectKind = "emit_error"
+	NodeEffectEmitAutoWakeStart  NodeEffectKind = "emit_auto_wake_start"
+	NodeEffectEmitComplete       NodeEffectKind = "emit_complete"
+)
+
+type ToolCallSnapshot struct {
+	ID        string
+	Type      string
+	Name      string
+	Arguments string
+}
+
+type AttachmentState struct {
+	Path string
+}
+
+type ConversationMessageState struct {
+	Role        string
+	Content     string
+	Reasoning   string
+	ToolCallID  string
+	ToolCalls   []ToolCallSnapshot
+	Attachments []AttachmentState
+}
+
+type NodePatch struct {
+	AppendHistory        []ConversationMessageState
+	ReplaceHistory       []ConversationMessageState
+	HistoryReplaced      bool
+	AppendEphemerals     []string
+	ReplaceEphemerals    []string
+	EphemeralsReplaced   bool
+	AppendPendingMedia   []map[string]string
+	ReplacePendingMedia  []map[string]string
+	PendingMediaReplaced bool
+	Task                 *TaskState
+	Compact              *CompactState
+	Intelligence         *IntelligenceState
+	Orchestration        *OrchestrationState
+	ActiveSkills         map[string]string
+	ForceNextTool        *string
+	Execution            *ExecutionState
+}
+
+type NodeEffect struct {
+	Kind    NodeEffectKind
+	Message string
+	Error   string
+}
+
 type Edge struct {
 	From      string
 	To        string
@@ -71,6 +128,8 @@ type NodeResult struct {
 	Status           NodeStatus
 	ObservedState    string
 	StateMutations   []StateMutation
+	Patch            NodePatch
+	Effects          []NodeEffect
 	NeedsCheckpoint  bool
 	WaitReason       WaitReason
 	OutputSchemaName string
@@ -271,6 +330,7 @@ type DecisionContractState struct {
 }
 
 type IntelligenceState struct {
+	Decision   DecisionContractState
 	Planning   PlanningState
 	Review     ReviewDecisionState
 	Evaluation EvaluationState
@@ -306,6 +366,7 @@ type ToolResultState struct {
 type TurnState struct {
 	RunID            string
 	UserMessage      string
+	History          []ConversationMessageState
 	Attachments      []string
 	Ephemerals       []string
 	PendingMedia     []map[string]string

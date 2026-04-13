@@ -13,16 +13,23 @@ func (a *graphLoopAdapter) syncToGraphState(state *graphruntime.TurnState, exec 
 		return
 	}
 
+	currentHistory := append([]graphruntime.ConversationMessageState(nil), state.History...)
+	currentEphemerals := append([]string(nil), state.Ephemerals...)
+	currentPendingMedia := cloneMediaItems(state.PendingMedia)
+	currentCompact := state.Compact
 	currentStructured := state.StructuredOutput
 	currentIntelligence := state.Intelligence
+	currentOrchestration := cloneOrchestrationState(state.Orchestration)
+	currentActiveSkills := cloneStringMap(state.ActiveSkills)
 	a.loop.mu.Lock()
 	defer a.loop.mu.Unlock()
 	a.rs.exec = exec
 	boundarySummary := a.loop.task.Summary
 
 	state.Mode = a.rs.opts.Mode
-	state.Ephemerals = append([]string(nil), a.loop.ephemerals...)
-	state.PendingMedia = cloneMediaItems(a.loop.pendingMedia)
+	state.History = currentHistory
+	state.Ephemerals = currentEphemerals
+	state.PendingMedia = currentPendingMedia
 	state.Task = graphruntime.TaskState{
 		YieldRequested:   a.loop.task.YieldRequested,
 		Name:             a.loop.task.Name,
@@ -36,17 +43,13 @@ func (a *graphLoopAdapter) syncToGraphState(state *graphruntime.TurnState, exec 
 		SkillLoaded:      a.loop.task.SkillLoaded,
 		SkillPath:        a.loop.task.SkillPath,
 	}
-	state.Compact = graphruntime.CompactState{
-		CompactCount:        a.loop.compactCount,
-		OutputContinuations: a.loop.outputContinuations,
-		HistoryDirty:        a.loop.historyDirty,
-	}
+	state.Compact = currentCompact
 	state.Reflection = graphruntime.ReflectionState{
 		LastReview: state.Reflection.LastReview,
 		Required:   a.loop.mode.SelfReview,
 	}
-	state.Intelligence = cloneIntelligenceState(a.loop.intelligence)
-	state.Orchestration = cloneOrchestrationState(a.loop.orchestration)
+	state.Intelligence = cloneIntelligenceState(currentIntelligence)
+	state.Orchestration = currentOrchestration
 	state.LastLLMResponse = graphruntime.LLMResponseState{}
 	state.Attachments = nil
 	state.ToolCalls = nil
@@ -54,7 +57,7 @@ func (a *graphLoopAdapter) syncToGraphState(state *graphruntime.TurnState, exec 
 	state.OutputDraft = ""
 	state.StructuredOutput = graphruntime.StructuredOutputState{}
 	state.ForceNextTool = a.loop.guard.PeekForceToolName()
-	state.ActiveSkills = cloneStringMap(a.loop.activeSkills)
+	state.ActiveSkills = currentActiveSkills
 	if a.loop.barrier != nil {
 		barrier := a.loop.barrier.Snapshot()
 		state.Orchestration.ActiveBarrier = &barrier
@@ -70,15 +73,16 @@ func (a *graphLoopAdapter) syncToGraphState(state *graphruntime.TurnState, exec 
 		}
 	}
 
-	if len(a.loop.history) > 0 {
-		assistantIdx := len(a.loop.history) - 1
-		trailingToolStart := len(a.loop.history)
-		for assistantIdx >= 0 && a.loop.history[assistantIdx].Role == "tool" {
+	history := graphHistoryToMessages(state.History)
+	if len(history) > 0 {
+		assistantIdx := len(history) - 1
+		trailingToolStart := len(history)
+		for assistantIdx >= 0 && history[assistantIdx].Role == "tool" {
 			trailingToolStart = assistantIdx
 			assistantIdx--
 		}
-		if assistantIdx >= 0 && a.loop.history[assistantIdx].Role == "assistant" {
-			last := a.loop.history[assistantIdx]
+		if assistantIdx >= 0 && history[assistantIdx].Role == "assistant" {
+			last := history[assistantIdx]
 			state.LastLLMResponse = graphruntime.LLMResponseState{
 				Content:    last.Content,
 				Reasoning:  last.Reasoning,
@@ -93,21 +97,17 @@ func (a *graphLoopAdapter) syncToGraphState(state *graphruntime.TurnState, exec 
 				RawJSON:    structuredOutputRaw(execOutputSchemaName(exec), last.Content),
 				Valid:      structuredOutputRaw(execOutputSchemaName(exec), last.Content) != "",
 			}
-			if trailingToolStart < len(a.loop.history) {
-				state.ToolResults = mapToolResults(a.loop.history[trailingToolStart:], last.ToolCalls)
+			if trailingToolStart < len(history) {
+				state.ToolResults = mapToolResults(history[trailingToolStart:], last.ToolCalls)
 			}
 		}
 	}
 	if state.StructuredOutput == (graphruntime.StructuredOutputState{}) && currentStructured.Valid {
 		state.StructuredOutput = currentStructured
 	}
-	if intelligenceStateEmpty(state.Intelligence) && !intelligenceStateEmpty(currentIntelligence) {
-		state.Intelligence = cloneIntelligenceState(currentIntelligence)
-	}
-
 	if exec != nil {
 		exec.PendingWake = a.loop.pendingWake.Load()
-		exec.Continuation = graphruntime.ContinuationState{Count: a.loop.outputContinuations}
+		exec.Continuation = graphruntime.ContinuationState{Count: state.Compact.OutputContinuations}
 		if a.loop.deps.Security != nil {
 			if pending := latestApprovalSnapshot(a.loop.deps.Security.ListPendingApprovals()); pending != nil {
 				exec.PendingApproval = &graphruntime.ApprovalState{
@@ -128,6 +128,17 @@ func (a *graphLoopAdapter) syncToGraphState(state *graphruntime.TurnState, exec 
 			exec.PendingBarrier = nil
 		}
 	}
+}
+
+func orchestrationStateEmpty(in graphruntime.OrchestrationState) bool {
+	return in.ParentRunID == "" &&
+		len(in.ChildRunIDs) == 0 &&
+		in.ActiveBarrier == nil &&
+		!in.PendingMerge &&
+		in.LastWakeSource == "" &&
+		in.Ingress == (graphruntime.IngressState{}) &&
+		len(in.Handoffs) == 0 &&
+		len(in.Events) == 0
 }
 
 func execOutputSchemaName(exec *graphruntime.ExecutionState) string {
@@ -153,8 +164,7 @@ func (a *graphLoopAdapter) syncFromGraphState(state *graphruntime.TurnState, exe
 	defer a.loop.mu.Unlock()
 
 	a.loop.options.Mode = state.Mode
-	a.loop.ephemerals = append([]string(nil), state.Ephemerals...)
-	a.loop.pendingMedia = cloneMediaItems(state.PendingMedia)
+	a.loop.history = graphHistoryToMessages(state.History)
 	a.loop.task.Name = state.Task.Name
 	a.loop.task.Mode = state.Task.Mode
 	a.loop.task.Status = state.Task.Status
@@ -169,13 +179,7 @@ func (a *graphLoopAdapter) syncFromGraphState(state *graphruntime.TurnState, exe
 	}
 	a.loop.task.SkillLoaded = state.Task.SkillLoaded
 	a.loop.task.SkillPath = state.Task.SkillPath
-	a.loop.compactCount = state.Compact.CompactCount
-	a.loop.outputContinuations = state.Compact.OutputContinuations
-	a.loop.historyDirty = state.Compact.HistoryDirty
-	a.loop.activeSkills = cloneStringMap(state.ActiveSkills)
 	a.loop.guard.SetForceToolName(state.ForceNextTool)
-	a.loop.intelligence = cloneIntelligenceState(state.Intelligence)
-	a.loop.orchestration = cloneOrchestrationState(state.Orchestration)
 
 	a.rs.opts.Mode = state.Mode
 	a.rs.exec = exec
@@ -197,6 +201,84 @@ func (a *graphLoopAdapter) syncFromGraphState(state *graphruntime.TurnState, exe
 			})
 		}
 	}
+}
+
+func messagesToGraphHistory(in []llm.Message) []graphruntime.ConversationMessageState {
+	if in == nil {
+		return nil
+	}
+	out := make([]graphruntime.ConversationMessageState, 0, len(in))
+	for _, msg := range in {
+		out = append(out, messageToGraphHistory(msg))
+	}
+	return out
+}
+
+func messageToGraphHistory(msg llm.Message) graphruntime.ConversationMessageState {
+	out := graphruntime.ConversationMessageState{
+		Role:       msg.Role,
+		Content:    msg.Content,
+		Reasoning:  msg.Reasoning,
+		ToolCallID: msg.ToolCallID,
+	}
+	if len(msg.ToolCalls) > 0 {
+		out.ToolCalls = make([]graphruntime.ToolCallSnapshot, 0, len(msg.ToolCalls))
+		for _, call := range msg.ToolCalls {
+			out.ToolCalls = append(out.ToolCalls, graphruntime.ToolCallSnapshot{
+				ID:        call.ID,
+				Type:      call.Type,
+				Name:      call.Function.Name,
+				Arguments: call.Function.Arguments,
+			})
+		}
+	}
+	if len(msg.Attachments) > 0 {
+		out.Attachments = make([]graphruntime.AttachmentState, 0, len(msg.Attachments))
+		for _, att := range msg.Attachments {
+			out.Attachments = append(out.Attachments, graphruntime.AttachmentState{Path: att.Path})
+		}
+	}
+	return out
+}
+
+func graphHistoryToMessages(in []graphruntime.ConversationMessageState) []llm.Message {
+	if in == nil {
+		return nil
+	}
+	out := make([]llm.Message, 0, len(in))
+	for _, msg := range in {
+		out = append(out, graphHistoryToMessage(msg))
+	}
+	return out
+}
+
+func graphHistoryToMessage(msg graphruntime.ConversationMessageState) llm.Message {
+	out := llm.Message{
+		Role:       msg.Role,
+		Content:    msg.Content,
+		Reasoning:  msg.Reasoning,
+		ToolCallID: msg.ToolCallID,
+	}
+	if len(msg.ToolCalls) > 0 {
+		out.ToolCalls = make([]llm.ToolCall, 0, len(msg.ToolCalls))
+		for _, call := range msg.ToolCalls {
+			out.ToolCalls = append(out.ToolCalls, llm.ToolCall{
+				ID:   call.ID,
+				Type: call.Type,
+				Function: llm.ToolCallFunc{
+					Name:      call.Name,
+					Arguments: call.Arguments,
+				},
+			})
+		}
+	}
+	if len(msg.Attachments) > 0 {
+		out.Attachments = make([]llm.Attachment, 0, len(msg.Attachments))
+		for _, att := range msg.Attachments {
+			out.Attachments = append(out.Attachments, llm.Attachment{Path: att.Path})
+		}
+	}
+	return out
 }
 
 func attachmentPaths(atts []llm.Attachment) []string {

@@ -1,0 +1,21 @@
+{
+  "id": "app_retry_uses_latest_user",
+  "title": "retry uses latest user intent without reviving older branch",
+  "category": "state_confusion",
+  "layers": ["application"],
+  "application": {
+    "session_id": "session-retry-latest",
+    "persisted_history": [
+      {"role": "user", "content": "先看 skill 在哪"},
+      {"role": "assistant", "content": "skill 在 /tmp/skill"},
+      {"role": "user", "content": "回到原问题：你能操作浏览器么"}
+    ],
+    "action": {
+      "kind": "retry_run"
+    },
+    "expect": {
+      "retry_last_user": "回到原问题：你能操作浏览器么",
+      "no_ghost_loop": true
+    }
+  }
+}

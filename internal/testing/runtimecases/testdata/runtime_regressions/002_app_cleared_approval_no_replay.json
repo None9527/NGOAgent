@@ -1,0 +1,29 @@
+{
+  "id": "app_cleared_approval_no_replay",
+  "title": "application reconnect does not replay cleared approval",
+  "category": "recovery",
+  "layers": ["application"],
+  "application": {
+    "session_id": "session-cleared",
+    "snapshots": [
+      {
+        "RunID": "run-cleared",
+        "SessionID": "session-cleared",
+        "GraphID": "agent_loop",
+        "GraphVersion": "v1alpha1",
+        "Status": "wait",
+        "ExecutionState": {
+          "Status": "wait",
+          "WaitReason": ""
+        },
+        "UpdatedAt": "2026-04-13T03:28:44Z"
+      }
+    ],
+    "action": {
+      "kind": "chat_stream"
+    },
+    "expect": {
+      "error_contains": "no pending execution"
+    }
+  }
+}

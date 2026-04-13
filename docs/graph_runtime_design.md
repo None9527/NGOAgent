@@ -59,14 +59,12 @@
 
 当前可复用资产：
 
-- `doPrepare()`
-- `handleGenerate()`
-- `handleToolExec()`
-- `handleGuardCheck()`
-- `handleCompact()`
-- `handleDone()`
+- prepare node service 行为
+- generate node service 行为
+- tool_exec node service 行为
+- guard_check / compact / done node service 行为
 
-第一阶段不应重写这些逻辑，而应把它们包装成 graph node。
+第一阶段不应重写这些语义，而应让 graph node 只做 runtime 协议适配，由 node service 持有节点行为。
 
 ---
 
@@ -423,7 +421,7 @@ type RuntimeContext struct {
 ### 建议迁移路径
 
 1. 新建 `graphruntime` 包，不影响现有 `AgentLoop`
-2. 用 adapter node 包装现有 `doPrepare/handleGenerate/...`
+2. 用 adapter node 包装当时的 `doPrepare/handleGenerate/...` 旧实现名，再逐步把节点语义收口到 node service
 3. 让 `ChatStream()` 先支持切换到新 runtime
 4. 新 runtime 跑通后，再逐步瘦身旧 `runInner()`
 5. 最后把旧 FSM 降为 compatibility path 或删除

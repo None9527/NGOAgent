@@ -57,6 +57,14 @@ func (s *SessionQueries) GetHistory(sessionID string) ([]apitype.HistoryMessage,
 		s.sessMgr.Activate(sessionID)
 	}
 
+	exports, err := s.histQuery.LoadAll(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if len(exports) > 0 {
+		return s.convertExportsToHistory(exports), nil
+	}
+
 	if loop := service.ResidentSessionLoop(s.loop, s.loopPool, sessionID); loop != nil {
 		msgs := loop.GetHistory()
 		if len(msgs) > 0 {
@@ -64,11 +72,7 @@ func (s *SessionQueries) GetHistory(sessionID string) ([]apitype.HistoryMessage,
 		}
 	}
 
-	exports, err := s.histQuery.LoadAll(sessionID)
-	if err != nil {
-		return nil, err
-	}
-	return s.convertExportsToHistory(exports), nil
+	return nil, nil
 }
 
 func (s *SessionQueries) convertLLMToHistory(msgs []llm.Message) []apitype.HistoryMessage {

@@ -130,3 +130,36 @@ func TestDecisionFromSnapshot_PrefersReflectionThenEvaluation(t *testing.T) {
 		t.Fatalf("unexpected evaluation decision: %#v", decision)
 	}
 }
+
+func TestDecisionFromSnapshot_PrefersExplicitDecisionContract(t *testing.T) {
+	snap := &graphruntime.RunSnapshot{
+		TurnState: graphruntime.TurnState{
+			Intelligence: graphruntime.IntelligenceState{
+				Decision: graphruntime.DecisionContractState{
+					Kind:       graphruntime.DecisionKindPlanReview,
+					SchemaName: planningReviewSchema,
+					Decision:   "approved",
+					Feedback:   "ship it",
+					Valid:      true,
+				},
+				Review: graphruntime.ReviewDecisionState{
+					SchemaName: graphReflectionSchema,
+					Decision:   "revise",
+					Reason:     "older fallback",
+					Valid:      true,
+				},
+			},
+		},
+	}
+
+	decision := DecisionFromSnapshot(snap)
+	if decision == nil {
+		t.Fatal("expected explicit decision contract")
+	}
+	if decision.Kind != graphruntime.DecisionKindPlanReview ||
+		decision.SchemaName != planningReviewSchema ||
+		decision.Decision != "approved" ||
+		decision.Feedback != "ship it" {
+		t.Fatalf("unexpected explicit decision contract: %#v", decision)
+	}
+}

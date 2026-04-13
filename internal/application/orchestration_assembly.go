@@ -10,7 +10,6 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/config"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/mcp"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/skill"
-	"github.com/ngoclaw/ngoagent/internal/infrastructure/tool"
 )
 
 type orchestrationAssembly struct {
@@ -22,7 +21,7 @@ type orchestrationAssembly struct {
 
 func assembleOrchestration(
 	cfg *config.Config,
-	registry *tool.Registry,
+	tools assembledTools,
 	mcpMgr *mcp.Manager,
 	skillMgr *skill.Manager,
 ) orchestrationAssembly {
@@ -38,10 +37,11 @@ func assembleOrchestration(
 	slog.Info("[r3] EventBus started: buffer=256, workers=4")
 
 	toolDiscovery := service.NewAggregatedToolDiscovery(
-		&toolRegistryAdapter{reg: registry},
+		&toolRegistryAdapter{reg: tools.registry},
 		&mcpDiscoveryAdapter{mgr: mcpMgr},
 		&skillDiscoveryAdapter{mgr: skillMgr},
 	)
+	toolDiscovery.SetBuiltinSources(builtinToolSources(tools.manifest))
 	capabilities := toolDiscovery.Advertise(context.Background())
 	slog.Info(fmt.Sprintf("[r3] ToolDiscovery initialized: %d capabilities", len(capabilities)))
 
@@ -63,4 +63,14 @@ func assembleOrchestration(
 		a2aHandler: a2aHandler,
 		addr:       addr,
 	}
+}
+
+func builtinToolSources(manifest []toolProviderManifest) map[string]string {
+	sources := make(map[string]string)
+	for _, entry := range manifest {
+		for _, name := range entry.Tools {
+			sources[name] = entry.Name
+		}
+	}
+	return sources
 }

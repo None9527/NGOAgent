@@ -1,7 +1,8 @@
 // legacy_compat.go — AgentAPI compatibility facade.
 //
 // AgentAPI is a thin 1:1 delegation shell over the explicit capability services.
-// New code should use ApplicationServices and its capability providers directly.
+// It is retained only for compatibility callers and tests that prove that
+// compatibility contract. New code must use ApplicationServices directly.
 package application
 
 import (
@@ -24,7 +25,7 @@ import (
 // ═══════════════════════════════════════════
 
 // AgentAPI is a compatibility facade over the explicit application services.
-// New code should prefer ApplicationServices and its capability services directly.
+// It is not part of the R4 primary application contract.
 type AgentAPI struct {
 	chat    *ChatService
 	runtime *RuntimeService
@@ -53,8 +54,8 @@ func NewLegacyAPI(deps ApplicationDeps) LegacyAPI {
 }
 
 // NewAgentAPI creates the legacy compatibility facade.
-// Deprecated: prefer NewLegacyAPI(ApplicationDeps{...}) for compatibility paths,
-// or NewApplicationServices(...) for new construction.
+// Deprecated: prefer NewLegacyAPI(ApplicationDeps{...}) only for compatibility
+// paths, or NewApplicationServices(...) for all new construction.
 func NewAgentAPI(
 	loop *service.AgentLoop,
 	loopPool *service.LoopPool,
@@ -189,6 +190,7 @@ type LegacyCostAPI interface {
 }
 
 // LegacyAPI is the full compatibility contract preserved by AgentAPI.
+// It exists for backward compatibility only.
 type LegacyAPI interface {
 	LegacyChatAPI
 	LegacyRuntimeAPI

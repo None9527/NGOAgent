@@ -7,7 +7,9 @@ type ToolCapability struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	Category    string   `json:"category"`      // "builtin", "mcp", "skill"
-	Source      string   `json:"source"`         // server name for MCP, skill path for skills
+	Source      string   `json:"source"`         // stable provider/server/skill identity
+	SourceKind  string   `json:"source_kind,omitempty"`
+	SourcePath  string   `json:"source_path,omitempty"`
 	InputSchema any      `json:"input_schema,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	Version     string   `json:"version,omitempty"`

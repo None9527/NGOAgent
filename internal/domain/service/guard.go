@@ -25,10 +25,10 @@ type BehaviorGuard struct {
 	hasBoundary        bool        // This turn has called task_boundary
 	hasNotify          bool        // This turn has called notify_user
 	codeModInPlan      int         // write/edit calls while isPlanning=true
-	isPlanning         bool        // Sync'd from doPrepare each turn
-	planExists         bool        // Sync'd from doPrepare each turn
-	taskMdExists       bool        // Sync'd from doPrepare each turn
-	currentMode        string      // Sync'd from doPrepare (planning/execution/verification)
+	isPlanning         bool        // Sync'd from prepare node execution each turn
+	planExists         bool        // Sync'd from prepare node execution each turn
+	taskMdExists       bool        // Sync'd from prepare node execution each turn
+	currentMode        string      // Sync'd from prepare node execution (planning/execution/verification)
 	forceToolName      string      // Non-empty → force this tool on next LLM call
 	stepsSinceBoundary int         // Tool calls since last task_boundary (for ephemeral gating)
 	recentTools        []string    // Last 10 tool names for sequence cycle detection
@@ -220,7 +220,7 @@ func ngramJaccardSimilarity(a, b string) float64 {
 // Step-level: Pre/Post tool hooks (new)
 // ═══════════════════════════════════════════
 
-// SetModeState is called by doPrepare to sync planning/mode context.
+// SetModeState is called by prepare node execution to sync planning/mode context.
 func (g *BehaviorGuard) SetModeState(isPlanning, planExists, taskMdExists bool, mode string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -315,7 +315,7 @@ func (g *BehaviorGuard) detectToolCycle() string {
 }
 
 // StepsSinceBoundary returns steps since last task_boundary call.
-// Used by doPrepare for ephemeral injection gating (Anti's num_steps pattern).
+// Used by the prepare node service for ephemeral injection gating (Anti's num_steps pattern).
 func (g *BehaviorGuard) StepsSinceBoundary() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()

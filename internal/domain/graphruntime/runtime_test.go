@@ -78,6 +78,56 @@ func TestRuntimeRunsLinearGraph(t *testing.T) {
 	}
 }
 
+func TestRuntimeAppliesNodePatchBeforeSnapshot(t *testing.T) {
+	store := NewInMemorySnapshotStore()
+	graph := GraphDefinition{
+		ID:        "patch-flow",
+		Version:   "v1",
+		EntryNode: "patch",
+		Nodes: map[string]Node{
+			"patch": testNode{
+				name: "patch",
+				kind: NodeKindPrepare,
+				run: func(_ context.Context, _ *RuntimeContext, _ *TurnState) (NodeResult, error) {
+					return NodeResult{
+						Status: NodeStatusComplete,
+						Patch: NodePatch{
+							AppendHistory: []ConversationMessageState{{
+								Role:    "assistant",
+								Content: "patched answer",
+							}},
+							AppendEphemerals: []string{"patched ephemeral"},
+						},
+					}, nil
+				},
+			},
+		},
+	}
+
+	rt, err := NewRuntime(graph, store)
+	if err != nil {
+		t.Fatalf("NewRuntime error: %v", err)
+	}
+	if err := rt.Run(context.Background(), RunRequest{
+		RunID:   "run-patch",
+		Session: &SessionState{SessionID: "session-patch"},
+		Turn:    TurnState{RunID: "run-patch"},
+	}); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	snap, err := store.LoadLatest(context.Background(), "run-patch")
+	if err != nil {
+		t.Fatalf("LoadLatest error: %v", err)
+	}
+	if len(snap.TurnState.History) != 1 || snap.TurnState.History[0].Content != "patched answer" {
+		t.Fatalf("expected patch history in snapshot, got %#v", snap.TurnState.History)
+	}
+	if len(snap.TurnState.Ephemerals) != 1 || snap.TurnState.Ephemerals[0] != "patched ephemeral" {
+		t.Fatalf("expected patch ephemerals in snapshot, got %#v", snap.TurnState.Ephemerals)
+	}
+}
+
 func TestRuntimeWaitAndResume(t *testing.T) {
 	store := NewInMemorySnapshotStore()
 	approved := false

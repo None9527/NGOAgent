@@ -65,6 +65,53 @@ func TestAggregatedToolDiscovery_FindByCategory(t *testing.T) {
 	}
 }
 
+func TestAggregatedToolDiscovery_BuiltinSources(t *testing.T) {
+	registry := &mockToolRegistryForDiscovery{tools: []ToolInfo{
+		{Name: "read_file", Enabled: true},
+		{Name: "web_search", Enabled: true},
+	}}
+	d := NewAggregatedToolDiscovery(registry, nil, nil)
+	d.SetBuiltinSources(map[string]string{
+		"read_file":  "filesystem",
+		"web_search": "research",
+	})
+
+	readFile := d.FindByName(context.Background(), "read_file")
+	if readFile == nil {
+		t.Fatal("expected read_file capability")
+	}
+	if readFile.Source != "filesystem" {
+		t.Fatalf("expected filesystem source, got %q", readFile.Source)
+	}
+	if readFile.SourceKind != "builtin_provider" {
+		t.Fatalf("expected builtin_provider source kind, got %q", readFile.SourceKind)
+	}
+	if !hasString(readFile.Tags, "filesystem") {
+		t.Fatalf("expected filesystem tag, got %#v", readFile.Tags)
+	}
+}
+
+func TestAggregatedToolDiscovery_SkillUsesStableIdentityAndPathMetadata(t *testing.T) {
+	skills := &mockSkillSource{skills: []SkillDescriptor{
+		{Name: "deploy", Description: "Deploy to cloud", Path: "/skills/deploy", Enabled: true},
+	}}
+	d := NewAggregatedToolDiscovery(nil, nil, skills)
+
+	deploy := d.FindByName(context.Background(), "deploy")
+	if deploy == nil {
+		t.Fatal("expected deploy capability")
+	}
+	if deploy.Source != "deploy" {
+		t.Fatalf("expected stable skill identity source, got %q", deploy.Source)
+	}
+	if deploy.SourceKind != "skill" {
+		t.Fatalf("expected skill source kind, got %q", deploy.SourceKind)
+	}
+	if deploy.SourcePath != "/skills/deploy" {
+		t.Fatalf("expected skill source path metadata, got %q", deploy.SourcePath)
+	}
+}
+
 func TestAggregatedToolDiscovery_FindByName(t *testing.T) {
 	registry := &mockToolRegistryForDiscovery{tools: []ToolInfo{
 		{Name: "read_file", Enabled: true},
@@ -174,6 +221,15 @@ type mockToolRegistryForDiscovery struct {
 	tools []ToolInfo
 }
 
-func (m *mockToolRegistryForDiscovery) List() []ToolInfo       { return m.tools }
+func (m *mockToolRegistryForDiscovery) List() []ToolInfo          { return m.tools }
 func (m *mockToolRegistryForDiscovery) Enable(name string) error  { return nil }
 func (m *mockToolRegistryForDiscovery) Disable(name string) error { return nil }
+
+func hasString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/ngoclaw/ngoagent/internal/domain/graphruntime"
-	"github.com/ngoclaw/ngoagent/internal/domain/prompttext"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
 
@@ -116,89 +115,55 @@ func (rs *runState) setLastProvider(v string) {
 	}
 }
 
-// ───────────────────────────────────────────
-// StateGenerate handler (was 133 lines inline)
-// ───────────────────────────────────────────
-
-func (a *AgentLoop) handleGenerate(ctx context.Context, rs *runState) (graphruntime.NodeResult, error) {
-	// P0-D #3: Microcompact — clear old digested tool results before LLM call
-	a.microCompact()
-
-	opts := rs.opts
-	opts.MaxTokens = rs.maxTokens()
-	resp, provName, err := a.doGenerate(ctx, opts, rs.excludedProviderList())
-	rs.setLastProvider(provName)
-
-	if err != nil {
-		return a.handleGenerateError(ctx, rs, err)
-	}
-	rs.setRetryCount(0)
-
-	// P1 #26: Max Output Recovery — auto-continue when LLM truncates output
-	if resp.StopReason == "length" && len(resp.ToolCalls) == 0 {
-		var cont int
-		func() { a.mu.Lock(); defer a.mu.Unlock(); a.outputContinuations++; cont = a.outputContinuations }()
-
-		if cont <= 3 {
-			slog.Info(fmt.Sprintf("[max-output] continuation %d/3 — output truncated, auto-resuming", cont))
-			a.AppendMessage(llm.Message{
-				Role:      "assistant",
-				Content:   resp.Content,
-				Reasoning: resp.Reasoning,
-			})
-			a.AppendMessage(llm.Message{
-				Role:    "user",
-				Content: "Your previous output was truncated due to length. Continue EXACTLY from where you left off. Do NOT repeat any content. Do NOT add preamble.",
-			})
-			return a.transitionTo(StateGenerate, graphRouteGenerate), nil
-		}
-		slog.Info(fmt.Sprintf("[max-output] exceeded 3 continuations, stopping"))
-		a.deps.Delta.OnText("\n\n[Output continuation limit reached (3/3)]\n")
-	}
-	// Reset continuation counter on non-truncated output
-	if resp.StopReason != "length" {
-		func() { a.mu.Lock(); defer a.mu.Unlock(); a.outputContinuations = 0 }()
-	}
-
-	a.AppendMessage(llm.Message{
-		Role:      "assistant",
-		Content:   resp.Content,
-		ToolCalls: resp.ToolCalls,
-		Reasoning: resp.Reasoning,
-	})
-
-	// BehaviorGuard check
-	verdict := a.guard.Check(resp.Content, len(resp.ToolCalls), rs.stepCount())
-	switch verdict.Action {
-	case "terminate":
-		a.deps.Delta.OnText("\n\n[" + verdict.Message + "]")
-		return a.transitionTo(StateDone, graphRouteDone), nil
-	case "warn":
-		a.InjectEphemeral(verdict.Message)
-	}
-
-	if len(resp.ToolCalls) == 0 {
-		if a.traceCollector != nil && resp.Content != "" {
-			a.traceCollector.RecordFinalResponse(resp.Content)
-		}
-		if a.Mode().SelfReview && resp.Content != "" {
-			return graphruntime.NodeResult{
-				RouteKey:         graphRouteReflect,
-				ObservedState:    "reflect",
-				OutputSchemaName: graphReflectionSchema,
-			}, nil
-		}
-		return a.transitionTo(StateDone, graphRouteDone), nil
-	}
-	return a.transitionTo(StateToolExec, graphRouteToolExec), nil
+func (a *AgentLoop) guardCheck(response string, toolCalls int, step int) GuardVerdict {
+	return a.guard.Check(response, toolCalls, step)
 }
 
-// handleGenerateError handles all LLM error variants with retry/failover/fatal logic.
-func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err error) (graphruntime.NodeResult, error) {
+func (a *AgentLoop) recordFinalResponse(content string) {
+	if a.traceCollector != nil && content != "" {
+		a.traceCollector.RecordFinalResponse(content)
+	}
+}
+
+func (a *AgentLoop) selfReviewEnabled() bool {
+	return a.Mode().SelfReview
+}
+
+func (a *AgentLoop) appendMessage(msg llm.Message) {
+	a.AppendMessage(msg)
+}
+
+func (a *AgentLoop) incrementOutputContinuation() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.outputContinuations++
+	return a.outputContinuations
+}
+
+func (a *AgentLoop) resetOutputContinuations() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.outputContinuations = 0
+}
+
+func (a *AgentLoop) emitText(text string) {
+	if a.deps.Delta != nil && text != "" {
+		a.deps.Delta.OnText(text)
+	}
+}
+
+func (a *AgentLoop) emitError(err error) {
+	if a.deps.Delta != nil && err != nil {
+		a.deps.Delta.OnError(err)
+	}
+}
+
+// handleError handles all LLM error variants with retry/failover/fatal logic.
+func (s generateNodeService) handleError(ctx context.Context, rs *runState, err error) (graphruntime.NodeResult, error) {
 	llmErr, ok := err.(*llm.LLMError)
 	if !ok {
-		a.deps.Delta.OnError(err)
-		return a.finishWith(StateError, graphruntime.NodeStatusFatal), err
+		s.runtime.emitError(err)
+		return s.runtime.finishWith(StateError, graphruntime.NodeStatusFatal), err
 	}
 
 	switch llmErr.Level {
@@ -206,8 +171,8 @@ func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err e
 		// P0-A #4: background tasks skip retries
 		if llmErr.IsBackground {
 			slog.Info(fmt.Sprintf("[retry] background task %s — skipping retry", llmErr.Level))
-			a.deps.Delta.OnError(err)
-			return a.finishWith(StateError, graphruntime.NodeStatusFatal), err
+			s.runtime.emitError(err)
+			return s.runtime.finishWith(StateError, graphruntime.NodeStatusFatal), err
 		}
 		base, maxR := llm.BackoffConfig(llmErr.Level)
 		if rs.retryCount() < maxR {
@@ -215,13 +180,13 @@ func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err e
 			backoff := llm.BackoffWithJitter(base, nextRetry-1)
 			slog.Info(fmt.Sprintf("[retry] %s attempt %d/%d, backoff %v: %s",
 				llmErr.Level, nextRetry, maxR, backoff, llmErr.Code))
-			a.deps.Delta.OnText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
+			s.runtime.emitText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
 			select {
 			case <-ctx.Done():
-				return a.finishWith(StateError, graphruntime.NodeStatusFatal), ctx.Err()
+				return s.runtime.finishWith(StateError, graphruntime.NodeStatusFatal), ctx.Err()
 			case <-time.After(backoff):
 			}
-			return a.transitionTo(StateGenerate, graphRouteGenerate), nil
+			return s.runtime.transitionTo(StateGenerate, graphRouteGenerate), nil
 		}
 		// Exhausted retries → failover to next provider
 		if rs.lastProvider() != "" {
@@ -229,7 +194,7 @@ func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err e
 				maxR, llmErr.Level, rs.lastProvider()))
 			rs.addExcludedProvider(rs.lastProvider())
 			rs.setRetryCount(0)
-			return a.transitionTo(StateGenerate, graphRouteGenerate), nil
+			return s.runtime.transitionTo(StateGenerate, graphRouteGenerate), nil
 		}
 
 	case llm.ErrorContextOverflow:
@@ -239,29 +204,29 @@ func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err e
 			if nextRetry == 1 {
 				slog.Info("[retry] context overflow → compacting then retry")
 				rs.setMaxTokens(rs.maxTokens() / 2)
-				return a.transitionTo(StateCompact, graphRouteCompact), nil
+				return s.runtime.transitionTo(StateCompact, graphRouteCompact), nil
 			} else {
 				slog.Info("[retry] context overflow after compact → forceTruncate(6)")
-				a.forceTruncate(6)
-				a.deps.Delta.OnText("\n\n[Context too large — force-truncated to last 6 messages]\n")
-				return a.transitionTo(StateGenerate, graphRouteGenerate), nil
+				s.runtime.forceTruncate(6)
+				s.runtime.emitText("\n\n[Context too large — force-truncated to last 6 messages]\n")
+				return s.runtime.transitionTo(StateGenerate, graphRouteGenerate), nil
 			}
 		}
 
 	case llm.ErrorBilling:
 		slog.Info(fmt.Sprintf("[error] billing/quota exhausted: %s", llmErr.Message))
-		a.deps.Delta.OnText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
-		a.deps.Delta.OnError(err)
-		return a.finishWith(StateFatal, graphruntime.NodeStatusFatal), err
+		s.runtime.emitText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
+		s.runtime.emitError(err)
+		return s.runtime.finishWith(StateFatal, graphruntime.NodeStatusFatal), err
 
 	case llm.ErrorFatal:
-		a.deps.Delta.OnText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
-		a.deps.Delta.OnError(err)
-		return a.finishWith(StateFatal, graphruntime.NodeStatusFatal), err
+		s.runtime.emitText(fmt.Sprintf("\n\n[%s]\n", llmErr.Level.UserMessage()))
+		s.runtime.emitError(err)
+		return s.runtime.finishWith(StateFatal, graphruntime.NodeStatusFatal), err
 	}
 
-	a.deps.Delta.OnError(err)
-	return a.finishWith(StateError, graphruntime.NodeStatusFatal), err
+	s.runtime.emitError(err)
+	return s.runtime.finishWith(StateError, graphruntime.NodeStatusFatal), err
 }
 
 // ───────────────────────────────────────────
@@ -269,49 +234,24 @@ func (a *AgentLoop) handleGenerateError(ctx context.Context, rs *runState, err e
 // ───────────────────────────────────────────
 
 func (a *AgentLoop) handleToolExec(ctx context.Context, rs *runState) (graphruntime.NodeResult, error) {
-	var lastMsg llm.Message
-	func() { a.mu.Lock(); defer a.mu.Unlock(); lastMsg = a.history[len(a.history)-1] }()
+	return toolExecNodeService{runtime: a}.Execute(ctx, rs)
+}
 
-	// P2: Mixed batch splitting
-	if len(lastMsg.ToolCalls) > 1 {
-		readOnly, write := splitToolCalls(lastMsg.ToolCalls)
-		if len(readOnly) > 0 && len(write) == 0 {
-			a.execToolsConcurrent(ctx, lastMsg.ToolCalls)
-		} else if len(readOnly) > 1 && len(write) > 0 {
-			a.execToolsConcurrent(ctx, readOnly)
-			if a.execToolsSerial(ctx, write) {
-				return a.transitionTo(StateDone, graphRouteDone), nil
-			}
-		} else {
-			if a.execToolsSerial(ctx, lastMsg.ToolCalls) {
-				return a.transitionTo(StateDone, graphRouteDone), nil
-			}
-		}
-	} else {
-		if a.execToolsSerial(ctx, lastMsg.ToolCalls) {
-			return a.transitionTo(StateDone, graphRouteDone), nil
-		}
+func (a *AgentLoop) lastHistoryMessage() llm.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.history) == 0 {
+		return llm.Message{}
 	}
+	return a.history[len(a.history)-1]
+}
 
-	// Check yield signal from terminal tools
-	var shouldStop bool
-	func() {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		shouldStop = a.task.YieldRequested
-		a.task.YieldRequested = false
-	}()
-	if shouldStop {
-		if a.shouldRouteSpawn(lastMsg.ToolCalls) {
-			return graphruntime.NodeResult{
-				RouteKey:      graphRouteSpawn,
-				ObservedState: "spawn",
-			}, nil
-		}
-		return a.transitionTo(StateDone, graphRouteDone), nil
-	}
-
-	return a.transitionTo(StateGuardCheck, graphRouteGuardCheck), nil
+func (a *AgentLoop) consumeYieldRequested() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	shouldStop := a.task.YieldRequested
+	a.task.YieldRequested = false
+	return shouldStop
 }
 
 func (a *AgentLoop) shouldRouteSpawn(calls []llm.ToolCall) bool {
@@ -334,116 +274,43 @@ func (a *AgentLoop) shouldRouteSpawn(calls []llm.ToolCall) bool {
 // StateGuardCheck handler (was 21 lines inline)
 // ───────────────────────────────────────────
 
-func (a *AgentLoop) handleGuardCheck(rs *runState) (graphruntime.NodeResult, error) {
-	rs.incStep()
-
-	tokenEstimate := a.estimateTokens()
-	policy := llm.GetPolicy(a.deps.LLMRouter.CurrentModel())
-	usage := float64(tokenEstimate) / float64(policy.ContextWindow)
-
-	// Three-level context defense
-	if usage > 0.95 {
-		a.forceTruncate(8)
-		a.InjectEphemeral(prompttext.EphCompactionNotice)
-		return a.transitionTo(StateGenerate, graphRouteGenerate), nil
-	} else if usage > 0.70 {
-		return a.transitionTo(StateCompact, graphRouteCompact), nil
-	} else {
-		return a.transitionTo(StateGenerate, graphRouteGenerate), nil
-	}
-}
-
-// ───────────────────────────────────────────
-// StateCompact handler (was 18 lines inline)
-// ───────────────────────────────────────────
-
-func (a *AgentLoop) handleCompact(ctx context.Context) (graphruntime.NodeResult, error) {
-	// P1-A #24: Try tool-heavy compression first
-	if a.toolHeavyCompact() {
-		newEst := a.estimateTokens()
-		newPolicy := llm.GetPolicy(a.deps.LLMRouter.CurrentModel())
-		newUsage := float64(newEst) / float64(newPolicy.ContextWindow)
-		if newUsage <= 0.70 {
-			a.InjectEphemeral(prompttext.EphCompactionNotice)
-			return a.transitionTo(StateGenerate, graphRouteGenerate), nil
-		}
-	}
-	a.doCompact(ctx)
-	a.InjectEphemeral(prompttext.EphCompactionNotice)
-	a.persistFullHistory()
-	return a.transitionTo(StateGenerate, graphRouteGenerate), nil
-}
-
-// ───────────────────────────────────────────
-// StateDone handler (was 33 lines inline)
-// ───────────────────────────────────────────
-
-func (a *AgentLoop) handleDone(ctx context.Context, rs *runState) (graphruntime.NodeResult, error) {
-	// Snapshot file edit history for this message turn
+func (a *AgentLoop) snapshotPendingFileEdits(step int) {
 	if a.deps.FileHistory != nil && a.deps.FileHistory.HasPendingEdits() {
-		msgID := fmt.Sprintf("%s_step%d", a.SessionID(), rs.stepCount())
+		msgID := fmt.Sprintf("%s_step%d", a.SessionID(), step)
 		a.deps.FileHistory.Snapshot(msgID)
 	}
-	a.persistHistory()
-
-	// Pending Wake tail-check (subagent orchestration)
-	if a.pendingWake.Load() {
-		slog.Info(fmt.Sprintf("[loop] pendingWake detected, routing through merge node"))
-		return graphruntime.NodeResult{
-			RouteKey:      graphRouteMerge,
-			ObservedState: "merge",
-		}, nil
-	}
-
-	if a.shouldRunEvoEvaluation() {
-		return graphruntime.NodeResult{
-			RouteKey:      graphRouteEvaluate,
-			ObservedState: "evaluate",
-		}, nil
-	}
-	return a.transitionTo(StateIdle, graphRouteComplete), nil
 }
 
-func (a *AgentLoop) handleEvaluate(_ context.Context, _ *runState) (graphruntime.NodeResult, error) {
-	evalCtx, cancel := a.evaluationContextTimeout()
-	defer cancel()
-
-	previous := a.intelligenceSnapshot().Evaluation
-	shouldRepair, err := a.evaluateCurrentRun(evalCtx, previous)
-	if err != nil {
-		a.logInlineEvaluationFailure(err)
-		return graphruntime.NodeResult{
-			RouteKey:      graphRouteComplete,
-			ObservedState: "evaluate",
-		}, nil
-	}
-	if shouldRepair {
-		return graphruntime.NodeResult{
-			RouteKey:         graphRouteRepair,
-			ObservedState:    "evaluate",
-			OutputSchemaName: graphEvaluationSchema,
-		}, nil
-	}
-	return graphruntime.NodeResult{
-		RouteKey:         graphRouteComplete,
-		ObservedState:    "evaluate",
-		OutputSchemaName: graphEvaluationSchema,
-	}, nil
+func (a *AgentLoop) hasPendingWake() bool {
+	return a.pendingWake.Load()
 }
 
-func (a *AgentLoop) handleRepair(_ context.Context, rs *runState) (graphruntime.NodeResult, error) {
-	result := a.continueWithRepair(rs)
-	result.ObservedState = "repair"
-	return result, nil
+func (a *AgentLoop) consumePendingWake() bool {
+	return a.pendingWake.Swap(false)
 }
 
-func (a *AgentLoop) handleComplete(ctx context.Context, rs *runState) (graphruntime.NodeResult, error) {
-	// Completion side effects belong to the terminal complete node only.
+func (a *AgentLoop) emitAutoWakeStart() {
+	if a.deps.Delta != nil {
+		a.deps.Delta.OnAutoWakeStart()
+	}
+}
+
+func (a *AgentLoop) appendEmptyUserMessage() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.history = append(a.history, a.buildUserMessage(""))
+}
+
+func (a *AgentLoop) planReviewEmitter() planReviewEmitter {
+	return a.deps.Delta
+}
+
+func (a *AgentLoop) emitComplete() {
 	if a.deps.Delta != nil {
 		a.deps.Delta.OnComplete()
 	}
-	go a.fireHooks(ctx, rs.stepCount())
-	// P3 I2: Session is idle — start background pre-indexing.
+}
+
+func (a *AgentLoop) markDreamIdle() {
 	a.dream.OnIdle()
-	return a.finishWith(StateIdle, graphruntime.NodeStatusComplete), nil
 }

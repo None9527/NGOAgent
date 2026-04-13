@@ -8,7 +8,6 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          'react-vendor': ['react', 'react-dom'],
           'markdown': ['react-markdown', 'remark-gfm', 'rehype-raw'],
           'virtual': ['@tanstack/react-virtual', '@chenglou/pretext'],
           'lightbox': ['yet-another-react-lightbox'],
@@ -39,4 +38,3 @@ export default defineConfig({
     },
   },
 })
-

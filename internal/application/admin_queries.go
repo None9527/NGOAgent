@@ -1,13 +1,13 @@
 package application
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
-	"context"
 
 	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
@@ -53,6 +53,8 @@ func (a *AdminQueries) ListCapabilities(ctx context.Context) []apitype.Capabilit
 			Description: c.Description,
 			Category:    c.Category,
 			Source:      c.Source,
+			SourceKind:  c.SourceKind,
+			SourcePath:  c.SourcePath,
 			Tags:        c.Tags,
 			Version:     c.Version,
 			// omitting input schema mapping for brevity in API response unless requested
@@ -62,12 +64,73 @@ func (a *AdminQueries) ListCapabilities(ctx context.Context) []apitype.Capabilit
 }
 
 func (a *AdminQueries) Health() apitype.HealthResponse {
-	return apitype.HealthResponse{
-		Status:  "ok",
-		Version: Version,
-		Model:   a.router.CurrentModel(),
-		Tools:   len(a.toolAdmin.List()),
+	now := time.Now()
+	checks := map[string]string{
+		"config":      healthCheckStatus(a.cfg != nil),
+		"router":      healthCheckStatus(a.router != nil),
+		"tools":       healthCheckStatus(a.toolAdmin != nil),
+		"runtime":     healthCheckStatus(a.loop != nil || a.loopPool != nil),
+		"discovery":   healthCheckStatus(a.discovery != nil),
+		"security":    healthCheckStatus(a.secHook != nil),
+		"sessions":    healthCheckStatus(a.sessMgr != nil),
+		"persistence": healthCheckStatus(a.runtimeStore != nil),
 	}
+	ready := true
+	for _, key := range []string{"config", "router", "tools", "runtime"} {
+		if checks[key] != "ok" {
+			ready = false
+			break
+		}
+	}
+	status := "ok"
+	if !ready {
+		status = "degraded"
+	}
+	model := ""
+	if a.router != nil {
+		model = a.router.CurrentModel()
+	}
+	tools := 0
+	if a.toolAdmin != nil {
+		tools = len(a.toolAdmin.List())
+	}
+	capabilityCategories := map[string]int{}
+	capabilitySources := map[string]int{}
+	if a.discovery != nil {
+		for _, capability := range a.discovery.ListCapabilities(context.Background()) {
+			capabilityCategories[capability.Category]++
+			sourceKey := capability.SourceKind
+			if sourceKey == "" {
+				sourceKey = capability.Category
+			}
+			capabilitySources[sourceKey]++
+		}
+	}
+	startedAt := ""
+	var uptime int64
+	if !a.startedAt.IsZero() {
+		startedAt = a.startedAt.Format(time.RFC3339)
+		uptime = int64(now.Sub(a.startedAt).Seconds())
+	}
+	return apitype.HealthResponse{
+		Status:               status,
+		Version:              Version,
+		Model:                model,
+		Tools:                tools,
+		Ready:                ready,
+		StartedAt:            startedAt,
+		UptimeSeconds:        uptime,
+		Checks:               checks,
+		CapabilityCategories: capabilityCategories,
+		CapabilitySources:    capabilitySources,
+	}
+}
+
+func healthCheckStatus(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "missing"
 }
 
 func (a *AdminQueries) GetSecurity() apitype.SecurityResponse {

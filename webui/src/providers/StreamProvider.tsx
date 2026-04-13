@@ -9,6 +9,7 @@
 
 import { createContext, useContext, useState, useCallback, useRef, useMemo, useEffect, useLayoutEffect, type ReactNode } from 'react'
 import { reconnectStream, getSharedWSClient, onWSStateChange } from '../chat/streamHandler'
+import { api } from '../chat/api'
 import { uid } from '../chat/messageMapper'
 import { useScrollContext } from './ScrollProvider'
 import { useSession } from './SessionProvider'
@@ -297,7 +298,6 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   const stopStream = useCallback(async (sessionId: string) => {
     if (streamPhase === 'idle') return
     try {
-      const { api } = await import('../chat/api')
       await api.stop(sessionId)
     } catch { /* ignore */ }
     cancelRef.current?.()

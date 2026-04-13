@@ -34,6 +34,9 @@ func DecisionFromSnapshot(snap *graphruntime.RunSnapshot) *graphruntime.Decision
 	if snap == nil {
 		return nil
 	}
+	if decision := explicitDecisionFromSnapshot(snap); decision != nil {
+		return decision
+	}
 	if review := reflectionDecisionFromSnapshot(snap); review != nil {
 		return review
 	}
@@ -41,6 +44,82 @@ func DecisionFromSnapshot(snap *graphruntime.RunSnapshot) *graphruntime.Decision
 		return eval
 	}
 	return nil
+}
+
+func explicitDecisionFromSnapshot(snap *graphruntime.RunSnapshot) *graphruntime.DecisionContractState {
+	if snap == nil {
+		return nil
+	}
+	decision := snap.TurnState.Intelligence.Decision
+	if !decision.Valid || decision.Kind == graphruntime.DecisionKindNone {
+		return nil
+	}
+	decision.Decision = strings.TrimSpace(strings.ToLower(decision.Decision))
+	decision.Reason = strings.TrimSpace(decision.Reason)
+	decision.Feedback = strings.TrimSpace(decision.Feedback)
+	return &decision
+}
+
+func setDecisionContract(state *graphruntime.TurnState, contract graphruntime.DecisionContractState) {
+	if state != nil {
+		state.Intelligence.Decision = contract
+	}
+}
+
+func planningPendingDecisionContract(planning graphruntime.PlanningState) graphruntime.DecisionContractState {
+	return graphruntime.DecisionContractState{
+		Kind:         graphruntime.DecisionKindPlanReview,
+		SchemaName:   planningReviewSchema,
+		Feedback:     strings.TrimSpace(planning.ReviewFeedback),
+		ResumeAction: "resume_run",
+		Valid:        true,
+	}
+}
+
+func planningAppliedDecisionContract(planning graphruntime.PlanningState) graphruntime.DecisionContractState {
+	return graphruntime.DecisionContractState{
+		Kind:       graphruntime.DecisionKindPlanReview,
+		SchemaName: planningReviewSchema,
+		Decision:   strings.TrimSpace(strings.ToLower(planning.ReviewDecision)),
+		Feedback:   strings.TrimSpace(planning.ReviewFeedback),
+		AppliedAt:  planning.ReviewedAt,
+		Valid:      strings.TrimSpace(planning.ReviewDecision) != "",
+	}
+}
+
+func reflectionDecisionContract(review reflectionReview) graphruntime.DecisionContractState {
+	return graphruntime.DecisionContractState{
+		Kind:       graphruntime.DecisionKindReflection,
+		SchemaName: graphReflectionSchema,
+		Decision:   strings.TrimSpace(strings.ToLower(review.Decision)),
+		Reason:     strings.TrimSpace(review.Reason),
+		Valid:      strings.TrimSpace(review.Decision) != "",
+	}
+}
+
+func evaluationDecisionContract(eval graphruntime.EvaluationState) graphruntime.DecisionContractState {
+	if !eval.Valid {
+		return graphruntime.DecisionContractState{}
+	}
+	schemaName := strings.TrimSpace(eval.SchemaName)
+	if schemaName == "" {
+		schemaName = graphEvaluationSchema
+	}
+	decision := "failed"
+	if eval.Passed {
+		decision = "passed"
+	}
+	reason := strings.TrimSpace(eval.ErrorType)
+	if reason == "" && len(eval.Issues) > 0 {
+		reason = strings.TrimSpace(eval.Issues[0].Description)
+	}
+	return graphruntime.DecisionContractState{
+		Kind:       graphruntime.DecisionKindEvaluation,
+		SchemaName: schemaName,
+		Decision:   decision,
+		Reason:     reason,
+		Valid:      true,
+	}
 }
 
 func NewDecisionContract(kind, decision, feedback string) (*graphruntime.DecisionContractState, error) {
@@ -175,6 +254,7 @@ func applyDecisionToSnapshot(snap *graphruntime.RunSnapshot, contract *graphrunt
 		planning.ReviewFeedback = strings.TrimSpace(contract.Feedback)
 		planning.ReviewedAt = contract.AppliedAt
 		snap.TurnState.Intelligence.Planning = planning
+		snap.TurnState.Intelligence.Decision = planningAppliedDecisionContract(planning)
 		snap.UpdatedAt = contract.AppliedAt
 		return nil
 	case graphruntime.DecisionKindReflection:
@@ -188,8 +268,20 @@ func applyDecisionToSnapshot(snap *graphruntime.RunSnapshot, contract *graphrunt
 			return agenterr.NewValidation("decision", fmt.Sprintf("unsupported reflection decision %q", contract.Decision))
 		}
 		review.Reason = strings.TrimSpace(contract.Feedback)
+		if strings.TrimSpace(review.SchemaName) == "" {
+			review.SchemaName = graphReflectionSchema
+		}
 		review.Valid = true
 		snap.TurnState.Intelligence.Review = review
+		snap.TurnState.Intelligence.Decision = graphruntime.DecisionContractState{
+			Kind:       graphruntime.DecisionKindReflection,
+			SchemaName: review.SchemaName,
+			Decision:   review.Decision,
+			Reason:     review.Reason,
+			Feedback:   strings.TrimSpace(contract.Feedback),
+			AppliedAt:  contract.AppliedAt,
+			Valid:      true,
+		}
 		snap.UpdatedAt = contract.AppliedAt
 		return nil
 	case graphruntime.DecisionKindEvaluation:
@@ -205,6 +297,7 @@ func applyDecisionToSnapshot(snap *graphruntime.RunSnapshot, contract *graphrunt
 		}
 		eval.Valid = true
 		snap.TurnState.Intelligence.Evaluation = eval
+		snap.TurnState.Intelligence.Decision = evaluationDecisionContract(eval)
 		snap.UpdatedAt = contract.AppliedAt
 		return nil
 	default:
@@ -222,13 +315,8 @@ func (w waitSnapshotView) pendingDecision() *graphruntime.DecisionContractState 
 		planning.Required &&
 		planning.ReviewRequired &&
 		strings.TrimSpace(planning.ReviewDecision) == "" {
-		return &graphruntime.DecisionContractState{
-			Kind:         graphruntime.DecisionKindPlanReview,
-			SchemaName:   planningReviewSchema,
-			Feedback:     planning.ReviewFeedback,
-			ResumeAction: "resume_run",
-			Valid:        true,
-		}
+		contract := planningPendingDecisionContract(planning)
+		return &contract
 	}
 
 	return nil

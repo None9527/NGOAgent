@@ -45,6 +45,13 @@ function groupSessions<T extends { created_at: string }>(sessions: T[]): { label
   return order.map(label => ({ label, items: map.get(label)! }))
 }
 
+function sessionSortTime(session: { created_at: string; updated_at: string }) {
+  const value = session.updated_at || session.created_at
+  if (!value) return 0
+  const timestamp = new Date(value).getTime()
+  return Number.isNaN(timestamp) ? 0 : timestamp
+}
+
 // ── Icons ────────────────────────────────────────────────────
 const PencilIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
@@ -105,10 +112,13 @@ const SessionItem = React.memo<SessionItemProps>(({ session, isActive, onSelect,
   // Detect title changes → trigger flash animation
   useEffect(() => {
     if (session.title && session.title !== prevTitleRef.current) {
-      setTitleFlash(true)
+      const startTimer = setTimeout(() => setTitleFlash(true), 0)
       const timer = setTimeout(() => setTitleFlash(false), 1200)
       prevTitleRef.current = session.title
-      return () => clearTimeout(timer)
+      return () => {
+        clearTimeout(startTimer)
+        clearTimeout(timer)
+      }
     }
   }, [session.title])
 
@@ -131,16 +141,19 @@ const SessionItem = React.memo<SessionItemProps>(({ session, isActive, onSelect,
     if (e.key === 'Escape') cancelEdit()
   }
 
-  const bg = isActive ? 'rgba(255,255,255,0.1)' : hovered ? 'rgba(255,255,255,0.05)' : 'transparent'
-  const fg = isActive ? '#ffffff' : '#a3a3a3'
-
   return (
     <div
-      className="group relative flex items-center rounded-lg transition-all duration-200"
-      style={{ backgroundColor: bg }}
+      className={`group relative flex items-center rounded-lg border transition-all duration-200 ${
+        isActive
+          ? 'border-cyan-300/25 bg-cyan-300/[0.08] text-white'
+          : hovered
+          ? 'border-white/[0.08] bg-white/[0.04] text-gray-200'
+          : 'border-transparent text-gray-400'
+      }`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
+      {isActive && <span className="absolute left-0 top-2 bottom-2 w-[3px] rounded-sm bg-cyan-300" />}
       {editing ? (
         <div className="flex items-center w-full gap-1 px-2 py-1.5">
           <input
@@ -165,7 +178,6 @@ const SessionItem = React.memo<SessionItemProps>(({ session, isActive, onSelect,
           <button
             className="flex-1 text-left px-3 py-2.5 text-sm truncate min-w-0 rounded-lg"
             style={{
-              color: fg,
               transition: 'color 0.3s ease',
               ...(titleFlash ? {
                 animation: 'sidebar-title-flash 1.2s ease-out',
@@ -178,11 +190,11 @@ const SessionItem = React.memo<SessionItemProps>(({ session, isActive, onSelect,
           {(hovered || isActive) && (
             <div className={`flex items-center gap-0.5 pr-1.5 shrink-0 ${!isActive && !hovered ? 'hidden' : ''}`}>
               <button onClick={startEdit} title="重命名"
-                className="p-1.5 rounded transition-colors text-gray-500 hover:text-gray-200 hover:bg-white/10 active:bg-white/20">
+                className="p-1.5 rounded-md transition-colors text-gray-500 hover:text-gray-200 hover:bg-white/10 active:bg-white/20">
                 <PencilIcon />
               </button>
               <button onClick={(e) => { e.stopPropagation(); onDelete() }} title="删除"
-                className="p-1.5 rounded transition-colors text-gray-500 hover:text-red-400 hover:bg-red-900/30 active:bg-red-900/50">
+                className="p-1.5 rounded-md transition-colors text-gray-500 hover:text-red-400 hover:bg-red-900/30 active:bg-red-900/50">
                 <TrashIcon />
               </button>
             </div>
@@ -208,9 +220,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const visible = [...sessions.filter(s => s.channel !== 'cron')]
     .sort((a, b) => {
       // sort by updated_at: most recently active first
-      const ta = a.updated_at ? new Date(a.updated_at).getTime() : (a.created_at ? new Date(a.created_at).getTime() : Date.now())
-      const tb = b.updated_at ? new Date(b.updated_at).getTime() : (b.created_at ? new Date(b.created_at).getTime() : Date.now())
-      return tb - ta
+      return sessionSortTime(b) - sessionSortTime(a)
     })
 
   // Filter by search query
@@ -228,15 +238,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="fixed inset-0 bg-black/50 z-20 md:hidden" onClick={onToggle} />
       )}
 
-      <div className={`fixed md:relative flex flex-col h-full glass-panel border-l-0 border-t-0 border-b-0 w-[240px] md:w-[280px] shrink-0 z-30
+      <div className={`sidebar-shell fixed md:relative flex flex-col h-full border-l-0 border-t-0 border-b-0 w-[248px] md:w-[292px] shrink-0 z-30
           transition-transform duration-300 ease-in-out
           ${isOpen ? 'translate-x-0' : '-translate-x-full md:hidden'}`}>
 
         {/* Top: new session */}
-        <div className="p-3 flex items-center justify-between">
+        <div className="p-3">
+          <div className="mb-3 flex items-start justify-between gap-2 px-1">
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase text-white/40">NGOAgent Kernel</div>
+              <div className="truncate text-base font-semibold text-white">Sessions</div>
+            </div>
+            <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/10 px-2 py-1 text-[10px] font-semibold text-emerald-100">
+              {visible.length}
+            </div>
+          </div>
+          <div className="flex items-center justify-between">
           <button onClick={onNewSession}
-            className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#2f2f2f] transition-colors text-sm"
-            style={{ color: '#d4d4d4' }}>
+            className="control-button flex-1 flex items-center gap-2 px-3 py-2 rounded-lg transition-colors text-sm text-gray-200">
             <svg stroke="currentColor" fill="none" strokeWidth="2" viewBox="0 0 24 24"
               strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5" xmlns="http://www.w3.org/2000/svg">
               <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
@@ -244,12 +263,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
             新建对话
           </button>
           <button onClick={onToggle}
-            className="p-2 ml-2 rounded-lg hover:bg-[#2f2f2f] text-gray-400 md:hidden">
+            className="control-button p-2 ml-2 rounded-lg text-gray-400 md:hidden">
             <svg stroke="currentColor" fill="none" strokeWidth="2" viewBox="0 0 24 24"
               strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5" xmlns="http://www.w3.org/2000/svg">
               <rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><line x1="9" y1="3" x2="9" y2="21" />
             </svg>
           </button>
+          </div>
         </div>
 
         {/* Search bar */}
@@ -264,8 +284,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              placeholder="搜索对话..."
-              className="w-full glass-input rounded-lg pl-8 pr-7 py-1.5 text-xs text-gray-300 outline-none placeholder:text-gray-600"
+              placeholder="搜索会话"
+              className="w-full glass-input rounded-lg pl-8 pr-7 py-2 text-xs text-gray-300 outline-none placeholder:text-gray-600"
             />
             {searchQuery && (
               <button
@@ -283,9 +303,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
           {groups.map(group => (
             <div key={group.label} className="mb-2">
-              <div className="text-xs font-semibold px-2 py-1.5 sticky top-0 z-10 bg-transparent backdrop-blur-md flex items-center gap-2"
-                style={{ color: '#8E8E93' }}>
-                <div className="w-1.5 h-1.5 rounded-full bg-white/20" />
+              <div className="text-[11px] font-semibold uppercase px-2 py-1.5 sticky top-0 z-10 bg-transparent backdrop-blur-md flex items-center gap-2 text-white/40">
+                <div className="h-px w-3 bg-white/20" />
                 {group.label}
               </div>
               <div className="space-y-0.5">

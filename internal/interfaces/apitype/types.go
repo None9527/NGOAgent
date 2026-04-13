@@ -4,10 +4,16 @@ package apitype
 
 // HealthResponse is the health check response.
 type HealthResponse struct {
-	Status  string `json:"status"`
-	Version string `json:"version"`
-	Model   string `json:"model"`
-	Tools   int    `json:"tools"`
+	Status               string            `json:"status"`
+	Version              string            `json:"version"`
+	Model                string            `json:"model"`
+	Tools                int               `json:"tools"`
+	Ready                bool              `json:"ready,omitempty"`
+	StartedAt            string            `json:"started_at,omitempty"`
+	UptimeSeconds        int64             `json:"uptime_seconds,omitempty"`
+	Checks               map[string]string `json:"checks,omitempty"`
+	CapabilityCategories map[string]int    `json:"capability_categories,omitempty"`
+	CapabilitySources    map[string]int    `json:"capability_sources,omitempty"`
 }
 
 // ModelListResponse lists available models.
@@ -97,7 +103,9 @@ type CapabilityInfo struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	Category    string   `json:"category"` // "builtin", "mcp", "skill"
-	Source      string   `json:"source"`   // server name for MCP, skill path for skills
+	Source      string   `json:"source"`   // stable provider/server/skill identity
+	SourceKind  string   `json:"source_kind,omitempty"`
+	SourcePath  string   `json:"source_path,omitempty"`
 	InputSchema any      `json:"input_schema,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	Version     string   `json:"version,omitempty"`

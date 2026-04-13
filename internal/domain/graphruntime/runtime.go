@@ -138,6 +138,7 @@ func (r *Runtime) execute(ctx context.Context, rt *RuntimeContext, state *TurnSt
 		}
 
 		result = result.normalize()
+		applyNodePatch(state, rt.Execution, result.Patch)
 		if err := validateWaitResult(result); err != nil {
 			rt.Execution.Status = NodeStatusFatal
 			rt.Execution.LastError = err.Error()
@@ -312,6 +313,7 @@ func cloneSession(in *SessionState) *SessionState {
 
 func cloneTurn(in TurnState) TurnState {
 	out := in
+	out.History = cloneHistory(in.History)
 	out.Attachments = append([]string(nil), in.Attachments...)
 	out.Ephemerals = append([]string(nil), in.Ephemerals...)
 	out.PendingMedia = clonePendingMedia(in.PendingMedia)
@@ -337,6 +339,109 @@ func cloneTurn(in TurnState) TurnState {
 		barrier := *in.Orchestration.ActiveBarrier
 		barrier.Members = append([]BarrierMemberState(nil), in.Orchestration.ActiveBarrier.Members...)
 		out.Orchestration.ActiveBarrier = &barrier
+	}
+	return out
+}
+
+func applyNodePatch(state *TurnState, exec *ExecutionState, patch NodePatch) {
+	if state == nil {
+		if exec != nil && patch.Execution != nil {
+			*exec = *cloneExecution(*patch.Execution)
+		}
+		return
+	}
+	if patch.HistoryReplaced {
+		state.History = cloneHistory(patch.ReplaceHistory)
+	}
+	if len(patch.AppendHistory) > 0 {
+		state.History = append(state.History, cloneHistory(patch.AppendHistory)...)
+	}
+	if patch.EphemeralsReplaced {
+		state.Ephemerals = append([]string(nil), patch.ReplaceEphemerals...)
+	}
+	if len(patch.AppendEphemerals) > 0 {
+		state.Ephemerals = append(state.Ephemerals, patch.AppendEphemerals...)
+	}
+	if patch.PendingMediaReplaced {
+		state.PendingMedia = clonePendingMedia(patch.ReplacePendingMedia)
+	}
+	if len(patch.AppendPendingMedia) > 0 {
+		state.PendingMedia = append(state.PendingMedia, clonePendingMedia(patch.AppendPendingMedia)...)
+	}
+	if patch.Task != nil {
+		state.Task = cloneTaskState(*patch.Task)
+	}
+	if patch.Compact != nil {
+		state.Compact = *patch.Compact
+	}
+	if patch.Intelligence != nil {
+		state.Intelligence = cloneIntelligenceState(*patch.Intelligence)
+	}
+	if patch.Orchestration != nil {
+		state.Orchestration = cloneOrchestrationState(*patch.Orchestration)
+	}
+	if patch.ActiveSkills != nil {
+		state.ActiveSkills = cloneStringMap(patch.ActiveSkills)
+	}
+	if patch.ForceNextTool != nil {
+		state.ForceNextTool = *patch.ForceNextTool
+	}
+	if exec != nil && patch.Execution != nil {
+		*exec = *cloneExecution(*patch.Execution)
+	}
+}
+
+func cloneHistory(in []ConversationMessageState) []ConversationMessageState {
+	if in == nil {
+		return nil
+	}
+	out := make([]ConversationMessageState, len(in))
+	for i, msg := range in {
+		out[i] = msg
+		out[i].ToolCalls = append([]ToolCallSnapshot(nil), msg.ToolCalls...)
+		out[i].Attachments = append([]AttachmentState(nil), msg.Attachments...)
+	}
+	return out
+}
+
+func cloneTaskState(in TaskState) TaskState {
+	out := in
+	if in.ArtifactLastStep != nil {
+		out.ArtifactLastStep = make(map[string]int, len(in.ArtifactLastStep))
+		for k, v := range in.ArtifactLastStep {
+			out.ArtifactLastStep[k] = v
+		}
+	}
+	return out
+}
+
+func cloneIntelligenceState(in IntelligenceState) IntelligenceState {
+	out := in
+	out.Planning.MissingArtifacts = append([]string(nil), in.Planning.MissingArtifacts...)
+	out.Evaluation.Issues = append([]EvaluationIssueState(nil), in.Evaluation.Issues...)
+	return out
+}
+
+func cloneOrchestrationState(in OrchestrationState) OrchestrationState {
+	out := in
+	out.ChildRunIDs = append([]string(nil), in.ChildRunIDs...)
+	out.Handoffs = append([]HandoffState(nil), in.Handoffs...)
+	out.Events = append([]OrchestrationEventState(nil), in.Events...)
+	if in.ActiveBarrier != nil {
+		barrier := *in.ActiveBarrier
+		barrier.Members = append([]BarrierMemberState(nil), in.ActiveBarrier.Members...)
+		out.ActiveBarrier = &barrier
+	}
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
 	}
 	return out
 }

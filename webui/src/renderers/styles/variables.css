@@ -13,27 +13,27 @@
 :root,
 .theme-dark {
   /* Background layers - enhanced contrast */
-  --color-bg:          #0f0f0f;
-  --color-bg-primary:  #0f0f0f;
-  --color-bg-elevated: #1a1a1a;
-  --color-bg-hover:    #242424;
-  --color-bg-input:    #1a1a1a;
+  --color-bg:          #050706;
+  --color-bg-primary:  #080b09;
+  --color-bg-elevated: #111612;
+  --color-bg-hover:    #1c241f;
+  --color-bg-input:    #101511;
 
   --color-text:        #e5e5e5;
   --color-text-secondary: #a0a0a0;
   --color-text-muted:  #737373;
-  --color-text-link:   #60a5fa;
+  --color-text-link:   #67e8d4;
 
   /* Borders - more subtle */
   --color-border:      rgba(255, 255, 255, 0.06);
-  --color-border-focus: #3b82f6;
+  --color-border-focus: #67e8d4;
   --color-border-input: rgba(255, 255, 255, 0.08);
   --color-border-subtle: rgba(255, 255, 255, 0.04);
 
   /* Primary colors - modern blue with glow effect */
-  --color-primary:     #3b82f6;
-  --color-primary-hover: #2563eb;
-  --color-primary-glow: rgba(59, 130, 246, 0.15);
+  --color-primary:     #14b8a6;
+  --color-primary-hover: #0f766e;
+  --color-primary-glow: rgba(20, 184, 166, 0.16);
   
   /* Status colors - reduced saturation */
   --color-success:     #059669;
@@ -48,7 +48,7 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.6);
-  --shadow-glow: 0 0 20px rgba(59, 130, 246, 0.15);
+  --shadow-glow: 0 0 20px rgba(20, 184, 166, 0.15);
 
   /* Legacy compat — renderers still reference these */
   --app-primary: var(--color-primary);
@@ -81,23 +81,23 @@
   --app-transparent-inner-border: var(--color-border);
   --app-header-background: var(--color-bg-elevated);
   --app-list-hover-background: var(--color-bg-hover);
-  --app-list-active-background: #094771;
+  --app-list-active-background: rgba(20, 184, 166, 0.14);
   --app-list-active-foreground: #ffffff;
   --app-menu-background: var(--color-bg-elevated);
   --app-menu-border: var(--color-border);
   --app-menu-foreground: var(--color-text);
-  --app-menu-selection-background: #094771;
+  --app-menu-selection-background: rgba(20, 184, 166, 0.14);
   --app-menu-selection-foreground: #ffffff;
   --app-tool-background: var(--color-bg);
   --app-code-background: var(--color-code-bg);
   --app-link-foreground: var(--color-text-link);
-  --app-link-active-foreground: #93c5fd;
+  --app-link-active-foreground: #99f6e4;
   --app-warning-background: rgba(255, 204, 0, 0.1);
   --app-warning-border: #ffcc00;
   --app-warning-foreground: #ffcc00;
 
   /* Typography (shared) */
-  --app-font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --app-font-sans: "Aptos", "Segoe UI", sans-serif;
   --app-font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
   --app-monospace-font-size: 13px;
   --font-size-xs: 11px;

@@ -56,11 +56,11 @@ func setupTestLoop() (*AgentLoop, *mockDeltaSink) {
 	return loop, delta
 }
 
-func TestHandleGenerateError_NonLLMError(t *testing.T) {
+func TestGenerateNodeServiceHandleError_NonLLMError(t *testing.T) {
 	loop, delta := setupTestLoop()
 	rs := &runState{}
 
-	result, _ := loop.handleGenerateError(context.Background(), rs, errors.New("network fail"))
+	result, _ := generateNodeService{runtime: loop}.handleError(context.Background(), rs, errors.New("network fail"))
 
 	if result.ObservedState != StateError.String() {
 		t.Errorf("expected observed state %q, got %q", StateError.String(), result.ObservedState)
@@ -73,12 +73,12 @@ func TestHandleGenerateError_NonLLMError(t *testing.T) {
 	}
 }
 
-func TestHandleGenerateError_Fatal(t *testing.T) {
+func TestGenerateNodeServiceHandleError_Fatal(t *testing.T) {
 	loop, delta := setupTestLoop()
 	rs := &runState{}
 
 	err := &llm.LLMError{Level: llm.ErrorFatal, Message: "model not found"}
-	result, _ := loop.handleGenerateError(context.Background(), rs, err)
+	result, _ := generateNodeService{runtime: loop}.handleError(context.Background(), rs, err)
 
 	if result.ObservedState != StateFatal.String() {
 		t.Errorf("expected observed state %q, got %q", StateFatal.String(), result.ObservedState)
@@ -94,7 +94,7 @@ func TestHandleGenerateError_Fatal(t *testing.T) {
 	}
 }
 
-func TestHandleGenerateError_TransientRetry(t *testing.T) {
+func TestGenerateNodeServiceHandleError_TransientRetry(t *testing.T) {
 	loop, delta := setupTestLoop()
 	rs := &runState{}
 
@@ -103,7 +103,7 @@ func TestHandleGenerateError_TransientRetry(t *testing.T) {
 	defer cancel()
 
 	err := &llm.LLMError{Level: llm.ErrorTransient, Message: "502 Gateway"}
-	result, errReturn := loop.handleGenerateError(ctx, rs, err)
+	result, errReturn := generateNodeService{runtime: loop}.handleError(ctx, rs, err)
 
 	if rs.retryCount() != 1 {
 		t.Errorf("expected retries to increment to 1, got %d", rs.retryCount())
@@ -122,14 +122,14 @@ func TestHandleGenerateError_TransientRetry(t *testing.T) {
 	}
 }
 
-func TestHandleGenerateError_TransientFailover(t *testing.T) {
+func TestGenerateNodeServiceHandleError_TransientFailover(t *testing.T) {
 	loop, delta := setupTestLoop()
 	rs := &runState{}
 	rs.setRetryCount(5) // Exceeds default maxR for transient
 	rs.setLastProvider("default_prov")
 
 	err := &llm.LLMError{Level: llm.ErrorTransient, Message: "502 Gateway"}
-	result, _ := loop.handleGenerateError(context.Background(), rs, err)
+	result, _ := generateNodeService{runtime: loop}.handleError(context.Background(), rs, err)
 
 	if got := rs.excludedProviderList(); len(got) != 1 || got[0] != "default_prov" {
 		t.Errorf("expected default_prov to be excluded for failover, got %v", got)
@@ -148,12 +148,12 @@ func TestHandleGenerateError_TransientFailover(t *testing.T) {
 	}
 }
 
-func TestHandleGenerateError_ContextOverflow(t *testing.T) {
+func TestGenerateNodeServiceHandleError_ContextOverflow(t *testing.T) {
 	loop, _ := setupTestLoop()
 	rs := &runState{opts: RunOptions{MaxTokens: 2000}}
 
 	err := &llm.LLMError{Level: llm.ErrorContextOverflow, Message: "context length exceeded"}
-	result, _ := loop.handleGenerateError(context.Background(), rs, err)
+	result, _ := generateNodeService{runtime: loop}.handleError(context.Background(), rs, err)
 
 	if rs.retryCount() != 1 {
 		t.Errorf("expected retries=1, got %d", rs.retryCount())

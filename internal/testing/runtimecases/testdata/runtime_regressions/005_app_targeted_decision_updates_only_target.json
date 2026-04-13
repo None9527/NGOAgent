@@ -1,0 +1,94 @@
+{
+  "id": "app_targeted_decision_updates_only_target",
+  "title": "targeted decision updates only target run",
+  "category": "recovery",
+  "layers": ["application"],
+  "application": {
+    "session_id": "session-runtime-ingress-targeted",
+    "snapshots": [
+      {
+        "RunID": "run-ingress-target",
+        "SessionID": "session-runtime-ingress-targeted",
+        "GraphID": "agent_loop",
+        "GraphVersion": "v1alpha1",
+        "Status": "wait",
+        "TurnState": {
+          "RunID": "run-ingress-target",
+          "Intelligence": {
+            "Planning": {
+              "Required": true,
+              "ReviewRequired": true,
+              "Trigger": "mode_force_plan"
+            }
+          }
+        },
+        "ExecutionState": {
+          "Status": "wait",
+          "WaitReason": "user_input",
+          "Cursor": {
+            "GraphID": "agent_loop",
+            "GraphVersion": "v1alpha1",
+            "CurrentNode": "plan",
+            "Step": 1,
+            "RouteKey": "plan"
+          }
+        },
+        "UpdatedAt": "2026-04-13T03:29:00Z"
+      },
+      {
+        "RunID": "run-ingress-latest",
+        "SessionID": "session-runtime-ingress-targeted",
+        "GraphID": "agent_loop",
+        "GraphVersion": "v1alpha1",
+        "Status": "wait",
+        "TurnState": {
+          "RunID": "run-ingress-latest",
+          "Intelligence": {
+            "Planning": {
+              "Required": true,
+              "ReviewRequired": true,
+              "Trigger": "mode_force_plan"
+            }
+          }
+        },
+        "ExecutionState": {
+          "Status": "wait",
+          "WaitReason": "user_input",
+          "Cursor": {
+            "GraphID": "agent_loop",
+            "GraphVersion": "v1alpha1",
+            "CurrentNode": "plan",
+            "Step": 1,
+            "RouteKey": "plan"
+          }
+        },
+        "UpdatedAt": "2026-04-13T03:30:00Z"
+      }
+    ],
+    "action": {
+      "kind": "apply_runtime_ingress",
+      "run_id": "run-ingress-target",
+      "decision": {
+        "kind": "plan_review",
+        "decision": "revise",
+        "feedback": "target this run"
+      }
+    },
+    "expect": {
+      "snapshot_checks": [
+        {
+          "run_id": "run-ingress-target",
+          "wait_reason": "user_input",
+          "ingress_run_id": "run-ingress-target",
+          "updated": "changed"
+        },
+        {
+          "run_id": "run-ingress-latest",
+          "wait_reason": "user_input",
+          "updated": "unchanged"
+        }
+      ],
+      "untouched_run_ids": ["run-ingress-latest"]
+    }
+  }
+}

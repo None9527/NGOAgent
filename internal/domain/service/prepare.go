@@ -11,57 +11,123 @@ import (
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/llm"
 )
 
-// doPrepare detects ephemeral injection needs.
+type prepareTurnSnapshot struct {
+	lastMessage      string
+	boundaryName     string
+	boundaryMode     string
+	boundaryStatus   string
+	boundarySummary  string
+	planModified     bool
+	stepsSinceUpdate int
+	currentStep      int
+	previousMode     string
+	artifactLastStep map[string]int
+}
+
+func (a *AgentLoop) runMode() string {
+	return a.options.Mode
+}
+
+func (a *AgentLoop) prepareSnapshot() prepareTurnSnapshot {
+	// Sub-agents skip all planning/boundary/agentic injections
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	snapshot := prepareTurnSnapshot{
+		artifactLastStep: make(map[string]int),
+	}
+	if len(a.history) > 0 {
+		snapshot.lastMessage = a.history[len(a.history)-1].Content
+	}
+	if a.task != nil {
+		snapshot.boundaryName = a.task.Name
+		snapshot.boundaryMode = a.task.Mode
+		snapshot.boundaryStatus = a.task.Status
+		snapshot.boundarySummary = a.task.Summary
+		snapshot.planModified = a.task.PlanModified
+		snapshot.stepsSinceUpdate = a.task.StepsSinceUpdate
+		snapshot.currentStep = a.task.CurrentStep
+		snapshot.previousMode = a.task.PreviousMode
+		for name, step := range a.task.ArtifactLastStep {
+			snapshot.artifactLastStep[name] = step
+		}
+	}
+	return snapshot
+}
+
+func (a *AgentLoop) artifactExists(name string) bool {
+	if a.deps.Brain == nil {
+		return false
+	}
+	_, err := a.deps.Brain.Read(name)
+	return err == nil
+}
+
+func (a *AgentLoop) setGuardModeState(isPlanning, planExists, taskMdExists bool, mode string) {
+	a.guard.SetModeState(isPlanning, planExists, taskMdExists, mode)
+}
+
+func (a *AgentLoop) currentModel() string {
+	return a.deps.LLMRouter.CurrentModel()
+}
+
+func (a *AgentLoop) phaseEphemeral() string {
+	if a.phaseDetector == nil {
+		return ""
+	}
+	return a.phaseDetector.PhaseEphemeral()
+}
+
+func (a *AgentLoop) stepsSinceBoundary() int {
+	return a.guard.StepsSinceBoundary()
+}
+
+func (a *AgentLoop) scratchpadDir() string {
+	if a.deps.Brain == nil {
+		return ""
+	}
+	return a.deps.Brain.BaseDir() + "/scratchpad"
+}
+
+func (a *AgentLoop) generateKIIndex() string {
+	if a.deps.KIStore == nil {
+		return ""
+	}
+	return a.deps.KIStore.GenerateKIIndex()
+}
+
+// prepare detects ephemeral injection needs.
 // Uses the Ephemeral Budget System to prevent context bloat:
 // candidates are collected with priority and dimension tags, then
 // SelectWithBudget picks the best set within the token budget.
-func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
-	// Sub-agents skip all planning/boundary/agentic injections
-	if a.options.Mode == "subagent" {
+func (s prepareNodeService) prepare(_ context.Context) graphruntime.PlanningState {
+	if s.runtime.runMode() == "subagent" {
 		return graphruntime.PlanningState{}
 	}
 
-	a.mu.Lock()
-	lastMsg := ""
-	if len(a.history) > 0 {
-		lastMsg = a.history[len(a.history)-1].Content
-	}
-	boundaryName := a.task.Name
-	boundaryMode := a.task.Mode
-	boundaryStatus := a.task.Status
-	boundarySummary := a.task.Summary
-	planMod := a.task.PlanModified
-	a.mu.Unlock()
+	snapshot := s.runtime.prepareSnapshot()
 
-	isPlanning := a.shouldInjectPlanning(lastMsg)
+	isPlanning := s.runtime.shouldInjectPlanning(snapshot.lastMessage)
 
 	// Sync planning state to Guard for step-level enforcement
 	// Cache Brain.Read results — reused in Layer 3b below
-	planExists := false
-	taskMdExists := false
-	if a.deps.Brain != nil {
-		if _, err := a.deps.Brain.Read("plan.md"); err == nil {
-			planExists = true
-		}
-		if _, err := a.deps.Brain.Read("task.md"); err == nil {
-			taskMdExists = true
-		}
-	}
-	a.guard.SetModeState(isPlanning, planExists, taskMdExists, boundaryMode)
-	mode := a.Mode()
+	planExists := s.runtime.artifactExists("plan.md")
+	taskMdExists := s.runtime.artifactExists("task.md")
+	s.runtime.setGuardModeState(isPlanning, planExists, taskMdExists, snapshot.boundaryMode)
+	mode := s.runtime.Mode()
 
 	// Context usage — computed once, reused for gating below
-	tokenEst := a.estimateTokens()
-	policy := llm.GetPolicy(a.deps.LLMRouter.CurrentModel())
+	tokenEst := s.runtime.estimateTokens()
+	policy := llm.GetPolicy(s.runtime.currentModel())
 	pct := int(float64(tokenEst) / float64(policy.ContextWindow) * 100)
 	contextTight := pct > 80 // Skip low-priority ephemerals when context is tight
 	planning := graphruntime.PlanningState{
 		Required:       isPlanning || mode.ForcePlan,
-		BoundaryMode:   boundaryMode,
+		BoundaryMode:   snapshot.boundaryMode,
 		PlanExists:     planExists,
 		TaskExists:     taskMdExists,
 		ContextTight:   contextTight,
-		ReviewRequired: !a.Mode().SelfReview,
+		ReviewRequired: !mode.SelfReview,
 	}
 	if mode.ForcePlan {
 		planning.Trigger = "mode_force_plan"
@@ -72,7 +138,7 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 	if !planExists {
 		planning.MissingArtifacts = append(planning.MissingArtifacts, "plan.md")
 	}
-	if boundaryMode == "execution" && !taskMdExists {
+	if snapshot.boundaryMode == "execution" && !taskMdExists {
 		planning.MissingArtifacts = append(planning.MissingArtifacts, "task.md")
 	}
 
@@ -91,7 +157,7 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 	// === Layer 1b: Self-review mode — autonomous decision-making (agentic/agentic+evo) ===
 	// NOTE: Dimension "agentic" is separate from "planning" so both survive SelectWithBudget.
 	// EphAgenticMode overrides per-turn behavior: no user approval needed for plans.
-	if a.Mode().SelfReview {
+	if mode.SelfReview {
 		candidates = append(candidates, EphemeralCandidate{
 			Content:  prompttext.EphAgenticMode,
 			Priority: 0, Dimension: "agentic",
@@ -101,8 +167,8 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 			Content: prompttext.TeamLeadPrompt, Priority: 1, Dimension: "team",
 		})
 		// P3 I1: 4-Phase execution hint (starts after first tool call, avoids noise on step 0)
-		if a.task.CurrentStep > 1 {
-			if phaseHint := a.phaseDetector.PhaseEphemeral(); phaseHint != "" {
+		if snapshot.currentStep > 1 {
+			if phaseHint := s.runtime.phaseEphemeral(); phaseHint != "" {
 				candidates = append(candidates, EphemeralCandidate{
 					Content: phaseHint, Priority: 2, Dimension: "phase",
 				})
@@ -110,18 +176,16 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 		}
 	}
 
-	a.mu.Lock()
-	steps := a.task.StepsSinceUpdate
-	a.mu.Unlock()
+	steps := snapshot.stepsSinceUpdate
 
 	// === Layer 2: Active task boundary reminder (frequency gated: every 3 steps) ===
-	if boundaryName != "" {
+	if snapshot.boundaryName != "" {
 		if steps > 0 && steps%3 == 0 {
 			msg := prompttext.Render(prompttext.EphActiveTaskReminder, map[string]any{
-				"TaskName": boundaryName,
-				"Status":   boundaryStatus,
-				"Summary":  boundarySummary,
-				"Mode":     boundaryMode,
+				"TaskName": snapshot.boundaryName,
+				"Status":   snapshot.boundaryStatus,
+				"Summary":  snapshot.boundarySummary,
+				"Mode":     snapshot.boundaryMode,
 			})
 			candidates = append(candidates, EphemeralCandidate{
 				Content: msg, Priority: 1, Dimension: "context",
@@ -130,7 +194,7 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 	}
 
 	// === Layer 2b: Boundary frequency nudge (Anti's num_steps pattern) ===
-	if ssb := a.guard.StepsSinceBoundary(); ssb >= 5 {
+	if ssb := s.runtime.stepsSinceBoundary(); ssb >= 5 {
 		candidates = append(candidates, EphemeralCandidate{
 			Content: fmt.Sprintf(
 				"<ephemeral_message>You have made %d tool calls without updating task progress. "+
@@ -141,32 +205,25 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 
 	// === Layer 3a: Artifact staleness reminder (skip when context tight) ===
 	if !contextTight {
-		a.mu.Lock()
-		curStep := a.task.CurrentStep
-		a.mu.Unlock()
-		if a.deps.Brain != nil {
-			checks := map[string]int{
-				"task.md": 8,  // 8 steps without touching → remind
-				"plan.md": 15, // plan is less frequently updated
+		checks := map[string]int{
+			"task.md": 8,  // 8 steps without touching → remind
+			"plan.md": 15, // plan is less frequently updated
+		}
+		var staleItems []string
+		for name, threshold := range checks {
+			lastStep, tracked := snapshot.artifactLastStep[name]
+			if !tracked {
+				continue
 			}
-			var staleItems []string
-			for name, threshold := range checks {
-				a.mu.Lock()
-				lastStep, tracked := a.task.ArtifactLastStep[name]
-				a.mu.Unlock()
-				if !tracked {
-					continue
-				}
-				if gap := curStep - lastStep; gap >= threshold {
-					staleItems = append(staleItems, fmt.Sprintf("%s (%d steps ago)", name, gap))
-				}
+			if gap := snapshot.currentStep - lastStep; gap >= threshold {
+				staleItems = append(staleItems, fmt.Sprintf("%s (%d steps ago)", name, gap))
 			}
-			if len(staleItems) > 0 {
-				candidates = append(candidates, EphemeralCandidate{
-					Content:  fmt.Sprintf("Stale artifacts: %s. Review and update if needed.", strings.Join(staleItems, ", ")),
-					Priority: 3, Dimension: "context",
-				})
-			}
+		}
+		if len(staleItems) > 0 {
+			candidates = append(candidates, EphemeralCandidate{
+				Content:  fmt.Sprintf("Stale artifacts: %s. Review and update if needed.", strings.Join(staleItems, ", ")),
+				Priority: 3, Dimension: "context",
+			})
 		}
 	}
 
@@ -178,18 +235,15 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 	}
 
 	// === Layer 3c: Plan modified but not reviewed by user ===
-	if planMod && boundaryMode == "planning" {
+	if snapshot.planModified && snapshot.boundaryMode == "planning" {
 		candidates = append(candidates, EphemeralCandidate{
 			Content: prompttext.EphPlanModifiedReminder, Priority: 2, Dimension: "planning",
 		})
 	}
 
 	// === Layer 3d: Mode transitions (entering/exiting planning) ===
-	a.mu.Lock()
-	prevMode := a.task.PreviousMode
-	a.mu.Unlock()
-	if boundaryMode != "" && prevMode != "" && boundaryMode != prevMode {
-		if boundaryMode == "planning" {
+	if snapshot.boundaryMode != "" && snapshot.previousMode != "" && snapshot.boundaryMode != snapshot.previousMode {
+		if snapshot.boundaryMode == "planning" {
 			// Entering planning: use "transition" dimension so it doesn't conflict with EphPlanningMode.
 			// EphPlanningMode (Dimension "planning") already covers the full protocol.
 			// This is just a lightweight transition signal.
@@ -197,19 +251,17 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 				Content:  "Mode transition: you are now entering planning mode. Follow the planning workflow detailed in the system prompt.",
 				Priority: 2, Dimension: "transition",
 			})
-		} else if prevMode == "planning" {
+		} else if snapshot.previousMode == "planning" {
 			candidates = append(candidates, EphemeralCandidate{
 				Content: prompttext.EphExitingPlanningMode, Priority: 1, Dimension: "transition",
 			})
 		}
 		// Mode switch artifact existence check
-		if boundaryMode == "execution" && a.deps.Brain != nil {
-			if _, err := a.deps.Brain.Read("task.md"); err != nil {
-				candidates = append(candidates, EphemeralCandidate{
-					Content:  "You switched to EXECUTION mode but task.md doesn't exist. Create it via task_plan(action=create, type=task) IMMEDIATELY.",
-					Priority: 0, Dimension: "planning",
-				})
-			}
+		if snapshot.boundaryMode == "execution" && !taskMdExists {
+			candidates = append(candidates, EphemeralCandidate{
+				Content:  "You switched to EXECUTION mode but task.md doesn't exist. Create it via task_plan(action=create, type=task) IMMEDIATELY.",
+				Priority: 0, Dimension: "planning",
+			})
 		}
 	}
 
@@ -239,10 +291,9 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 
 	// === Layer 3f: Scratchpad directory (Sprint 3-1) ===
 	// Inject scratchpad path so agent knows where to write shared artifacts
-	if a.deps.Brain != nil {
-		scratchDir := a.deps.Brain.BaseDir() + "/scratchpad"
+	if scratchDir := s.runtime.scratchpadDir(); scratchDir != "" {
 		// Only inject once (first 2 steps) or when scratchpad has content
-		if a.task.CurrentStep < 2 {
+		if snapshot.currentStep < 2 {
 			candidates = append(candidates, EphemeralCandidate{
 				Content: fmt.Sprintf(
 					"<scratchpad>Shared workspace: %s\n"+
@@ -257,8 +308,8 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 	// === Layer 4: Skill injection removed — skills now invoked via dedicated skill() tool ===
 
 	// === Layer 4: KI index re-injection (every 8 steps, skip when context tight) ===
-	if !contextTight && a.deps.KIStore != nil && steps > 0 && steps%8 == 0 {
-		kiIndex := a.deps.KIStore.GenerateKIIndex()
+	if !contextTight && steps > 0 && steps%8 == 0 {
+		kiIndex := s.runtime.generateKIIndex()
 		if kiIndex != "" {
 			candidates = append(candidates, EphemeralCandidate{
 				Content:  "<knowledge_reminder>\n你有以下知识可用，需要时用 read_file 查看完整内容：\n" + kiIndex + "</knowledge_reminder>",
@@ -274,9 +325,9 @@ func (a *AgentLoop) doPrepare(_ context.Context) graphruntime.PlanningState {
 	}
 	selected := SelectWithBudget(candidates, budget)
 	for _, msg := range selected {
-		a.InjectEphemeral(msg)
+		s.runtime.InjectEphemeral(msg)
 	}
-	a.setPlanningDecision(planning)
+	s.runtime.setPlanningDecision(planning)
 	return planning
 }
 

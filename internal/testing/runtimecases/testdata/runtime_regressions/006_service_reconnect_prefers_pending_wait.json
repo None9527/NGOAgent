@@ -1,0 +1,61 @@
+{
+  "id": "service_reconnect_prefers_pending_wait",
+  "title": "service reconnect prefers pending wait over newer completed run",
+  "category": "recovery",
+  "layers": ["service"],
+  "service": {
+    "session_id": "session-persist-priority",
+    "store": "persistence",
+    "snapshots": [
+      {
+        "RunID": "run-persist-wait",
+        "SessionID": "session-persist-priority",
+        "GraphID": "agent_loop",
+        "GraphVersion": "v1alpha1",
+        "Status": "wait",
+        "TurnState": {
+          "RunID": "run-persist-wait"
+        },
+        "ExecutionState": {
+          "Status": "wait",
+          "WaitReason": "approval",
+          "PendingApproval": {
+            "ID": "approval-priority",
+            "ToolName": "write_file",
+            "Args": {"path": "priority.go"},
+            "Reason": "still waiting"
+          }
+        },
+        "CreatedAt": "2026-04-13T03:31:00Z",
+        "UpdatedAt": "2026-04-13T03:31:00Z"
+      },
+      {
+        "RunID": "run-persist-complete",
+        "SessionID": "session-persist-priority",
+        "GraphID": "agent_loop",
+        "GraphVersion": "v1alpha1",
+        "Status": "complete",
+        "TurnState": {
+          "RunID": "run-persist-complete"
+        },
+        "ExecutionState": {
+          "Status": "complete"
+        },
+        "CreatedAt": "2026-04-13T03:32:00Z",
+        "UpdatedAt": "2026-04-13T03:32:00Z"
+      }
+    ],
+    "action": {
+      "kind": "handle_reconnect"
+    },
+    "expect": {
+      "handled": true,
+      "approval": {
+        "id": "approval-priority",
+        "tool_name": "write_file",
+        "reason": "still waiting",
+        "args": {"path": "priority.go"}
+      }
+    }
+  }
+}
