@@ -100,7 +100,7 @@ defer loop.ReleaseAcquire()
 当系统内部配置了多达几十个重型插件和控制工具时，为了节约高达数千字的 Function Calling 元数据耗费，核心引擎对于它们执行了**层级式懒加载 (Lazy Loading)**：
 - **Tier 0 (系统核心基底)**：无条件必须下发系统管理级大门，包含 `read_file`, `write_file`, `task_boundary`, `run_command` 等 15 款核心护身符系统。
 - **Tier 1 (外围搜索探针)**: 借由粗糙的语料扫描，仅仅当用户问题中包含了 `search, find, look, url` 时才将 `web_search / deep_research` 脱水释出加入。
-- **Tier 2 (巨型复杂调用操作)**: 如重型记忆存库 `save_knowledge`, 多模特征提取 `view_media`, 和代码版本回档工具 `git_*`。命中关键字后加载挂载体。
+- **Tier 2 (巨型复杂调用操作)**: 如重型记忆存库 `save_memory`（`save_knowledge` 仅为兼容旧名）, 多模特征提取 `view_media`, 和代码版本回档工具 `git_*`。命中关键字后加载挂载体。
 **[突破限制策略]**: 仅仅在聊天的首次启动期控制，当任务超过两步 LLM 基本已经明晰意图并确立主逻辑场，此后系统将全景 ToolDef 完整吐给它，这是一种“前轻后重”的极致推算。
 
 ### 3. 三重长文压缩与灾难恢复法界 (`compact.go`)

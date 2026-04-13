@@ -1969,7 +1969,7 @@ sequenceDiagram
     rect rgba(83, 52, 131, 0.2)
         Note over T,St: 知识写入
         T->>St: update_project_context → WorkspaceStore
-        T->>St: save_knowledge → KI Store
+        T->>St: save_memory → KI Store
     end
 
     rect rgba(15, 52, 96, 0.2)

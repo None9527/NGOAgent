@@ -164,6 +164,9 @@ func (hs *HistoryStore) saveOneNormalizedMessage(tx *gorm.DB, sessionID string, 
 	if err := saveNormalizedToolCalls(tx, messageID, createdAt, msg.ToolCalls); err != nil {
 		return err
 	}
+	if err := updateNormalizedToolCallResult(tx, msg); err != nil {
+		return err
+	}
 	return saveNormalizedAttachments(tx, messageID, createdAt, msg.Attachments)
 }
 
@@ -191,6 +194,24 @@ func saveNormalizedToolCalls(tx *gorm.DB, messageID string, createdAt time.Time,
 		}
 	}
 	return nil
+}
+
+func updateNormalizedToolCallResult(tx *gorm.DB, msg HistoryMessage) error {
+	if msg.Role != "tool" || msg.ToolCallID == "" {
+		return nil
+	}
+	resultJSON, err := json.Marshal(map[string]any{
+		"output": msg.Content,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal tool result: %w", err)
+	}
+	return tx.Model(&MessageToolCallRecord{}).
+		Where("tool_call_id = ? AND status = ?", msg.ToolCallID, "requested").
+		Updates(map[string]any{
+			"result_json": string(resultJSON),
+			"status":      "completed",
+		}).Error
 }
 
 func saveNormalizedAttachments(tx *gorm.DB, messageID string, createdAt time.Time, raw string) error {

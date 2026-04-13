@@ -25,13 +25,9 @@ func (s *SessionQueries) ListSessions() apitype.SessionListResponse {
 	if err == nil && len(dbSessions) > 0 {
 		infos := make([]apitype.SessionInfo, 0, len(dbSessions))
 		for _, session := range dbSessions {
-			title := session.Title
-			if mem, ok := s.sessMgr.Get(session.ID); ok && mem.Title != "" {
-				title = mem.Title
-			}
 			infos = append(infos, apitype.SessionInfo{
 				ID:        session.ID,
-				Title:     title,
+				Title:     session.Title,
 				Channel:   session.Channel,
 				CreatedAt: session.CreatedAt,
 				UpdatedAt: session.UpdatedAt,
@@ -156,7 +152,20 @@ func (s *SessionCommands) SetSessionTitle(id, title string) {
 }
 
 func (s *SessionCommands) ClearHistory() {
-	if loop := service.ResolveActiveManagedLoop(s.loop, s.loopPool, s.sessMgr); loop != nil {
+	if s.sessMgr == nil {
+		return
+	}
+	sessionID := s.sessMgr.Active()
+	if sessionID == "" {
+		return
+	}
+	if store, ok := s.histQuery.(interface{ DeleteSession(string) error }); ok {
+		if err := store.DeleteSession(sessionID); err != nil {
+			slog.Info(fmt.Sprintf("[session] clear history failed for %s: %v", sessionID, err))
+			return
+		}
+	}
+	if loop := service.FindSessionLoop(s.loop, s.loopPool, sessionID); loop != nil {
 		loop.ClearHistory()
 	}
 }

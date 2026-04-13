@@ -390,16 +390,19 @@ func (sm *SessionManager) Activate(id string) {
 	sm.activeByUser[userKey] = id
 }
 
-// SetTitle updates the title of an in-memory session and persists it.
+// SetTitle persists the title first, then updates the in-memory cache.
 func (sm *SessionManager) SetTitle(id, title string) {
+	if sm.repo != nil {
+		if err := sm.repo.UpdateTitle(id, title); err != nil {
+			slog.Info(fmt.Sprintf("[session] set title persist failed for %s: %v", id, err))
+			return
+		}
+	}
 	sm.mu.Lock()
 	if s, ok := sm.sessions[id]; ok {
 		s.Title = title
 	}
 	sm.mu.Unlock()
-	if sm.repo != nil {
-		_ = sm.repo.UpdateTitle(id, title)
-	}
 }
 
 // Active returns the current active session ID (backward-compat: global).

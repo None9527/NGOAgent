@@ -151,6 +151,7 @@ type WebFetchArgs struct {
 
 // SaveMemoryArgs are the typed arguments for the save_memory tool.
 type SaveMemoryArgs struct {
+	Key        string   `json:"key"`
 	Content    string   `json:"content"`
 	Tags       []string `json:"tags,omitempty"`
 	Importance float64  `json:"importance,omitempty"`
@@ -164,7 +165,8 @@ type SearchMemoryArgs struct {
 
 // SaveKnowledgeArgs are the typed arguments for the save_knowledge tool.
 type SaveKnowledgeArgs struct {
-	Title   string   `json:"title"`
+	Key     string   `json:"key"`
+	Title   string   `json:"title,omitempty"` // Deprecated alias for key.
 	Content string   `json:"content"`
 	Tags    []string `json:"tags,omitempty"`
 }

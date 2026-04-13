@@ -60,6 +60,7 @@ func TestAssembleBuiltinToolsRegistersExpectedProviders(t *testing.T) {
 		"notify_user",
 		"update_project_context",
 		"save_knowledge",
+		"save_memory",
 		"recall",
 		"send_message",
 		"task_list",

@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"math"
 	"reflect"
 	"testing"
@@ -22,11 +23,15 @@ import (
 )
 
 type stubSessionRepo struct {
-	sessions []service.ConversationInfo
+	sessions  []service.ConversationInfo
+	createID  string
+	titles    map[string]string
+	updateErr error
 }
 
 type stubHistoryQuery struct {
-	exports map[string][]service.HistoryExport
+	exports    map[string][]service.HistoryExport
+	deleteErrs map[string]error
 }
 
 type fakeModelRouter struct{}
@@ -90,11 +95,42 @@ func (s *stubHistoryQuery) LoadAll(sessionID string) ([]service.HistoryExport, e
 	return append([]service.HistoryExport(nil), s.exports[sessionID]...), nil
 }
 
-func (s *stubSessionRepo) CreateConversation(channel, title string) (string, error) { return "", nil }
+func (s *stubHistoryQuery) DeleteSession(sessionID string) error {
+	if err := s.deleteErrs[sessionID]; err != nil {
+		return err
+	}
+	delete(s.exports, sessionID)
+	return nil
+}
+
+func (s *stubHistoryQuery) SaveAll(sessionID string, msgs []service.HistoryExport) error {
+	s.exports[sessionID] = append([]service.HistoryExport(nil), msgs...)
+	return nil
+}
+
+func (s *stubSessionRepo) CreateConversation(channel, title string) (string, error) {
+	if s.createID != "" {
+		if s.titles == nil {
+			s.titles = map[string]string{}
+		}
+		s.titles[s.createID] = title
+		return s.createID, nil
+	}
+	return "", nil
+}
 func (s *stubSessionRepo) ListConversations(limit, offset int) ([]service.ConversationInfo, error) {
 	return append([]service.ConversationInfo(nil), s.sessions...), nil
 }
-func (s *stubSessionRepo) UpdateTitle(id, title string) error { return nil }
+func (s *stubSessionRepo) UpdateTitle(id, title string) error {
+	if s.updateErr != nil {
+		return s.updateErr
+	}
+	if s.titles == nil {
+		s.titles = map[string]string{}
+	}
+	s.titles[id] = title
+	return nil
+}
 func (s *stubSessionRepo) Touch(id string) error              { return nil }
 func (s *stubSessionRepo) DeleteConversation(id string) error { return nil }
 
@@ -297,6 +333,80 @@ func TestAgentAPIApprove_RestoresPendingApprovalFromSnapshot(t *testing.T) {
 	pending := secHook.ListPending()
 	if len(pending) != 0 {
 		t.Fatalf("expected pending approval cleanup after approve, got %#v", pending)
+	}
+
+	loaded, err := store.LoadLatestBySession(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("load snapshot after approve: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected snapshot to remain present after approve")
+	}
+	if loaded.ExecutionState.PendingApproval != nil {
+		t.Fatalf("expected snapshot approval cleared after approve, got %#v", loaded.ExecutionState.PendingApproval)
+	}
+	if loaded.ExecutionState.WaitReason != graphruntime.WaitReasonNone {
+		t.Fatalf("expected wait reason cleared after approve, got %q", loaded.ExecutionState.WaitReason)
+	}
+}
+
+func TestAgentAPIApprove_UsesRuntimeStoreWithoutCreatingGhostLoop(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := persistence.RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	store := persistence.NewRunSnapshotStore(db)
+	secHook := security.NewHook(&config.SecurityConfig{})
+	sessionID := "session-approval-runtime"
+	now := time.Unix(1700000001, 0)
+	if err := store.Save(context.Background(), &graphruntime.RunSnapshot{
+		RunID:     "run-approval-runtime",
+		SessionID: sessionID,
+		Status:    graphruntime.NodeStatusWait,
+		ExecutionState: graphruntime.ExecutionState{
+			Status:     graphruntime.NodeStatusWait,
+			WaitReason: graphruntime.WaitReasonApproval,
+			PendingApproval: &graphruntime.ApprovalState{
+				ID:          "approval-runtime",
+				ToolName:    "write_file",
+				Args:        map[string]any{"path": "approved-runtime.go"},
+				Reason:      "needs confirmation",
+				RequestedAt: now,
+			},
+		},
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	pool := service.NewLoopPool(func(sessionID string) *service.AgentLoop {
+		return service.NewAgentLoop(service.Deps{})
+	}, t.TempDir())
+	sessMgr := service.NewSessionManager(&stubSessionRepo{
+		sessions: []service.ConversationInfo{{ID: sessionID}},
+	})
+	api := newTestCompatibilityAPIWithWiring(
+		service.NewAgentLoop(service.Deps{}),
+		pool,
+		nil,
+		sessMgr,
+		nil,
+		nil,
+		secHook,
+		nil,
+		"",
+		llm.NewRouter(nil),
+		ServiceWiring{RuntimeStore: store},
+	)
+
+	if err := api.Approve("approval-runtime", true); err != nil {
+		t.Fatalf("approve via runtime store: %v", err)
+	}
+	if got := pool.GetIfExists(sessionID); got != nil {
+		t.Fatalf("expected approve not to create resident loop, got %#v", got)
 	}
 
 	loaded, err := store.LoadLatestBySession(context.Background(), sessionID)
@@ -1129,6 +1239,49 @@ func TestRetryRun_RestoresPersistedHistoryWithoutCreatingGhostLoop(t *testing.T)
 	}
 }
 
+func TestRetryRun_PrefersPersistedHistoryOverResidentLoop(t *testing.T) {
+	sessionID := "session-retry-persisted"
+	defaultLoop := service.NewAgentLoop(service.Deps{})
+	pool := service.NewLoopPool(func(sid string) *service.AgentLoop {
+		return service.NewAgentLoop(service.Deps{})
+	}, t.TempDir())
+	resident := pool.Get(sessionID)
+	resident.SetHistory([]llm.Message{
+		{Role: "user", Content: "resident user"},
+		{Role: "assistant", Content: "resident answer"},
+	})
+
+	api := newTestCompatibilityAPI(
+		defaultLoop,
+		pool,
+		nil,
+		service.NewSessionManager(&stubSessionRepo{sessions: []service.ConversationInfo{{ID: sessionID}}}),
+		nil,
+		nil,
+		nil,
+		&stubHistoryQuery{exports: map[string][]service.HistoryExport{
+			sessionID: {
+				{Role: "user", Content: "persisted user"},
+				{Role: "assistant", Content: "persisted answer"},
+			},
+		}},
+		"",
+		nil,
+	)
+
+	lastUser, err := api.RetryRun(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("retry run: %v", err)
+	}
+	if lastUser != "persisted user" {
+		t.Fatalf("expected persisted retry user, got %q", lastUser)
+	}
+	history := resident.GetHistory()
+	if len(history) != 0 {
+		t.Fatalf("expected retry to strip resident loop from persisted truth, got %#v", history)
+	}
+}
+
 func TestStopRun_DoesNotStopDefaultLoopForMissingSession(t *testing.T) {
 	defaultLoop := service.NewAgentLoop(service.Deps{})
 	pool := service.NewLoopPool(func(sid string) *service.AgentLoop {
@@ -1152,6 +1305,160 @@ func TestStopRun_DoesNotStopDefaultLoopForMissingSession(t *testing.T) {
 
 	if loopStopRequested(defaultLoop) {
 		t.Fatal("expected missing session stop not to signal default loop")
+	}
+}
+
+func TestStopRun_StopsPendingRuntimeSnapshotWithoutResidentLoop(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := persistence.RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	store := persistence.NewRunSnapshotStore(db)
+	sessionID := "session-stop-runtime"
+	now := time.Unix(1700000300, 0)
+	if err := store.Save(context.Background(), &graphruntime.RunSnapshot{
+		RunID:        "run-stop-runtime",
+		SessionID:    sessionID,
+		GraphID:      "agent_loop",
+		GraphVersion: "v1alpha1",
+		Status:       graphruntime.NodeStatusWait,
+		TurnState:    graphruntime.TurnState{RunID: "run-stop-runtime"},
+		ExecutionState: graphruntime.ExecutionState{
+			Status:     graphruntime.NodeStatusWait,
+			WaitReason: graphruntime.WaitReasonBarrier,
+			PendingBarrier: &graphruntime.BarrierState{
+				ID:           "barrier-stop",
+				TotalCount:   1,
+				PendingCount: 1,
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	defaultLoop := service.NewAgentLoop(service.Deps{})
+	pool := service.NewLoopPool(func(sid string) *service.AgentLoop {
+		return service.NewAgentLoop(service.Deps{})
+	}, t.TempDir())
+	sessMgr := service.NewSessionManager(&stubSessionRepo{
+		sessions: []service.ConversationInfo{{ID: sessionID}},
+	})
+
+	api := newTestCompatibilityAPIWithWiring(
+		defaultLoop,
+		pool,
+		nil,
+		sessMgr,
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		llm.NewRouter(nil),
+		ServiceWiring{RuntimeStore: store},
+	)
+
+	api.StopRun(sessionID)
+
+	if loopStopRequested(defaultLoop) {
+		t.Fatal("expected runtime-only stop not to signal default loop")
+	}
+	if got := pool.GetIfExists(sessionID); got != nil {
+		t.Fatalf("expected StopRun not to create resident loop, got %#v", got)
+	}
+
+	loaded, err := store.LoadLatestBySession(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("load snapshot after stop: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected stopped snapshot to remain queryable")
+	}
+	if loaded.Status != graphruntime.NodeStatusFatal || loaded.ExecutionState.Status != graphruntime.NodeStatusFatal {
+		t.Fatalf("expected fatal stop status, got %#v", loaded)
+	}
+	if loaded.ExecutionState.WaitReason != graphruntime.WaitReasonNone {
+		t.Fatalf("expected wait reason cleared after stop, got %q", loaded.ExecutionState.WaitReason)
+	}
+	if loaded.ExecutionState.PendingBarrier != nil || loaded.ExecutionState.PendingApproval != nil || loaded.ExecutionState.PendingWake {
+		t.Fatalf("expected pending runtime state cleared after stop, got %#v", loaded.ExecutionState)
+	}
+	if loaded.ExecutionState.LastError != "stopped by user" {
+		t.Fatalf("expected stop marker in last error, got %q", loaded.ExecutionState.LastError)
+	}
+}
+
+func TestStopRun_PrefersRuntimeSnapshotOverResidentLoop(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := persistence.RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	store := persistence.NewRunSnapshotStore(db)
+	sessionID := "session-stop-runtime-first"
+	now := time.Unix(1700000310, 0)
+	if err := store.Save(context.Background(), &graphruntime.RunSnapshot{
+		RunID:        "run-stop-runtime-first",
+		SessionID:    sessionID,
+		GraphID:      "agent_loop",
+		GraphVersion: "v1alpha1",
+		Status:       graphruntime.NodeStatusWait,
+		ExecutionState: graphruntime.ExecutionState{
+			Status:     graphruntime.NodeStatusWait,
+			WaitReason: graphruntime.WaitReasonBarrier,
+			PendingBarrier: &graphruntime.BarrierState{
+				ID:           "barrier-stop-runtime-first",
+				TotalCount:   1,
+				PendingCount: 1,
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	defaultLoop := service.NewAgentLoop(service.Deps{})
+	pool := service.NewLoopPool(func(sid string) *service.AgentLoop {
+		return service.NewAgentLoop(service.Deps{})
+	}, t.TempDir())
+	resident := pool.Get(sessionID)
+	sessMgr := service.NewSessionManager(&stubSessionRepo{
+		sessions: []service.ConversationInfo{{ID: sessionID}},
+	})
+
+	api := newTestCompatibilityAPIWithWiring(
+		defaultLoop,
+		pool,
+		nil,
+		sessMgr,
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		llm.NewRouter(nil),
+		ServiceWiring{RuntimeStore: store},
+	)
+
+	api.StopRun(sessionID)
+
+	if loopStopRequested(resident) {
+		t.Fatal("expected resident loop not to be stopped before runtime snapshot")
+	}
+	loaded, err := store.LoadLatestBySession(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("load snapshot after stop: %v", err)
+	}
+	if loaded == nil || loaded.Status != graphruntime.NodeStatusFatal {
+		t.Fatalf("expected runtime snapshot to be stopped first, got %#v", loaded)
 	}
 }
 
@@ -1182,6 +1489,74 @@ func TestGetContextStats_UsesActiveSessionLoop(t *testing.T) {
 	}
 }
 
+func TestGetContextStats_PrefersPersistedSessionData(t *testing.T) {
+	sessionID := "session-stats-persisted"
+	defaultLoop := service.NewAgentLoop(service.Deps{})
+	pool := service.NewLoopPool(func(sid string) *service.AgentLoop {
+		return service.NewAgentLoop(service.Deps{})
+	}, t.TempDir())
+	activeLoop := pool.Get(sessionID)
+	activeLoop.SetHistory([]llm.Message{{Role: "user", Content: "resident stale"}})
+
+	sessMgr := service.NewSessionManager(&stubSessionRepo{
+		sessions: []service.ConversationInfo{{ID: sessionID}},
+	})
+	sessMgr.Activate(sessionID)
+
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := persistence.RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	store := persistence.NewTokenUsageStore(db)
+	if err := store.SaveSessionUsage(sessionID, "persisted-model", 12, 8, 3, 1.75, map[string]any{
+		"persisted-model": map[string]any{
+			"prompt_tokens":     12,
+			"completion_tokens": 8,
+			"calls":             3,
+			"cost_usd":          1.75,
+		},
+	}); err != nil {
+		t.Fatalf("SaveSessionUsage: %v", err)
+	}
+
+	api := newTestCompatibilityAPIWithWiring(
+		defaultLoop,
+		pool,
+		nil,
+		sessMgr,
+		nil,
+		nil,
+		nil,
+		&stubHistoryQuery{exports: map[string][]service.HistoryExport{
+			sessionID: {
+				{Role: "user", Content: "persisted user message"},
+				{Role: "assistant", Content: "persisted assistant reply"},
+			},
+		}},
+		"",
+		llm.NewRouter(nil),
+		ServiceWiring{TokenUsageStore: store},
+	)
+
+	stats := api.GetContextStats()
+	if stats.HistoryCount != 2 {
+		t.Fatalf("expected persisted history count, got %d", stats.HistoryCount)
+	}
+	expectedEstimate := len("persisted user message")/4 + len("persisted assistant reply")/4
+	if stats.TokenEstimate != expectedEstimate {
+		t.Fatalf("expected persisted token estimate %d, got %d", expectedEstimate, stats.TokenEstimate)
+	}
+	if stats.TotalCalls != 3 || stats.TotalCostUSD != 1.75 {
+		t.Fatalf("expected persisted usage stats, got %#v", stats)
+	}
+	if stats.ByModel["persisted-model"] == nil {
+		t.Fatalf("expected persisted by_model stats, got %#v", stats.ByModel)
+	}
+}
+
 func TestGetContextStats_DoesNotCreateGhostLoopForMissingActiveSession(t *testing.T) {
 	sessionID := "missing-active-stats"
 	defaultLoop := service.NewAgentLoop(service.Deps{})
@@ -1203,6 +1578,69 @@ func TestGetContextStats_DoesNotCreateGhostLoopForMissingActiveSession(t *testin
 	}
 	if got := pool.GetIfExists(sessionID); got != nil {
 		t.Fatalf("expected GetContextStats not to create ghost loop, got %#v", got)
+	}
+}
+
+func TestListSessions_PrefersPersistedTitlesOverMemoryOverlay(t *testing.T) {
+	repo := &stubSessionRepo{createID: "session-list"}
+	sessMgr := service.NewSessionManager(repo)
+	sessionID, err := sessMgr.CreatePersisted("web", "memory title")
+	if err != nil {
+		t.Fatalf("CreatePersisted: %v", err)
+	}
+	repo.sessions = []service.ConversationInfo{{
+		ID:        sessionID,
+		Title:     "persisted title",
+		Channel:   "web",
+		CreatedAt: "2026-04-13T00:00:00Z",
+		UpdatedAt: "2026-04-13T00:00:00Z",
+	}}
+
+	api := newTestCompatibilityAPI(service.NewAgentLoop(service.Deps{}), nil, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
+
+	list := api.ListSessions()
+	if len(list.Sessions) != 1 {
+		t.Fatalf("expected one session, got %#v", list)
+	}
+	if list.Sessions[0].Title != "persisted title" {
+		t.Fatalf("expected persisted title, got %#v", list.Sessions[0])
+	}
+}
+
+func TestSetSessionTitle_PersistsBeforeUpdatingMemory(t *testing.T) {
+	repo := &stubSessionRepo{}
+	sessMgr := service.NewSessionManager(repo)
+	session := sessMgr.New("old title")
+
+	api := newTestCompatibilityAPI(service.NewAgentLoop(service.Deps{}), nil, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
+	api.SetSessionTitle(session.ID, "new title")
+
+	stored, ok := sessMgr.Get(session.ID)
+	if !ok {
+		t.Fatalf("expected in-memory session")
+	}
+	if stored.Title != "new title" {
+		t.Fatalf("expected memory title updated, got %q", stored.Title)
+	}
+	if repo.titles[session.ID] != "new title" {
+		t.Fatalf("expected persisted title update, got %#v", repo.titles)
+	}
+}
+
+func TestSetSessionTitle_DoesNotMutateMemoryWhenPersistFails(t *testing.T) {
+	repo := &stubSessionRepo{updateErr: errors.New("boom")}
+	sessMgr := service.NewSessionManager(repo)
+	session := sessMgr.New("old title")
+
+	api := newTestCompatibilityAPI(service.NewAgentLoop(service.Deps{}), nil, nil, sessMgr, nil, nil, nil, nil, "", llm.NewRouter(nil))
+	api.SetSessionTitle(session.ID, "new title")
+
+	stored, ok := sessMgr.Get(session.ID)
+	if !ok {
+		t.Fatalf("expected in-memory session")
+	}
+	if stored.Title != "old title" {
+		t.Fatalf("expected memory title to stay on persisted failure, got %q", stored.Title)
 	}
 }
 
@@ -1228,6 +1666,39 @@ func TestClearHistory_DoesNotMutateDefaultLoopForMissingActiveSession(t *testing
 	}
 	if got := pool.GetIfExists(sessionID); got != nil {
 		t.Fatalf("expected ClearHistory not to create ghost loop, got %#v", got)
+	}
+}
+
+func TestClearHistory_PrefersPersistedSessionStateAndClearsResidentLoop(t *testing.T) {
+	sessionID := "active-clear"
+	defaultLoop := service.NewAgentLoop(service.Deps{})
+	defaultLoop.SetHistory([]llm.Message{{Role: "user", Content: "default stays"}})
+
+	pool := service.NewLoopPool(func(sid string) *service.AgentLoop {
+		return service.NewAgentLoop(service.Deps{})
+	}, t.TempDir())
+	resident := pool.Get(sessionID)
+	resident.SetHistory([]llm.Message{{Role: "user", Content: "resident stale"}})
+
+	sessMgr := service.NewSessionManager(&stubSessionRepo{
+		sessions: []service.ConversationInfo{{ID: sessionID}},
+	})
+	sessMgr.Activate(sessionID)
+	history := &stubHistoryQuery{exports: map[string][]service.HistoryExport{
+		sessionID: {{Role: "user", Content: "persisted history"}},
+	}}
+
+	api := newTestCompatibilityAPI(defaultLoop, pool, nil, sessMgr, nil, nil, nil, history, "", llm.NewRouter(nil))
+	api.ClearHistory()
+
+	if got := history.exports[sessionID]; len(got) != 0 {
+		t.Fatalf("expected persisted history cleared, got %#v", got)
+	}
+	if got := resident.GetHistory(); len(got) != 0 {
+		t.Fatalf("expected resident loop history cleared, got %#v", got)
+	}
+	if got := defaultLoop.GetHistory(); len(got) != 1 || got[0].Content != "default stays" {
+		t.Fatalf("expected default loop untouched, got %#v", got)
 	}
 }
 
@@ -1389,6 +1860,41 @@ func TestSaveSessionCost_UsesRequestedSessionInsteadOfActiveSession(t *testing.T
 	}
 	if usage.TotalCalls != 2 || math.Abs(usage.TotalCostUSD-2.50) > 1e-9 {
 		t.Fatalf("expected target session totals, got calls=%d cost=%v", usage.TotalCalls, usage.TotalCostUSD)
+	}
+}
+
+func TestSaveSessionCost_AllowsPersistedUsageWithoutResidentLoop(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := persistence.RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	store := persistence.NewTokenUsageStore(db)
+	sessionID := "persisted-usage-only"
+	if err := store.SaveSessionUsage(sessionID, "persisted-model", 10, 20, 2, 0.75, map[string]any{
+		"persisted-model": map[string]any{"prompt_tokens": 10, "completion_tokens": 20, "calls": 2, "cost_usd": 0.75},
+	}); err != nil {
+		t.Fatalf("SaveSessionUsage: %v", err)
+	}
+
+	api := newTestCompatibilityAPIWithWiring(
+		service.NewAgentLoop(service.Deps{}),
+		service.NewLoopPool(func(sid string) *service.AgentLoop { return service.NewAgentLoop(service.Deps{}) }, t.TempDir()),
+		nil,
+		service.NewSessionManager(&stubSessionRepo{sessions: []service.ConversationInfo{{ID: sessionID}}}),
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		llm.NewRouter(nil),
+		ServiceWiring{TokenUsageStore: store},
+	)
+
+	if err := api.SaveSessionCost(sessionID); err != nil {
+		t.Fatalf("expected persisted-only usage save to no-op cleanly, got %v", err)
 	}
 }
 

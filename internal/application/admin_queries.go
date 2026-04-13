@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ngoclaw/ngoagent/internal/domain/service"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/brain"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/cron"
 	"github.com/ngoclaw/ngoagent/internal/infrastructure/knowledge"
@@ -165,7 +164,11 @@ func (a *AdminQueries) GetSecurity() apitype.SecurityResponse {
 }
 
 func (a *AdminQueries) GetContextStats() apitype.ContextStats {
-	return a.contextStatsForLoop(service.ResolveSessionLoop(a.loop, a.loopPool, a.sessMgr.Active(), false))
+	sessionID := ""
+	if a.sessMgr != nil {
+		sessionID = a.sessMgr.Active()
+	}
+	return a.contextStatsForSession(sessionID)
 }
 
 func (a *AdminQueries) GetSystemInfo() apitype.SystemInfoResponse {

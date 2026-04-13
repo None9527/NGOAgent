@@ -215,12 +215,14 @@ func (t *UpdateProjectContextTool) Execute(ctx context.Context, args map[string]
 	}
 }
 
-// SaveKnowledgeTool saves knowledge to the cross-session persistent store.
+// SaveKnowledgeTool saves high-trust user-approved memory to the KI store.
+// save_memory is the public tool name; save_knowledge is retained as a legacy alias.
 // Supports embedding-based dedup if a retriever is provided.
 type SaveKnowledgeTool struct {
 	store     *knowledge.Store
 	retriever *knowledge.Retriever // optional: for dedup + re-indexing
 	threshold float64              // cosine similarity threshold for dedup
+	name      string
 }
 
 func NewSaveKnowledgeTool(store *knowledge.Store, retriever *knowledge.Retriever, threshold float64) *SaveKnowledgeTool {
@@ -231,15 +233,25 @@ func NewSaveKnowledgeTool(store *knowledge.Store, retriever *knowledge.Retriever
 	if threshold <= 0 || threshold > dedupCeiling {
 		threshold = dedupCeiling
 	}
-	return &SaveKnowledgeTool{store: store, retriever: retriever, threshold: threshold}
+	return &SaveKnowledgeTool{store: store, retriever: retriever, threshold: threshold, name: "save_knowledge"}
 }
 
-func (t *SaveKnowledgeTool) Name() string { return "save_knowledge" }
+func NewSaveMemoryTool(store *knowledge.Store, retriever *knowledge.Retriever, threshold float64) *SaveKnowledgeTool {
+	tool := NewSaveKnowledgeTool(store, retriever, threshold)
+	tool.name = "save_memory"
+	return tool
+}
+
+func (t *SaveKnowledgeTool) Name() string { return t.name }
 func (t *SaveKnowledgeTool) Description() string {
-	return `Save knowledge to persistent cross-session store. Available across ALL future sessions.
+	if t.name == "save_knowledge" {
+		return `Deprecated alias for save_memory. Saves high-trust, user-approved memory to the persistent KI store. Prefer save_memory for new calls.`
+	}
+	return `Save high-trust, user-approved memory to the persistent KI store. Available across ALL future sessions.
 - tags: use "preference" for enforced user preferences
 - Similar KIs auto-merged (>0.85 similarity)
-- For project-specific info, use update_project_context instead`
+- For project-specific info, use update_project_context instead
+- Automatic low-trust conversation fragments are stored separately as working_memory; do not use this tool for raw transcript dumps.`
 }
 
 func (t *SaveKnowledgeTool) Schema() map[string]any {
@@ -247,6 +259,7 @@ func (t *SaveKnowledgeTool) Schema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"key":     map[string]any{"type": "string", "description": "Descriptive key (title) for this knowledge item. Keep concise and unique."},
+			"title":   map[string]any{"type": "string", "description": "Deprecated alias for key. Prefer key."},
 			"content": map[string]any{"type": "string", "description": "Knowledge content. Focus on: user preferences, architecture decisions, external system access info (URLs/APIs), root causes of solved problems. Do NOT save: code implementation details (readable from source), git history, temporary task state, installation steps (in docs), or generic how-to knowledge."},
 			"tags":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Categorization: 'preference' (user habits/style), 'project' (architecture/decisions), 'reference' (external system pointers), 'feedback' (corrections to agent behavior)"},
 		},
@@ -256,6 +269,9 @@ func (t *SaveKnowledgeTool) Schema() map[string]any {
 
 func (t *SaveKnowledgeTool) Execute(ctx context.Context, args map[string]any) (dtool.ToolResult, error) {
 	key, _ := args["key"].(string)
+	if key == "" {
+		key, _ = args["title"].(string)
+	}
 	content, _ := args["content"].(string)
 
 	if key == "" || content == "" {

@@ -365,10 +365,10 @@ IMPORTANT:
 
 ### save_memory
 
-> Source: NGOAgent-specific. Cross-session knowledge persistence.
+> Source: NGOAgent-specific. High-trust cross-session KI persistence.
 
 ```
-Save knowledge to the persistent cross-session knowledge store. Information saved here will be available across ALL future sessions, regardless of which project you're working in.
+Save high-trust, user-approved memory to the persistent cross-session KI store. Information saved here will be available across ALL future sessions, regardless of which project you're working in.
 
 Usage:
 - key: A descriptive identifier for this knowledge (e.g., "user_prefers_tabs", "go_error_handling_pattern")
@@ -383,6 +383,11 @@ When to use:
 When NOT to use (use update_project_context instead):
 - Project-specific information (tech stack, build commands, architecture)
 - Information only relevant to the current project
+
+Trust boundary:
+- save_memory writes verified KI / long-term memory.
+- working_memory is automatic vector recall from conversation fragments and is lower trust.
+- save_knowledge is a deprecated compatibility alias for save_memory; new prompts should use save_memory.
 ```
 
 ### forge

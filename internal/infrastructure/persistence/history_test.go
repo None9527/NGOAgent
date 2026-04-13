@@ -57,6 +57,44 @@ func TestHistoryStore_SaveLoadUsesNormalizedMessages(t *testing.T) {
 	}
 }
 
+func TestHistoryStore_ToolResultCompletesNormalizedToolCall(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "history-tool-result.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	store := NewHistoryStore(db)
+	now := time.Now().UTC().Round(time.Second)
+
+	msgs := []HistoryMessage{
+		{
+			Role:      "assistant",
+			Content:   "I'll read it.",
+			ToolCalls: `[{"id":"call-read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]`,
+			CreatedAt: now,
+		},
+		{
+			Role:       "tool",
+			Content:    "module github.com/ngoclaw/ngoagent",
+			ToolCallID: "call-read",
+			CreatedAt:  now.Add(time.Second),
+		},
+	}
+	if err := store.SaveAll("session-tool-result", msgs); err != nil {
+		t.Fatalf("SaveAll: %v", err)
+	}
+
+	var toolCall MessageToolCallRecord
+	if err := db.First(&toolCall, "tool_call_id = ?", "call-read").Error; err != nil {
+		t.Fatalf("load normalized tool call: %v", err)
+	}
+	if toolCall.Status != "completed" {
+		t.Fatalf("expected completed tool call, got %q", toolCall.Status)
+	}
+	if toolCall.ResultJSON == "" {
+		t.Fatal("expected normalized tool result JSON")
+	}
+}
+
 func TestHistoryStore_LoadSession_UsesNormalizedTablesOnly(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "history-backfill.db"))
 	if err != nil {

@@ -215,6 +215,8 @@ var toolTierSearchKeywords = []string{
 var toolTierHeavyKeywords = []string{
 	"image", "resize", "media", "video", "cron", "schedule", "browser",
 	"git", "commit", "diff", "branch", "memory", "recall", "knowledge",
+	"remember", "preference",
+	"记住", "记得", "长期", "偏好", "以后", "记忆", "知识",
 	"clipboard", "paste", "copy",
 }
 

@@ -1,6 +1,6 @@
 {
-  "id": "app_get_history_prefers_resident",
-  "title": "get history prefers resident loop over persisted stale history",
+  "id": "app_get_history_prefers_persisted",
+  "title": "get history prefers persisted history over resident stale history",
   "category": "state_confusion",
   "layers": ["application"],
   "application": {
@@ -17,7 +17,7 @@
     "expect": {
       "history": {
         "count": 1,
-        "last_content": "resident history"
+        "last_content": "persisted history"
       }
     }
   }

@@ -50,6 +50,7 @@ func (knowledgeToolProvider) Name() string { return "knowledge" }
 
 func (knowledgeToolProvider) Register(in *toolAssemblyInput) assembledToolHandles {
 	in.Register(tool.NewSaveKnowledgeTool(in.kiStore, in.kiRetriever, in.cfg.Embedding.SimilarityThreshold))
+	in.Register(tool.NewSaveMemoryTool(in.kiStore, in.kiRetriever, in.cfg.Embedding.SimilarityThreshold))
 	in.Register(tool.NewRecallTool(in.kiRetriever, in.memStore, in.diaryStore))
 	in.Register(tool.NewSendMessageTool(in.brainDir))
 	in.Register(tool.NewTaskListTool(in.brainDir))

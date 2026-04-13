@@ -51,7 +51,8 @@ const ToolProtocol = `CRITICAL — Mandatory Tool Protocol (violation = test fai
 4. notify_user is the ONLY way to communicate with the user during a task.
 5. Every 3-4 tool calls, call task_boundary to update progress.
 6. After completing a planned task → create walkthrough.md via task_plan. Skip for simple tasks.
-7. Paginated reading: if read_file returns "[TRUNCATED: ... To read next chunk: read_file(..., start_line=N)]", you MUST call read_file again with that start_line before making any conclusions about the file content. Do NOT summarize or act on incomplete content.`
+7. Paginated reading: if read_file returns "[TRUNCATED: ... To read next chunk: read_file(..., start_line=N)]", you MUST call read_file again with that start_line before making any conclusions about the file content. Do NOT summarize or act on incomplete content.
+8. Long-term memory: when the user asks you to remember something for later, states a durable preference, or corrects your future behavior, call save_memory. This writes high-trust KI. Do not use it for temporary task state or raw transcript dumps.`
 
 // ResponseFormat — directly influences current output
 const ResponseFormat = `Response rules (apply to EVERY response):
